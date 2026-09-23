@@ -538,6 +538,11 @@ dev = [
 line-length = 88
 
 [tool.ruff.lint]
+# Explicit: this was ruff's built-in default rule set through 0.15. Ruff 0.16.0 widened
+# the default to 413 rules, which broke CI overnight with 6587 findings and zero source
+# changes. Do not delete this as boilerplate — without it, rule selection silently
+# inherits whatever default the installed ruff happens to ship.
+select = ["E4", "E7", "E9", "F"]
 ignore = [
     "E402",  # module-import-not-at-top-of-file (intentional lazy loading)
 ]

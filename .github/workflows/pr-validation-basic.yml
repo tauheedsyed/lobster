@@ -139,15 +139,33 @@ jobs:
         # Excludes: rate_limiter, content_access, scvi_embedding, gpu_detector,
         #           protein_structure_services, workspace_tool, error_handlers
         # Reason: Edge cases, algorithmic variance, external dependencies
+        #
+        # tests/unit/cli is selected by DIRECTORY, not by per-file allowlist: a
+        # hardcoded file list silently skips every test file a contributor adds,
+        # so the check goes green without ever running the new coverage.
+        # Each exclusion below is deliberate — do not drop one without checking:
+        #   test_go_tui_launcher_completions.py — needs a built Go binary, which
+        #     this job does not produce (it runs in ci-basic.yml's go-tui-verify).
+        #   test_vector_search_commands.py — stale test: it patches the deprecated
+        #     lobster.services.vector.service shim, but vector_search_commands.py
+        #     imports lobster.vector.service, so the patch never takes effect.
+        #   TestTTYGuard::test_non_tty_stdin_exits_with_error — passes alone, fails
+        #     only after tests/unit/cli/test_command_cmd_impl.py has run in the same
+        #     process (leaked global console breaks its capsys assertion).
         python -m pytest \
           tests/unit/config \
           tests/unit/core/backends \
           tests/unit/core/test_client.py \
+          tests/unit/core/test_client_interrupt.py \
           tests/unit/core/test_schemas.py \
           tests/unit/core/test_data_manager_v2.py \
+          tests/unit/cli \
           tests/unit/agents/test_agent_registry.py \
           tests/unit/agents/test_research_agent.py \
           tests/unit/agents/test_data_expert.py \
+          --ignore=tests/unit/cli/test_go_tui_launcher_completions.py \
+          --ignore=tests/unit/cli/test_vector_search_commands.py \
+          --deselect "tests/unit/cli/test_init_venv_safety.py::TestTTYGuard::test_non_tty_stdin_exits_with_error" \
           -m "not slow and not real_api" \
           --import-mode=importlib \
           --maxfail=5 \
