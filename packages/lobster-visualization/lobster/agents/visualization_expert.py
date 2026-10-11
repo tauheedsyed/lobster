@@ -42,6 +42,7 @@ from langgraph.prebuilt import create_react_agent
 from lobster.agents.visualization_state import VisualizationExpertState  # noqa: F401
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.visualization.visualization_service import (
     SingleCellVisualizationService,
@@ -49,6 +50,43 @@ from lobster.services.visualization.visualization_service import (
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _plot_ir(
+    tool_name: str, service_method: str, plot_kwargs: dict, description: str
+) -> AnalysisStep:
+    """IR that regenerates a figure by calling the same visualization service.
+
+    Plots change no data, so the step is exported (the notebook redraws the
+    figure) but not replayable (reproducing the result never needs it).
+    """
+    kwargs_template = "".join(
+        f"    {name}={{{{ plot_kwargs[{name!r}] | repr }}}},\n" for name in plot_kwargs
+    )
+    return AnalysisStep(
+        operation=f"lobster.visualization.{service_method}",
+        tool_name=tool_name,
+        description=description,
+        library="plotly",
+        code_template=(
+            "from lobster.services.visualization.visualization_service import (\n"
+            "    SingleCellVisualizationService,\n"
+            ")\n"
+            "\n"
+            f"fig = SingleCellVisualizationService().{service_method}(\n"
+            "    adata=adata,\n"
+            f"{kwargs_template}"
+            ")\n"
+            "fig.show()"
+        ),
+        imports=[],
+        parameters={"plot_kwargs": dict(plot_kwargs)},
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["fig"],
+        replayable=False,
+    )
+
 
 
 def visualization_expert(
@@ -182,12 +220,12 @@ def visualization_expert(
                     point_size = 2
 
             # Create plot using service
-            fig = visualization_service.create_umap_plot(
-                adata=adata,
-                color_by=color_by,
-                point_size=point_size,
-                title=title or f"UMAP - {color_by}",
-            )
+            plot_kwargs = {
+                "color_by": color_by,
+                "point_size": point_size,
+                "title": title or f"UMAP - {color_by}",
+            }
+            fig = visualization_service.create_umap_plot(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -234,7 +272,12 @@ def visualization_expert(
                     "plot_id": plot_id,
                 },
                 description=f"Created UMAP plot (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_umap_plot",
+                    "create_umap_plot",
+                    plot_kwargs,
+                    f"UMAP of '{modality_name}' coloured by {color_by}",
+                ),
                 agent=agent_name,
             )
 
@@ -323,9 +366,8 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 return "❌ No suitable QC metrics found in the data"
 
             # Create QC plots using service
-            fig = visualization_service.create_qc_plots(
-                adata=adata, title=f"QC Plots - {modality_name}"
-            )
+            plot_kwargs = {"title": f"QC Plots - {modality_name}"}
+            fig = visualization_service.create_qc_plots(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -371,7 +413,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created QC plots (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_qc_plots",
+                    "create_qc_plots",
+                    plot_kwargs,
+                    f"QC plots of '{modality_name}'",
+                ),
                 agent=agent_name,
             )
 
@@ -429,9 +476,8 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 )
 
             # Create violin plot using service
-            fig = visualization_service.create_violin_plot(
-                adata=adata, genes=available_genes, groupby=groupby
-            )
+            plot_kwargs = {"genes": available_genes, "groupby": groupby}
+            fig = visualization_service.create_violin_plot(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -480,7 +526,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created violin plot (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_violin_plot",
+                    "create_violin_plot",
+                    plot_kwargs,
+                    f"Violin plot of {len(available_genes)} genes in '{modality_name}'",
+                ),
                 agent=agent_name,
             )
 
@@ -531,13 +582,13 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 )
 
             # Create feature plot using service
-            fig = visualization_service.create_feature_plot(
-                adata=adata,
-                genes=available_genes,
-                use_raw=use_raw,
-                ncols=ncols,
-                point_size=point_size,
-            )
+            plot_kwargs = {
+                "genes": available_genes,
+                "use_raw": use_raw,
+                "ncols": ncols,
+                "point_size": point_size,
+            }
+            fig = visualization_service.create_feature_plot(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -588,7 +639,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created feature plot (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_feature_plot",
+                    "create_feature_plot",
+                    plot_kwargs,
+                    f"Feature plot of {len(available_genes)} genes in '{modality_name}'",
+                ),
                 agent=agent_name,
             )
 
@@ -650,13 +706,13 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 )
 
             # Create dot plot using service
-            fig = visualization_service.create_dot_plot(
-                adata=adata,
-                genes=available_genes,
-                groupby=groupby,
-                use_raw=use_raw,
-                standard_scale=standard_scale,
-            )
+            plot_kwargs = {
+                "genes": available_genes,
+                "groupby": groupby,
+                "use_raw": use_raw,
+                "standard_scale": standard_scale,
+            }
+            fig = visualization_service.create_dot_plot(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -709,7 +765,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created dot plot (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_dot_plot",
+                    "create_dot_plot",
+                    plot_kwargs,
+                    f"Dot plot of {len(available_genes)} genes by {groupby} in '{modality_name}'",
+                ),
                 agent=agent_name,
             )
 
@@ -770,14 +831,14 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
             adata = data_manager.get_modality(modality_name)
 
             # Create heatmap using service
-            fig = visualization_service.create_heatmap(
-                adata=adata,
-                genes=genes,
-                groupby=groupby,
-                use_raw=use_raw,
-                n_top_genes=n_top_genes,
-                standard_scale=standard_scale,
-            )
+            plot_kwargs = {
+                "genes": genes,
+                "groupby": groupby,
+                "use_raw": use_raw,
+                "n_top_genes": n_top_genes,
+                "standard_scale": standard_scale,
+            }
+            fig = visualization_service.create_heatmap(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -829,7 +890,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created heatmap (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_heatmap",
+                    "create_heatmap",
+                    plot_kwargs,
+                    f"Expression heatmap by {groupby} in '{modality_name}'",
+                ),
                 agent=agent_name,
             )
 
@@ -869,7 +935,8 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
             adata = data_manager.get_modality(modality_name)
 
             # Create elbow plot using service
-            fig = visualization_service.create_elbow_plot(adata=adata, n_pcs=n_pcs)
+            plot_kwargs = {"n_pcs": n_pcs}
+            fig = visualization_service.create_elbow_plot(adata=adata, **plot_kwargs)
 
             # Generate unique plot ID
             plot_id = str(uuid.uuid4())
@@ -915,7 +982,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created elbow plot (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_elbow_plot",
+                    "create_elbow_plot",
+                    plot_kwargs,
+                    f"PCA elbow plot of '{modality_name}'",
+                ),
                 agent=agent_name,
             )
 
@@ -970,11 +1042,13 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
             adata = data_manager.get_modality(modality_name)
 
             # Create composition plot using service
+            plot_kwargs = {
+                "cluster_col": cluster_col,
+                "sample_col": sample_col,
+                "normalize": normalize,
+            }
             fig = visualization_service.create_cluster_composition_plot(
-                adata=adata,
-                cluster_col=cluster_col,
-                sample_col=sample_col,
-                normalize=normalize,
+                adata=adata, **plot_kwargs
             )
 
             # Generate unique plot ID
@@ -1028,7 +1102,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created cluster composition plot (ID: {plot_id})",
-                ir=None,
+                ir=_plot_ir(
+                    "create_cluster_composition_plot",
+                    "create_cluster_composition_plot",
+                    plot_kwargs,
+                    f"Cluster composition of '{modality_name}' by {sample_col}",
+                ),
                 agent=agent_name,
             )
 
@@ -1179,9 +1258,6 @@ Your responses are read by the supervisor AI, not end users. Optimize for machin
 
 Today's date: {date.today()}
 """.strip()
-
-    # Import state from package-local module
-    from lobster.agents.visualization_state import VisualizationExpertState
 
     return create_react_agent(
         model=llm,
