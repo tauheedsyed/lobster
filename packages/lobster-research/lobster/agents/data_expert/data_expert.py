@@ -322,11 +322,27 @@ Dataset: {entry.dataset_id}
             orchestrator = DownloadOrchestrator(data_manager)
 
             try:
-                modality_name, stats = orchestrator.execute_download(
-                    entry_id, strategy_override_dict
+                # return_ir: the orchestrator skips its own provenance entry and
+                # hands back the download IR, so the download is logged once here.
+                modality_name, stats, download_ir = orchestrator.execute_download(
+                    entry_id, strategy_override_dict, return_ir=True
                 )
 
                 result_adata = data_manager.get_modality(modality_name)
+
+                # Provenance: logged as soon as the modality is stored.
+                data_manager.log_tool_usage(
+                    tool_name="execute_download_from_queue",
+                    parameters={
+                        "entry_id": entry_id,
+                        "database": entry.database,
+                        "dataset_id": entry.dataset_id,
+                        "strategy_override": strategy_override_dict or {},
+                    },
+                    description=f"Downloaded {entry.dataset_id} → {modality_name}",
+                    ir=download_ir,
+                    agent=agent_name,
+                )
 
                 logger.info(f"Download complete: {entry.dataset_id} → {modality_name}")
 
@@ -419,13 +435,6 @@ Concatenation: {concatenation_used}
 You can now analyze this dataset using the appropriate analysis tools.
 """
 
-                data_manager.log_tool_usage(
-                    tool_name="execute_download_from_queue",
-                    parameters={"entry_id": entry_id, "dataset_id": entry.dataset_id},
-                    description=f"Downloaded {entry.dataset_id} → {modality_name}",
-                    ir=None,
-                    agent=agent_name,
-                )
                 return response
 
             except Exception as download_error:
