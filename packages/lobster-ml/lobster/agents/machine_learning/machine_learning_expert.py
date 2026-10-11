@@ -24,11 +24,81 @@ from lobster.agents.machine_learning.prompts import create_ml_expert_prompt
 from lobster.agents.machine_learning.state import MachineLearningExpertState
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.ml.ml_preparation_service import MLPreparationService
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _ml_split_ir(
+    test_size: float,
+    validation_size: float,
+    stratify_by: Optional[str],
+    random_state: int,
+) -> AnalysisStep:
+    """IR for create_ml_splits: the same seeded scikit-learn splits.
+
+    With the recorded ``random_state`` the notebook assigns every sample to the
+    same train/test/validation set as the tool did.
+    """
+    return AnalysisStep(
+        operation="sklearn.model_selection.train_test_split",
+        tool_name="create_ml_splits",
+        description=(
+            f"Train/test/validation split (test={test_size}, val={validation_size}, "
+            f"stratify={stratify_by}, seed={random_state})"
+        ),
+        library="sklearn",
+        code_template=(
+            "import numpy as np\n"
+            "from sklearn.model_selection import train_test_split\n"
+            "\n"
+            "indices = np.arange(adata.n_obs)\n"
+            "{% if stratify_by %}"
+            "stratify_labels = adata.obs[{{ stratify_by | repr }}].values\n"
+            "{% else %}"
+            "stratify_labels = None\n"
+            "{% endif %}"
+            "train_val_idx, test_idx = train_test_split(\n"
+            "    indices,\n"
+            "    test_size={{ test_size | repr }},\n"
+            "    random_state={{ random_state | repr }},\n"
+            "    stratify=stratify_labels,\n"
+            ")\n"
+            "{% if validation_size > 0 %}"
+            "train_idx, val_idx = train_test_split(\n"
+            "    train_val_idx,\n"
+            "    test_size={{ validation_size | repr }},\n"
+            "    random_state={{ random_state | repr }},\n"
+            "    stratify=(\n"
+            "        stratify_labels[train_val_idx] if stratify_labels is not None else None\n"
+            "    ),\n"
+            ")\n"
+            "{% else %}"
+            "train_idx, val_idx = train_val_idx, np.array([], dtype=int)\n"
+            "{% endif %}"
+            "adata.obs['ml_split'] = 'unassigned'\n"
+            "adata.obs.loc[adata.obs_names[train_idx], 'ml_split'] = 'train'\n"
+            "adata.obs.loc[adata.obs_names[test_idx], 'ml_split'] = 'test'\n"
+            "if len(val_idx) > 0:\n"
+            "    adata.obs.loc[adata.obs_names[val_idx], 'ml_split'] = 'validation'\n"
+            "adata_train = adata[train_idx, :].copy()\n"
+            "adata_test = adata[test_idx, :].copy()\n"
+            "adata_validation = adata[val_idx, :].copy() if len(val_idx) > 0 else None"
+        ),
+        imports=[],
+        parameters={
+            "test_size": test_size,
+            "validation_size": validation_size,
+            "stratify_by": stratify_by,
+            "random_state": random_state,
+        },
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["adata", "adata_train", "adata_test", "adata_validation"],
+    )
 
 
 class MachineLearningError(Exception):
@@ -89,6 +159,9 @@ def machine_learning_expert(
 
     # Store ML-specific results and metadata
     ml_results = {"summary": "", "details": {}}
+
+    # Stateless service behind prepare_ml_features (returns provenance IR)
+    ml_prep_service = MLPreparationService()
 
     # -------------------------
     # DATA STATUS AND INSPECTION TOOLS
@@ -246,133 +319,14 @@ def machine_learning_expert(
             adata = data_manager.get_modality(modality_name)
             logger.info(f"Preparing ML features from '{modality_name}': {adata.shape}")
 
-            # Copy to avoid modifying original
-            import anndata
-
-            adata_ml = adata.copy()
-
-            # Feature selection
-            if feature_selection == "highly_variable":
-                try:
-                    import scanpy as sc
-
-                    if "highly_variable" not in adata_ml.var.columns:
-                        sc.pp.highly_variable_genes(adata_ml, n_top_genes=n_features)
-                    adata_ml = adata_ml[:, adata_ml.var.highly_variable]
-                except ImportError:
-                    # Fallback: variance-based selection
-                    variances = np.var(adata_ml.X, axis=0)
-                    if hasattr(variances, "A1"):
-                        variances = variances.A1
-                    top_var_indices = np.argsort(variances)[-n_features:]
-                    adata_ml = adata_ml[:, top_var_indices]
-
-            elif feature_selection == "pca":
-                try:
-                    import scanpy as sc
-
-                    if "X_pca" not in adata_ml.obsm:
-                        sc.pp.pca(
-                            adata_ml, n_comps=min(n_features, adata_ml.shape[1] - 1)
-                        )
-                    pca_data = adata_ml.obsm["X_pca"][:, :n_features]
-                    adata_ml = anndata.AnnData(
-                        X=pca_data,
-                        obs=adata_ml.obs.copy(),
-                        var=pd.DataFrame(
-                            index=[f"PC{i + 1}" for i in range(pca_data.shape[1])]
-                        ),
-                    )
-                except ImportError:
-                    logger.warning(
-                        "Scanpy not available, using variance-based selection instead of PCA"
-                    )
-                    variances = np.var(adata_ml.X, axis=0)
-                    if hasattr(variances, "A1"):
-                        variances = variances.A1
-                    top_var_indices = np.argsort(variances)[-n_features:]
-                    adata_ml = adata_ml[:, top_var_indices]
-
-            elif feature_selection == "marker_genes":
-                if "rank_genes_groups" in adata_ml.uns:
-                    marker_genes = []
-                    groups_key = adata_ml.uns["rank_genes_groups"]["params"]["groupby"]
-                    for group in adata_ml.obs[groups_key].unique():
-                        genes = adata_ml.uns["rank_genes_groups"]["names"][group][
-                            : n_features // 10
-                        ]
-                        marker_genes.extend(genes)
-                    marker_genes = list(set(marker_genes))[:n_features]
-                    available_markers = [
-                        g for g in marker_genes if g in adata_ml.var_names
-                    ]
-                    if available_markers:
-                        adata_ml = adata_ml[:, available_markers]
-                    else:
-                        logger.warning(
-                            "No marker genes found, using highly variable genes"
-                        )
-                else:
-                    logger.warning("No marker genes found, using highly variable genes")
-
-            # Handle zeros
-            if handle_zeros == "remove":
-                from scipy.sparse import issparse
-
-                if hasattr(adata_ml.X, "nnz"):
-                    X_csc = adata_ml.X.tocsc() if issparse(adata_ml.X) else adata_ml.X
-                    non_zeros_per_col = np.diff(X_csc.indptr)
-                    zero_prop = 1.0 - (non_zeros_per_col / adata_ml.shape[0])
-                else:
-                    zero_prop = np.mean(adata_ml.X == 0, axis=0)
-                    if hasattr(zero_prop, "A1"):
-                        zero_prop = zero_prop.A1
-                keep_features = zero_prop < 0.9
-                adata_ml = adata_ml[:, keep_features]
-
-            elif handle_zeros == "impute":
-                if hasattr(adata_ml.X, "toarray"):
-                    X_dense = adata_ml.X.toarray()
-                else:
-                    X_dense = adata_ml.X.copy()
-
-                for j in range(X_dense.shape[1]):
-                    col = X_dense[:, j]
-                    if np.any(col == 0):
-                        non_zero_mean = (
-                            np.mean(col[col != 0]) if np.any(col != 0) else 0
-                        )
-                        col[col == 0] = non_zero_mean
-                        X_dense[:, j] = col
-
-                adata_ml.X = X_dense
-
-            # Scale features
-            if scale:
-                try:
-                    import scanpy as sc
-
-                    sc.pp.scale(adata_ml, zero_center=True)
-                except ImportError:
-                    if hasattr(adata_ml.X, "toarray"):
-                        X_dense = adata_ml.X.toarray()
-                    else:
-                        X_dense = adata_ml.X.copy()
-
-                    X_dense = (X_dense - np.mean(X_dense, axis=0)) / (
-                        np.std(X_dense, axis=0) + 1e-8
-                    )
-                    adata_ml.X = X_dense
-
-            # Add ML metadata
-            adata_ml.uns["ml_preprocessing"] = {
-                "source_modality": modality_name,
-                "feature_selection": feature_selection,
-                "n_features_selected": adata_ml.shape[1],
-                "scaled": scale,
-                "zero_handling": handle_zeros,
-                "original_shape": adata.shape,
-            }
+            adata_ml, _, ir = ml_prep_service.select_ml_features(
+                adata,
+                modality_name=modality_name,
+                feature_selection=feature_selection,
+                n_features=n_features,
+                scale=scale,
+                handle_zeros=handle_zeros,
+            )
 
             # Save as new modality
             ml_modality_name = f"{modality_name}_ml_features"
@@ -398,7 +352,7 @@ def machine_learning_expert(
                     "handle_zeros": handle_zeros,
                 },
                 description=f"Prepared ML features: {adata_ml.shape}",
-                ir=None,
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -573,7 +527,7 @@ def machine_learning_expert(
                     "random_state": random_state,
                 },
                 description=f"Created ML splits: train={len(train_idx)}, test={len(test_idx)}, val={len(val_idx)}",
-                ir=None,
+                ir=_ml_split_ir(test_size, validation_size, stratify_by, random_state),
                 agent=agent_name,
             )
 
