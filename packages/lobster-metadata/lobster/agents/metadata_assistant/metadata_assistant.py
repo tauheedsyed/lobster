@@ -120,6 +120,82 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+# Sample fields written by the disease-enrichment phases.
+_DISEASE_FIELDS = (
+    "disease",
+    "disease_original",
+    "disease_source",
+    "disease_confidence",
+    "disease_match_type",
+    "disease_evidence",
+    "enrichment_timestamp",
+)
+
+
+def _plain_value(value: Any) -> Any:
+    """Return a plain-Python version of numpy scalars for IR literals."""
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _disease_enrichment_ir(
+    workspace_key: str,
+    enrichment_mode: str,
+    before: List[Dict[str, Any]],
+    samples: List[Dict[str, Any]],
+    dry_run: bool,
+) -> AnalysisStep:
+    """IR that re-applies the disease labels this enrichment wrote.
+
+    The labels come from column re-scans, LLM extraction and manual mappings.
+    LLM output is not deterministic, so the IR records each changed sample's
+    new disease fields and re-applies them, which reproduces the result exactly.
+    """
+    updates = []
+    for index, (old, sample) in enumerate(zip(before, samples)):
+        changed = {
+            field: _plain_value(sample[field])
+            for field in _DISEASE_FIELDS
+            if field in sample and sample[field] != old.get(field)
+        }
+        if changed:
+            updates.append({"index": index, "fields": changed})
+    return AnalysisStep(
+        operation="lobster.metadata.enrich_samples_with_disease",
+        tool_name="enrich_samples_with_disease",
+        description=(
+            f"Disease enrichment ({enrichment_mode}) of '{workspace_key}': "
+            f"{len(updates)} samples updated"
+        ),
+        library="lobster",
+        code_template=(
+            "# `samples`: the sample records stored under metadata key\n"
+            "# {{ workspace_key | repr }} (metadata_store[key]['samples']).\n"
+            "# Labels came from {{ enrichment_mode }} enrichment; LLM extraction is not\n"
+            "# deterministic, so the recorded labels are re-applied here.\n"
+            "disease_updates = {{ updates | repr }}\n"
+            "for update in disease_updates:\n"
+            "    samples[update['index']].update(update['fields'])"
+        ),
+        imports=[],
+        parameters={
+            "workspace_key": workspace_key,
+            "enrichment_mode": enrichment_mode,
+            "updates": updates,
+        },
+        parameter_schema={},
+        input_entities=["samples"],
+        output_entities=["samples"],
+        execution_context={"dry_run": dry_run},
+        # A dry run changes nothing, so there is nothing to replay.
+        replayable=not dry_run,
+    )
+
+
 # =========================================================================
 # Helper: Log Suppression for Progress UI
 # =========================================================================
@@ -383,8 +459,9 @@ def metadata_assistant(
             logger.error(f"Unexpected mapping error: {e}", exc_info=True)
             return f"❌ Unexpected error during mapping: {str(e)}"
 
-    map_samples_by_id.metadata = {"categories": ["ANNOTATE"], "provenance": True}
-    map_samples_by_id.tags = ["ANNOTATE"]
+    # Read-only: builds a mapping report and stores nothing, so it is a UTILITY.
+    map_samples_by_id.metadata = {"categories": ["UTILITY"], "provenance": False}
+    map_samples_by_id.tags = ["UTILITY"]
 
     # =========================================================================
     # Tool 2: Read Sample Metadata
@@ -2712,6 +2789,9 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
 
         # Make a copy of samples for dry_run to avoid modifying original
         working_samples = [s.copy() for s in samples] if dry_run else samples
+        disease_before = [
+            {field: s.get(field) for field in _DISEASE_FIELDS} for s in working_samples
+        ]
 
         # Phase 1: Column re-scan (always run unless manual-only mode)
         if enrichment_mode in ["column_scan", "hybrid"]:
@@ -2845,7 +2925,9 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
                 "dry_run": dry_run,
             },
             description=f"Disease enrichment: {total_enriched} samples enriched, {final_coverage:.1f}% coverage",
-            ir=None,
+            ir=_disease_enrichment_ir(
+                workspace_key, enrichment_mode, disease_before, working_samples, dry_run
+            ),
             agent=agent_name,
         )
 
