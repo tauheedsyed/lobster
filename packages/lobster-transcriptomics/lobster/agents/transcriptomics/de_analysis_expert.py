@@ -47,6 +47,7 @@ from lobster.core import (
     InsufficientCellsError,
     PseudobulkError,
 )
+from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.analysis.bulk_rnaseq_service import (
     BulkRNASeqError,
@@ -59,6 +60,267 @@ from lobster.services.analysis.pseudobulk_service import PseudobulkService
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# -------------------------
+# PROVENANCE IR BUILDERS
+# -------------------------
+# The formula-based DE tools keep their logic in BulkRNASeqService /
+# DifferentialFormulaService. Each IR below replays the same service calls on a
+# notebook's ``adata`` so an exported notebook reproduces the tool's result.
+
+_BULK_SERVICE_SETUP = (
+    "from lobster.services.analysis.bulk_rnaseq_service import BulkRNASeqService\n"
+    "\n"
+    "bulk_service = BulkRNASeqService(results_dir='bulk_results')\n"
+)
+
+
+def _plain(value: Any) -> Any:
+    """Convert numpy scalars/containers into plain Python for IR literals."""
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_plain(v) for v in value]
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _de_design_ir(
+    formula: str, contrast: List[str], reference_condition: Optional[str]
+) -> AnalysisStep:
+    """IR for prepare_de_design: validate the design and store it in uns."""
+    return AnalysisStep(
+        operation="lobster.prepare_de_design",
+        tool_name="prepare_de_design",
+        description=f"Validate and store DE design {formula} for contrast {contrast}",
+        library="lobster",
+        code_template=(
+            _BULK_SERVICE_SETUP
+            + "design_validation = bulk_service.validate_experimental_design(\n"
+            "    metadata=adata.obs, formula={{ formula | repr }}, min_replicates=3\n"
+            ")\n"
+            "if not design_validation['valid']:\n"
+            "    raise ValueError(\n"
+            "        'Invalid experimental design: '\n"
+            "        + '; '.join(design_validation['errors'])\n"
+            "    )\n"
+            "design_result = bulk_service.create_formula_design(\n"
+            "    metadata=adata.obs,\n"
+            "    condition_col={{ contrast[0] | repr }},\n"
+            "    reference_condition={{ reference_condition | repr }},\n"
+            ")\n"
+            "adata.uns['formula_design'] = {\n"
+            "    'formula': {{ formula | repr }},\n"
+            "    'contrast': {{ contrast | repr }},\n"
+            "    'design_matrix_info': design_result,\n"
+            "    'validation_results': design_validation,\n"
+            "}"
+        ),
+        imports=[],
+        parameters={
+            "formula": formula,
+            "contrast": list(contrast),
+            "reference_condition": reference_condition,
+        },
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["adata"],
+    )
+
+
+def _design_validation_ir(formula: str) -> AnalysisStep:
+    """IR for validate_experimental_design: a read-only check, not replayed."""
+    return AnalysisStep(
+        operation="lobster.validate_experimental_design",
+        tool_name="validate_experimental_design",
+        description=f"Validate experimental design {formula} (min 3 replicates)",
+        library="lobster",
+        code_template=(
+            "from lobster.services.analysis.differential_formula_service import (\n"
+            "    DifferentialFormulaService,\n"
+            ")\n"
+            "\n"
+            "design_check = DifferentialFormulaService().validate_experimental_design(\n"
+            "    adata.obs, {{ formula | repr }}, min_replicates=3\n"
+            ")\n"
+            "print('Design valid:', design_check['valid'])\n"
+            "for message in design_check.get('errors', []) + design_check.get('warnings', []):\n"
+            "    print('-', message)"
+        ),
+        imports=[],
+        parameters={"formula": formula},
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=[],
+        replayable=False,
+    )
+
+
+def _formula_de_ir(
+    formula: str,
+    contrast: List[str],
+    reference_levels: Optional[Dict[str, str]],
+    alpha: float,
+    lfc_threshold: float,
+) -> AnalysisStep:
+    """IR for run_de_with_formula: design checks, pyDESeq2 run, results in uns."""
+    contrast = list(contrast)
+    reference_condition = (
+        reference_levels.get(contrast[0]) if reference_levels else None
+    )
+    results_key = f"de_results_formula_{contrast[0]}_{contrast[1]}_vs_{contrast[2]}"
+    return AnalysisStep(
+        operation="pydeseq2.formula_differential_expression",
+        tool_name="run_de_with_formula",
+        description=f"pyDESeq2 DE with formula {formula}: {contrast[1]} vs {contrast[2]}",
+        library="pydeseq2",
+        code_template=(
+            _BULK_SERVICE_SETUP
+            + "design_validation = bulk_service.validate_experimental_design(\n"
+            "    metadata=adata.obs, formula={{ formula | repr }}, min_replicates=3\n"
+            ")\n"
+            "if not design_validation['valid']:\n"
+            "    raise ValueError(\n"
+            "        'Invalid experimental design: '\n"
+            "        + '; '.join(design_validation['errors'])\n"
+            "    )\n"
+            "design_result = bulk_service.create_formula_design(\n"
+            "    metadata=adata.obs,\n"
+            "    condition_col={{ contrast[0] | repr }},\n"
+            "    reference_condition={{ reference_condition | repr }},\n"
+            ")\n"
+            "adata.uns['de_formula_design'] = {\n"
+            "    'formula': {{ formula | repr }},\n"
+            "    'contrast': {{ contrast | repr }},\n"
+            "    'design_matrix_info': design_result,\n"
+            "    'validation_results': design_validation,\n"
+            "    'reference_levels': {{ reference_levels | repr }},\n"
+            "}\n"
+            "results_df, de_stats = bulk_service.run_pydeseq2_from_pseudobulk(\n"
+            "    pseudobulk_adata=adata,\n"
+            "    formula={{ formula | repr }},\n"
+            "    contrast={{ contrast | repr }},\n"
+            "    alpha={{ alpha | repr }},\n"
+            "    shrink_lfc=True,\n"
+            "    n_cpus=1,\n"
+            ")\n"
+            "adata.uns[{{ results_key | repr }}] = {\n"
+            "    'results_df': results_df,\n"
+            "    'analysis_stats': de_stats,\n"
+            "    'parameters': {\n"
+            "        'formula': {{ formula | repr }},\n"
+            "        'contrast': {{ contrast | repr }},\n"
+            "        'alpha': {{ alpha | repr }},\n"
+            "        'lfc_threshold': {{ lfc_threshold | repr }},\n"
+            "        'reference_levels': {{ reference_levels | repr }},\n"
+            "    },\n"
+            "}"
+        ),
+        imports=[],
+        parameters={
+            "formula": formula,
+            "contrast": contrast,
+            "reference_levels": reference_levels,
+            "reference_condition": reference_condition,
+            "alpha": alpha,
+            "lfc_threshold": lfc_threshold,
+            "results_key": results_key,
+        },
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["adata", "results_df"],
+    )
+
+
+def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> AnalysisStep:
+    """IR for iterate_de_analysis: append the iteration record to uns.
+
+    The DE run itself is recorded separately by run_de_with_formula's IR; this
+    step restores the iteration bookkeeping exactly as recorded.
+    """
+    return AnalysisStep(
+        operation="lobster.record_de_iteration",
+        tool_name="iterate_de_analysis",
+        description=f"Record DE iteration '{iteration_info.get('name')}'",
+        library="lobster",
+        code_template=(
+            "if 'de_iterations' not in adata.uns:\n"
+            "    adata.uns['de_iterations'] = {'iterations': [], 'current_iteration': 0}\n"
+            "adata.uns['de_iterations']['iterations'].append({{ iteration_info | repr }})\n"
+            "adata.uns['de_iterations']['current_iteration'] = {{ current_iter | repr }}"
+        ),
+        imports=[],
+        parameters={
+            "iteration_info": _plain(iteration_info),
+            "current_iter": int(current_iter),
+        },
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["adata"],
+    )
+
+
+def _iteration_comparison_ir(
+    iteration_1: str, iteration_2: str, save_comparison: bool
+) -> AnalysisStep:
+    """IR for compare_de_iterations: recompute the comparison from stored results."""
+    return AnalysisStep(
+        operation="lobster.compare_de_iterations",
+        tool_name="compare_de_iterations",
+        description=f"Compare DE iterations '{iteration_1}' and '{iteration_2}'",
+        library="pandas",
+        code_template=(
+            "de_iterations = adata.uns['de_iterations']['iterations']\n"
+            "iter1_info = next(i for i in de_iterations if i['name'] == {{ iteration_1 | repr }})\n"
+            "iter2_info = next(i for i in de_iterations if i['name'] == {{ iteration_2 | repr }})\n"
+            "results1 = adata.uns[f\"de_results_formula_{iter1_info['contrast_name']}\"]['results_df']\n"
+            "results2 = adata.uns[f\"de_results_formula_{iter2_info['contrast_name']}\"]['results_df']\n"
+            "sig1 = set(results1[results1['padj'] < 0.05].index)\n"
+            "sig2 = set(results2[results2['padj'] < 0.05].index)\n"
+            "overlap, unique1, unique2 = sig1 & sig2, sig1 - sig2, sig2 - sig1\n"
+            "correlation = None\n"
+            "if len(overlap) > 3:\n"
+            "    overlap_genes = list(overlap)\n"
+            "    correlation = results1.loc[overlap_genes, 'log2FoldChange'].corr(\n"
+            "        results2.loc[overlap_genes, 'log2FoldChange']\n"
+            "    )\n"
+            "overlap_percent = len(overlap) / max(len(sig1), len(sig2)) * 100\n"
+            "print(f'Overlap: {len(overlap)} genes ({overlap_percent:.1f}%), correlation: {correlation}')\n"
+            "{% if save_comparison %}"
+            "adata.uns.setdefault('iteration_comparisons', {})[\n"
+            "    {{ ('iteration_comparison_' ~ iteration_1 ~ '_vs_' ~ iteration_2) | repr }}\n"
+            "] = {\n"
+            "    'iteration_1': iter1_info,\n"
+            "    'iteration_2': iter2_info,\n"
+            "    'overlap_genes': list(overlap),\n"
+            "    'unique_to_1': list(unique1),\n"
+            "    'unique_to_2': list(unique2),\n"
+            "    'correlation': correlation,\n"
+            "    'summary_stats': {\n"
+            "        'n_sig_1': len(sig1),\n"
+            "        'n_sig_2': len(sig2),\n"
+            "        'n_overlap': len(overlap),\n"
+            "        'overlap_percent': overlap_percent,\n"
+            "    },\n"
+            "}\n"
+            "{% endif %}"
+        ),
+        imports=[],
+        parameters={
+            "iteration_1": iteration_1,
+            "iteration_2": iteration_2,
+            "save_comparison": save_comparison,
+        },
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["adata"] if save_comparison else [],
+        replayable=save_comparison,
+    )
 
 
 class DEAnalysisError(Exception):
@@ -439,6 +701,7 @@ def de_analysis_expert(
                     "contrast": contrast,
                 },
                 description=f"Prepared DE design for {adata.n_obs} pseudobulk samples",
+                ir=_de_design_ir(formula, contrast, reference_condition),
                 agent=agent_name,
             )
 
@@ -897,7 +1160,7 @@ def de_analysis_expert(
                 tool_name="validate_experimental_design",
                 parameters={"modality_name": modality_name, "formula": formula},
                 description=f"Validated experimental design: {'valid' if validation_result['valid'] else 'invalid'}",
-                ir=None,
+                ir=_design_validation_ir(formula),
                 agent=agent_name,
             )
 
@@ -1458,7 +1721,9 @@ def de_analysis_expert(
                     "lfc_threshold": lfc_threshold,
                 },
                 description=f"Formula-based DE analysis: {analysis_stats['n_significant_genes']} significant genes",
-                ir=None,
+                ir=_formula_de_ir(
+                    formula, contrast, reference_levels, alpha, lfc_threshold
+                ),
                 agent=agent_name,
             )
 
@@ -1540,15 +1805,19 @@ def de_analysis_expert(
             )
 
             # Run the analysis with new parameters
-            run_result = run_de_with_formula(
-                pseudobulk_modality=pseudobulk_modality,
-                formula=new_formula,
-                contrast=new_contrast,
-                alpha=0.05,
-                lfc_threshold=(
-                    filter_criteria.get("min_lfc", 0.0) if filter_criteria else 0.0
-                ),
-                save_results=False,
+            # run_de_with_formula is a LangChain tool object, so it must be
+            # invoked rather than called. It logs its own provenance.
+            run_result = run_de_with_formula.invoke(
+                {
+                    "pseudobulk_modality": pseudobulk_modality,
+                    "formula": new_formula,
+                    "contrast": new_contrast,
+                    "alpha": 0.05,
+                    "lfc_threshold": (
+                        filter_criteria.get("min_lfc", 0.0) if filter_criteria else 0.0
+                    ),
+                    "save_results": False,
+                }
             )
 
             if "Error" in run_result:
@@ -1660,7 +1929,7 @@ def de_analysis_expert(
                     "compare_to_previous": compare_to_previous,
                 },
                 description=f"DE iteration {current_iter}: {current_stats['n_significant_genes']} significant genes",
-                ir=None,
+                ir=_iteration_record_ir(iteration_info, current_iter),
                 agent=agent_name,
             )
 
@@ -1880,7 +2149,9 @@ def de_analysis_expert(
                     "show_unique": show_unique,
                 },
                 description=f"Compared iterations: {len(overlap)} overlapping, {len(unique1)}+{len(unique2)} unique genes",
-                ir=None,
+                ir=_iteration_comparison_ir(
+                    iter1_info["name"], iter2_info["name"], save_comparison
+                ),
                 agent=agent_name,
             )
 
