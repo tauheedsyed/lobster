@@ -28,11 +28,13 @@ def create_peptide_tools(
     """
     from lobster.services.peptidomics.peptide_activity_service import PeptideActivityService
     from lobster.services.peptidomics.peptide_digestion_service import PeptideDigestionService
+    from lobster.services.peptidomics.peptide_library_service import PeptideLibraryService
     from lobster.services.peptidomics.peptide_property_service import PeptidePropertyService
 
     property_service = PeptidePropertyService()
     activity_service = PeptideActivityService()
     digestion_service = PeptideDigestionService()
+    library_service = PeptideLibraryService()
 
     # =========================================================================
     # TOOL 1: import_peptide_sequences
@@ -51,10 +53,6 @@ def create_peptide_tools(
             modality_name: Name for the peptide modality
             format: File format — "fasta", "csv", "tsv", or "auto"
         """
-        import anndata as ad
-        import numpy as np
-        import pandas as pd
-
         from lobster.tools.filesystem_tools import _resolve_safe_path
 
         if workspace_path and not Path(file_path).is_absolute():
@@ -67,99 +65,28 @@ def create_peptide_tools(
         if not resolved.exists():
             return f"File not found: {resolved}"
 
-        content = resolved.read_text()
-        ext = resolved.suffix.lower()
-
-        # Auto-detect format
-        if format == "auto":
-            if ext in (".fa", ".fasta", ".faa"):
-                format = "fasta"
-            elif ext == ".tsv" or "\t" in content.split("\n")[0]:
-                format = "tsv"
-            else:
-                format = "csv"
-
-        sequences = []
-        names = []
-
-        if format == "fasta":
-            current_name = ""
-            current_seq = []
-            for line in content.strip().split("\n"):
-                if line.startswith(">"):
-                    if current_seq:
-                        sequences.append("".join(current_seq))
-                        names.append(current_name)
-                    current_name = line[1:].strip().split()[0]
-                    current_seq = []
-                else:
-                    current_seq.append(line.strip())
-            if current_seq:
-                sequences.append("".join(current_seq))
-                names.append(current_name)
-        else:
-            sep = "\t" if format == "tsv" else ","
-            df = pd.read_csv(resolved, sep=sep)
-            # Find sequence column
-            seq_col = None
-            for col in df.columns:
-                if col.lower() in ("sequence", "seq", "peptide", "peptide_sequence"):
-                    seq_col = col
-                    break
-            if seq_col is None:
-                seq_col = df.columns[0]
-            sequences = df[seq_col].astype(str).tolist()
-
-            # Find name column
-            name_col = None
-            for col in df.columns:
-                if col.lower() in ("name", "id", "accession", "peptide_id"):
-                    name_col = col
-                    break
-            names = df[name_col].astype(str).tolist() if name_col else [f"pep_{i}" for i in range(len(sequences))]
-
-        if not sequences:
-            return "No sequences found in file"
-
-        # Validate sequences
-        from lobster.agents.proteomics.peptide_config import STANDARD_AA
-
-        valid_seqs = []
-        valid_names = []
-        invalid_count = 0
-        for name, seq in zip(names, sequences):
-            clean = "".join(c for c in seq.upper() if c.isalpha())
-            if clean and all(aa in STANDARD_AA for aa in clean) and 2 <= len(clean) <= 100:
-                valid_seqs.append(clean)
-                valid_names.append(name)
-            else:
-                invalid_count += 1
-
-        obs = pd.DataFrame({
-            "sequence": valid_seqs,
-            "length": [len(s) for s in valid_seqs],
-            "source_file": str(resolved.name),
-        }, index=valid_names)
-
-        adata = ad.AnnData(obs=obs)
+        try:
+            adata, stats, ir = library_service.import_sequences(str(resolved), format=format)
+        except ValueError as e:
+            return str(e)
 
         data_manager.store_modality(
             name=modality_name,
             adata=adata,
-            step_summary=f"Imported {len(valid_seqs)} peptide sequences from {resolved.name}",
+            step_summary=f"Imported {stats['n_sequences']} peptide sequences from {resolved.name}",
         )
 
         data_manager.log_tool_usage(
             tool_name="import_peptide_sequences",
-            parameters={"file_path": str(resolved), "format": format},
-            description=f"Import {len(valid_seqs)} peptides from {resolved.name}",
-            ir=None,
+            parameters={"file_path": str(resolved), "format": stats["format"]},
+            description=f"Import {stats['n_sequences']} peptides from {resolved.name}",
+            ir=ir,
             agent=agent_name,
         )
 
-        result = f"STATUS: complete\npeptides_imported={len(valid_seqs)}"
-        if invalid_count:
-            result += f"\ninvalid_skipped={invalid_count}"
+        result = f"STATUS: complete\npeptides_imported={stats['n_sequences']}"
+        if stats["n_invalid"]:
+            result += f"\ninvalid_skipped={stats['n_invalid']}"
         result += f"\nmodality='{modality_name}'"
         return result
 
@@ -367,40 +294,19 @@ def create_peptide_tools(
         if modality_name not in data_manager.list_modalities():
             return f"Modality '{modality_name}' not found. Available: {data_manager.list_modalities()}"
 
-        import pandas as pd
-
         adata = data_manager.get_modality(modality_name)
-        n_before = adata.n_obs
-
-        mask = pd.Series(True, index=adata.obs.index)
-
-        # Length filter
-        if "length" in adata.obs.columns or "peptide_length" in adata.obs.columns:
-            len_col = "peptide_length" if "peptide_length" in adata.obs.columns else "length"
-            lengths = adata.obs[len_col].astype(float)
-            mask = mask & (lengths >= min_length) & (lengths <= max_length)
-        elif "sequence" in adata.obs.columns:
-            lengths = adata.obs["sequence"].str.len()
-            mask = mask & (lengths >= min_length) & (lengths <= max_length)
-
-        # Charge filter
-        if "peptide_charge" in adata.obs.columns:
-            charges = adata.obs["peptide_charge"].astype(float)
-            mask = mask & (charges >= min_charge) & (charges <= max_charge)
-
-        # Hydrophobicity filter
-        if "peptide_gravy" in adata.obs.columns:
-            gravy = adata.obs["peptide_gravy"].astype(float)
-            mask = mask & (gravy >= min_hydrophobicity) & (gravy <= max_hydrophobicity)
-
-        # Activity score filter
-        if activity_column and activity_column in adata.obs.columns:
-            scores = adata.obs[activity_column].astype(float)
-            mask = mask & (scores >= min_activity_score)
-
-        mask_array = mask.values
-        adata_filtered = adata[mask_array].copy()
-        n_after = adata_filtered.n_obs
+        adata_filtered, stats, ir = library_service.filter_peptides(
+            adata,
+            min_length=min_length,
+            max_length=max_length,
+            min_charge=min_charge,
+            max_charge=max_charge,
+            min_hydrophobicity=min_hydrophobicity,
+            max_hydrophobicity=max_hydrophobicity,
+            min_activity_score=min_activity_score,
+            activity_column=activity_column,
+        )
+        n_before, n_after = stats["n_before"], stats["n_after"]
 
         result_name = f"{modality_name}_filtered"
         data_manager.store_modality(
@@ -424,7 +330,7 @@ def create_peptide_tools(
                 "activity_column": activity_column,
             },
             description=f"Filter: {n_before} → {n_after}",
-            ir=None,
+            ir=ir,
             agent=agent_name,
         )
 
@@ -473,46 +379,30 @@ def create_peptide_tools(
         else:
             return f"Unknown database '{database}'. Use: dbaasp, peptipedia, or all"
 
-        annotations = []
-        sequences = adata.obs["sequence"].astype(str).tolist()
-
-        for seq in sequences:
-            found_activities = []
-            for provider_cls in selected:
-                try:
-                    provider = provider_cls()
-                    results = provider.search_sequences(seq[:20], max_results=3)
-                    for r in results:
-                        if r.sequence == seq and r.activities:
-                            found_activities.extend(r.activities)
-                except Exception as e:
-                    logger.warning(f"Annotation lookup failed: {e}")
-            annotations.append(", ".join(set(found_activities)) if found_activities else "unknown")
-
-        adata_out = adata.copy()
-        adata_out.obs["known_activities"] = annotations
-
-        n_annotated = sum(1 for a in annotations if a != "unknown")
+        adata_out, stats, ir = library_service.annotate_known_activity(
+            adata, providers=selected, database=database
+        )
+        n_annotated, n_queried = stats["n_annotated"], stats["n_queried"]
 
         result_name = f"{modality_name}_annotated"
         data_manager.store_modality(
             name=result_name,
             adata=adata_out,
             parent_name=modality_name,
-            step_summary=f"Annotated: {n_annotated}/{len(sequences)} with known activities",
+            step_summary=f"Annotated: {n_annotated}/{n_queried} with known activities",
         )
 
         data_manager.log_tool_usage(
             tool_name="annotate_peptide_activity",
             parameters={"modality_name": modality_name, "database": database},
-            description=f"Annotated {n_annotated}/{len(sequences)} peptides",
-            ir=None,
+            description=f"Annotated {n_annotated}/{n_queried} peptides",
+            ir=ir,
             agent=agent_name,
         )
 
         return (
             f"STATUS: complete\n"
-            f"peptides_queried={len(sequences)}\n"
+            f"peptides_queried={n_queried}\n"
             f"annotated={n_annotated}\n"
             f"database={database}\n"
             f"modality='{result_name}'"
@@ -538,87 +428,32 @@ def create_peptide_tools(
             variant_type: "alanine_scan", "point_mutations", or "scrambled"
             target_peptide: Specific peptide name/index to target (empty = first)
         """
-        import anndata as ad
-        import pandas as pd
-
         if modality_name not in data_manager.list_modalities():
             return f"Modality '{modality_name}' not found. Available: {data_manager.list_modalities()}"
 
         adata = data_manager.get_modality(modality_name)
 
-        if "sequence" not in adata.obs.columns:
-            return "No 'sequence' column in modality"
-
-        # Select target
-        if target_peptide and target_peptide in adata.obs_names:
-            seq = adata.obs.loc[target_peptide, "sequence"]
-            parent_name = target_peptide
-        else:
-            seq = adata.obs["sequence"].iloc[0]
-            parent_name = adata.obs_names[0]
-
-        variants = []
-        if variant_type == "alanine_scan":
-            for i, aa in enumerate(seq):
-                if aa != "A":
-                    mutant = seq[:i] + "A" + seq[i + 1:]
-                    variants.append({
-                        "sequence": mutant,
-                        "variant_type": "alanine_scan",
-                        "mutation": f"{aa}{i + 1}A",
-                        "position": i + 1,
-                        "parent": parent_name,
-                    })
-        elif variant_type == "point_mutations":
-            from lobster.agents.proteomics.peptide_config import STANDARD_AA
-            for i, aa in enumerate(seq):
-                for new_aa in sorted(STANDARD_AA):
-                    if new_aa != aa:
-                        mutant = seq[:i] + new_aa + seq[i + 1:]
-                        variants.append({
-                            "sequence": mutant,
-                            "variant_type": "point_mutation",
-                            "mutation": f"{aa}{i + 1}{new_aa}",
-                            "position": i + 1,
-                            "parent": parent_name,
-                        })
-        elif variant_type == "scrambled":
-            import random
-            for j in range(10):
-                shuffled = list(seq)
-                random.shuffle(shuffled)
-                variants.append({
-                    "sequence": "".join(shuffled),
-                    "variant_type": "scrambled",
-                    "mutation": f"scramble_{j + 1}",
-                    "position": 0,
-                    "parent": parent_name,
-                })
-        else:
-            return f"Unknown variant_type '{variant_type}'. Use: alanine_scan, point_mutations, scrambled"
-
-        if not variants:
-            return "No variants generated"
-
-        var_df = pd.DataFrame(variants)
-        var_df["length"] = var_df["sequence"].str.len()
-        var_df.index = [f"var_{i}" for i in range(len(var_df))]
-
-        adata_out = ad.AnnData(obs=var_df)
+        try:
+            adata_out, stats, ir = library_service.generate_variants(
+                adata, variant_type=variant_type, target_peptide=target_peptide
+            )
+        except ValueError as e:
+            return str(e)
+        parent_name, n_variants = stats["parent"], stats["n_variants"]
 
         result_name = f"{modality_name}_{variant_type}"
         data_manager.store_modality(
             name=result_name,
             adata=adata_out,
             parent_name=modality_name,
-            step_summary=f"{variant_type}: {len(variants)} variants of {parent_name}",
+            step_summary=f"{variant_type}: {n_variants} variants of {parent_name}",
         )
 
         data_manager.log_tool_usage(
             tool_name="generate_peptide_variants",
             parameters={"modality_name": modality_name, "variant_type": variant_type},
-            description=f"{variant_type}: {len(variants)} variants",
-            ir=None,
+            description=f"{variant_type}: {n_variants} variants",
+            ir=ir,
             agent=agent_name,
         )
 
@@ -626,8 +461,8 @@ def create_peptide_tools(
             f"STATUS: complete\n"
             f"variant_type={variant_type}\n"
             f"parent={parent_name}\n"
-            f"parent_sequence={seq}\n"
-            f"variants_generated={len(variants)}\n"
+            f"parent_sequence={stats['parent_sequence']}\n"
+            f"variants_generated={n_variants}\n"
             f"modality='{result_name}'"
         )
 
@@ -736,8 +571,8 @@ def create_peptide_tools(
 
         return report
 
-    export_peptide_report.metadata = {"categories": ["SYNTHESIZE"], "provenance": True}
-    export_peptide_report.tags = ["SYNTHESIZE"]
+    export_peptide_report.metadata = {"categories": ["UTILITY"], "provenance": False}
+    export_peptide_report.tags = ["UTILITY"]
 
     # =========================================================================
     # Return all 8 domain tools
