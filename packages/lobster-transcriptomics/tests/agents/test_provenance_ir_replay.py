@@ -212,7 +212,6 @@ class TestAnnotationToolIR:
             replayed.obs["cell_type_imported"], produced.obs["cell_type_imported"]
         )
 
-
     def test_missing_label_scalars_stay_unassigned(self, annotation_setup):
         from lobster.services.metadata.manual_annotation_service import (
             ManualAnnotationService,
@@ -238,13 +237,21 @@ class TestAnnotationToolIR:
             )
         )
         tools["import_annotation_mapping"].invoke(
-            {"modality_name": "cells", "mapping_file": str(mapping_file), "save_result": False}
+            {
+                "modality_name": "cells",
+                "mapping_file": str(mapping_file),
+                "save_result": False,
+            }
         )
         labels = dm.modalities["cells_imported_annotations"].obs["cell_type_imported"]
         assert "None" not in set(labels)
         assert set(labels) == {"B cells", "Unassigned"}
-        replayed = replay_ir(dm.last_ir("import_annotation_mapping"), adata=adata.copy())
-        pd.testing.assert_series_equal(replayed["adata"].obs["cell_type_imported"], labels)
+        replayed = replay_ir(
+            dm.last_ir("import_annotation_mapping"), adata=adata.copy()
+        )
+        pd.testing.assert_series_equal(
+            replayed["adata"].obs["cell_type_imported"], labels
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +512,8 @@ def _save_with_exporter(adata, path):
 
     exporter = NotebookExporter(SimpleNamespace(activities={}), None)
     scope = {"adata": adata, "output_prefix": str(path)}
-    exec(exporter._create_data_saving_cell().source, scope)
+    # Execute the real saving cell generated from controlled local test fixtures.
+    exec(exporter._create_data_saving_cell().source, scope)  # nosec B102
     return ad.read_h5ad(f"{path}_processed.h5ad")
 
 
@@ -1052,7 +1060,8 @@ class TestDECurrentResultsAndPersistence:
         for cell in notebook.cells:
             if cell.cell_type != "code":
                 continue
-            exec(compile(cell.source, str(notebook_path), "exec"), scope)
+            # Execute fixture-generated notebook cells, including real load/save.
+            exec(compile(cell.source, str(notebook_path), "exec"), scope)  # nosec B102
             if "parameters" in cell.metadata.get("tags", []):
                 scope["input_data"] = str(input_path)
                 scope["output_prefix"] = str(tmp_path / f"de_{strategy}")

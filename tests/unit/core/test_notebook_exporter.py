@@ -912,7 +912,8 @@ class TestNotebookExportCharacterization:
                 lobster_epoch=99,
                 lobster_last_output=object(),
             )
-            exec(source, scope)
+            # Execute a loader generated from controlled local test fixtures.
+            exec(source, scope)  # nosec B102
             assert scope["adata"].shape == (100, 50)
             assert scope["lobster_modalities"] == {}
             assert scope["lobster_registered"] == {}
@@ -1005,7 +1006,8 @@ class TestNotebookExportCharacterization:
                     lobster_epoch=99,
                     lobster_last_output=object(),
                 )
-                exec(sources[reset_index], scope)
+                # Execute the fixture-generated run initializer, not user code.
+                exec(sources[reset_index], scope)  # nosec B102
                 assert scope["lobster_modalities"] == {}
                 assert scope["lobster_registered"] == {}
                 assert scope["lobster_epoch"] == 0

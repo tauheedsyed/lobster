@@ -356,7 +356,8 @@ def _run_all(notebook, input_path, prefix, scope):
     for i, cell in enumerate(notebook.cells):
         if cell.cell_type != "code":
             continue
-        exec(compile(cell.source, f"<notebook-cell:{i}>", "exec"), scope)
+        # Execute fixture-generated notebook cells in one persistent test namespace.
+        exec(compile(cell.source, f"<notebook-cell:{i}>", "exec"), scope)  # nosec B102
         if "parameters" in cell.metadata.get("tags", []):
             scope.update(input_data=str(input_path), output_prefix=str(prefix))
     return scope
@@ -468,7 +469,8 @@ def test_full_notebook_run_all_twice_resets_only_at_load(
         and "MLPreparationService().select_ml_features(" in c.source
     ]
     with pytest.raises(ValueError, match="Ambiguous input"):
-        exec(feature_cells[0].source, scope)
+        # Execute an exported cell from controlled local fixtures, not user code.
+        exec(feature_cells[0].source, scope)  # nosec B102
 
 
 @pytest.mark.parametrize("tagged_split", [False, True])
@@ -536,9 +538,7 @@ def test_self_loading_peptide_split_run_all_twice_starts_fresh(
     peptide_tools = {
         tool.name: tool for tool in create_peptide_tools(dm, workspace_path=tmp_path)
     }
-    result = peptide_tools["import_peptide_sequences"].invoke(
-        {"file_path": str(fasta)}
-    )
+    result = peptide_tools["import_peptide_sequences"].invoke({"file_path": str(fasta)})
     assert "STATUS: complete" in result, result
     assert dm.get_modality("peptides").obs_names.tolist() == [
         f"peptide_{i}" for i in range(60)
@@ -567,16 +567,22 @@ def test_self_loading_peptide_split_run_all_twice_starts_fresh(
             pd.testing.assert_frame_equal(
                 saved.obs, expected.obs, check_dtype=False, check_categorical=False
             )
-        _saved_matches(tmp_path / f"run_{run}_processed.h5ad", dm.get_modality("peptides"))
+        _saved_matches(
+            tmp_path / f"run_{run}_processed.h5ad", dm.get_modality("peptides")
+        )
         assert set(scope["lobster_modalities"]) == {
-            "peptides", "peptides_train", "peptides_test", "peptides_validation"
+            "peptides",
+            "peptides_train",
+            "peptides_test",
+            "peptides_validation",
         }
         assert set(scope["lobster_registered"]) == set(scope["lobster_modalities"])
         assert set(scope["lobster_registered"].values()) == {0}
         assert scope["lobster_epoch"] == 0
         if run == 0:
             first_registries = (
-                scope["lobster_modalities"], scope["lobster_registered"]
+                scope["lobster_modalities"],
+                scope["lobster_registered"],
             )
         else:
             assert scope["lobster_modalities"] is not first_registries[0]
@@ -584,8 +590,9 @@ def test_self_loading_peptide_split_run_all_twice_starts_fresh(
 
     # Re-executing an import within this run is NOT a run boundary. It must
     # retain the ambiguity guard and reject before writing any new split files.
-    exec(import_source, scope)
+    # Execute fixture-generated import/split cells in the same test namespace.
+    exec(import_source, scope)  # nosec B102
     scope["output_prefix"] = str(tmp_path / "rejected")
     with pytest.raises(ValueError, match="Ambiguous input 'peptides'"):
-        exec(split_source, scope)
+        exec(split_source, scope)  # nosec B102
     assert not list(tmp_path.glob("rejected*.h5ad"))
