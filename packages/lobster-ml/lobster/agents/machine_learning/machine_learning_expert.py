@@ -27,17 +27,17 @@ from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
-from lobster.services.ml.ml_preparation_service import MLPreparationService
+from lobster.services.ml.ml_preparation_service import (
+    ML_NOTEBOOK_BINDINGS,
+    MLPreparationService,
+)
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-# Exported notebooks pass one ``adata`` from cell to cell, but the ML tools
-# branch it into named split modalities. These IRs keep the named modalities in
-# a notebook dict, ``lobster_modalities``, so every step replays on the
-# modality it actually used, not on whatever the previous cell left in adata.
-_REGISTRY = "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
+# The split IR resolves its input and registers its outputs through the
+# notebook bindings in ML_NOTEBOOK_BINDINGS (see ml_preparation_service).
 
 
 def _ml_split_ir(
@@ -67,8 +67,8 @@ def _ml_split_ir(
             "import numpy as np\n"
             "from sklearn.model_selection import train_test_split\n"
             "\n"
-            + _REGISTRY
-            + "adata = lobster_modalities.get({{ modality_name | repr }}, adata)\n"
+            + ML_NOTEBOOK_BINDINGS
+            + "adata = lobster_input({{ modality_name | repr }})\n"
             "indices = np.arange(adata.n_obs)\n"
             "{% if stratify_by %}"
             "stratify_labels = adata.obs[{{ stratify_by | repr }}].values\n"
@@ -114,7 +114,8 @@ def _ml_split_ir(
             "        'split_id': {{ split_id | repr }},\n"
             "    }\n"
             "    lobster_modalities[{{ modality_name | repr }} + '_' + split_name] = split_view\n"
-            "    globals()['adata_' + split_name] = split_view"
+            "    globals()['adata_' + split_name] = split_view\n"
+            "lobster_last_output = adata"
         ),
         imports=[],
         parameters={
