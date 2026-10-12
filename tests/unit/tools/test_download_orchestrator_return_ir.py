@@ -69,3 +69,20 @@ def test_return_ir_when_entry_claimed_elsewhere(setup):
     dm, orchestrator, _ = setup
     dm.download_queue.update_status.return_value = None  # CAS claim lost
     assert orchestrator.execute_download("entry_1", return_ir=True) == ("", {}, None)
+
+
+def test_return_ir_still_records_provenance_if_completion_fails(setup):
+    """The modality is stored before completion; it must not end up without provenance."""
+    dm, orchestrator, ir = setup
+
+    def update_status(entry_id, status, **kwargs):
+        if status == DownloadStatus.COMPLETED:
+            raise OSError("queue write failed")
+        return True
+
+    dm.download_queue.update_status.side_effect = update_status
+    with pytest.raises(OSError):
+        orchestrator.execute_download("entry_1", return_ir=True)
+    assert "fakedb_DS1" in dm.modalities
+    dm.log_tool_usage.assert_called_once()
+    assert dm.log_tool_usage.call_args.kwargs["ir"] is ir

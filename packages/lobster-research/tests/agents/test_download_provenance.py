@@ -47,3 +47,30 @@ def test_download_logged_once_with_service_ir(tmp_path):
     assert calls[0].parameters["database"] == "geo"
     # The orchestrator was told not to log, so nothing else recorded the download.
     assert [c.tool_name for c in dm.calls] == ["execute_download_from_queue"]
+
+
+def test_lost_claim_logs_nothing(tmp_path):
+    """Another worker claimed the entry: nothing stored, so nothing is logged."""
+    dm = RecordingDataManager(workspace_path=tmp_path)
+    entry = SimpleNamespace(
+        entry_id="queue_GSE1_abc",
+        dataset_id="GSE1",
+        database="geo",
+        status=DownloadStatus.PENDING,
+        recommended_strategy=None,
+        validation_status=None,
+        modality_name=None,
+    )
+    dm.download_queue = MagicMock()
+    dm.download_queue.list_entries.return_value = [entry]
+    dm.download_queue.get_entry.return_value = entry
+    orchestrator = MagicMock()
+    orchestrator.execute_download.return_value = ("", {}, None)
+
+    tools = factory_tools(data_expert, MODULE, dm)
+    with patch(f"{MODULE}.DownloadOrchestrator", return_value=orchestrator):
+        result = tools["execute_download_from_queue"].invoke(
+            {"entry_id": "queue_GSE1_abc"}
+        )
+    assert "being downloaded by another agent" in result
+    assert dm.calls == []
