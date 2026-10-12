@@ -230,6 +230,38 @@ def test_replay_refuses_a_name_a_non_ml_step_may_have_replaced(samples):
         replay_ir(dm.last_ir("prepare_ml_features"), **scope)
 
 
+def test_ambiguity_persists_across_later_ml_steps(samples):
+    """An unrelated ML step after a rebind must not make old names trusted again."""
+    original = samples.copy()
+    dm, tools = _tools(samples)
+    _split(tools)
+    scope = _replay_all(dm, original)
+    scope["adata"] = original[:12, :3].copy()  # a non-ML cell rebinds adata
+    _prepare(tools, "data_train")
+    _prepare(tools, "data")
+    with pytest.raises(ValueError, match="Ambiguous input"):
+        for call in dm.calls[1:]:
+            scope = replay_ir(call.ir, **scope)
+
+
+@pytest.mark.parametrize("first", [{"feature_selection": "highly_variable", "n_features": 10},
+                                   {"feature_selection": "all", "scale": True}])
+def test_loaded_split_stays_the_input_for_later_steps(samples, first):
+    """A split loaded as notebook input is registered, so a second step on it does
+    not pick up the first step's output (which no longer carries the split tag)."""
+    dm, tools = _tools(samples)
+    _split(tools)
+    loaded = dm.modalities["data_train"].copy()
+    dm.calls.clear()
+    _prepare(tools, "data_train", **first)
+    assert "ml_split_source" not in dm.modalities["data_train_ml_features"].uns
+    _prepare(tools, "data_train")
+    scope = {"adata": loaded}
+    for call in dm.calls:
+        scope = replay_ir(call.ir, **scope)
+    _assert_same(scope["adata"], dm.modalities["data_train_ml_features"])
+
+
 def test_split_loaded_as_input_replays_without_its_split_step(samples):
     """A saved split loaded in a new session carries its tag and replays alone."""
     dm, tools = _tools(samples)

@@ -99,7 +99,7 @@ def _ml_split_ir(
             "if len(val_idx) > 0:\n"
             "    adata.obs.loc[adata.obs_names[val_idx], 'ml_split'] = 'validation'\n"
             "adata.uns['ml_split_id'] = {{ split_id | repr }}\n"
-            "lobster_modalities[{{ modality_name | repr }}] = adata\n"
+            "lobster_register({{ modality_name | repr }}, adata)\n"
             "adata_validation = None\n"
             "for split_name, split_idx in (\n"
             "    ('train', train_idx), ('test', test_idx), ('validation', val_idx)\n"
@@ -113,7 +113,7 @@ def _ml_split_ir(
             "        'split': split_name,\n"
             "        'split_id': {{ split_id | repr }},\n"
             "    }\n"
-            "    lobster_modalities[{{ modality_name | repr }} + '_' + split_name] = split_view\n"
+            "    lobster_register({{ modality_name | repr }} + '_' + split_name, split_view)\n"
             "    globals()['adata_' + split_name] = split_view\n"
             "lobster_last_output = adata"
         ),
