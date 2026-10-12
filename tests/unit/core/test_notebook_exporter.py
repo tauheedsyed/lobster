@@ -8,7 +8,7 @@ import ast
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import anndata
 import nbformat
@@ -21,7 +21,7 @@ from lobster.core.notebook_exporter import NotebookExporter
 from lobster.core.provenance import ProvenanceTracker
 from lobster.core.provenance.analysis_ir import (
     AnalysisStep,
-    ParameterSpec,
+    create_data_loading_ir,
     create_data_saving_ir,
 )
 
@@ -893,6 +893,167 @@ def notebook_with_only_save_ir(ledger_exporter):
 class TestNotebookExportCharacterization:
     """Characterize export behavior and the limits reported in notebook text."""
 
+    @pytest.mark.parametrize("load_ir", [False, True], ids=["fallback", "recorded_ir"])
+    def test_input_load_resets_ml_stopgap_once_per_run(
+        self, ledger_exporter, tmp_path, load_ir
+    ):
+        input_path = tmp_path / "input.h5ad"
+        create_test_adata().write_h5ad(input_path)
+        if load_ir:
+            ledger_exporter.provenance.activities = [
+                {"type": "load_dataset", "ir": create_data_loading_ir().to_dict()}
+            ]
+        source = ledger_exporter._create_data_loading_cell().source
+        scope = {"input_data": str(input_path)}
+        for _ in range(2):
+            scope.update(
+                lobster_modalities={"old": object()},
+                lobster_registered={"old": 99},
+                lobster_epoch=99,
+                lobster_last_output=object(),
+            )
+            exec(source, scope)
+            assert scope["adata"].shape == (100, 50)
+            assert scope["lobster_modalities"] == {}
+            assert scope["lobster_registered"] == {}
+            assert scope["lobster_epoch"] == 0
+            assert "lobster_last_output" not in scope
+
+    @pytest.mark.parametrize("strategy", ["successful", "replay"])
+    @pytest.mark.parametrize(
+        "root_operation",
+        [
+            "peptidomics.import_sequences",
+            "geo_service.download_dataset",
+            "sra_download",
+            "pride.download.download_dataset",
+            "metabolights.download.download_dataset",
+            "fallback_load",
+            "recorded_load",
+            "later_peptide_import",
+        ],
+    )
+    def test_each_export_path_has_one_initial_ml_reset(
+        self, ledger_exporter, monkeypatch, strategy, root_operation
+    ):
+        """Inspect download IR without fetching data; no later import resets ML."""
+        monkeypatch.setattr(NotebookExporter, "_get_system_info", lambda self: {})
+        monkeypatch.setattr(NotebookExporter, "_snapshot_dependencies", lambda self: {})
+        dedicated_load = root_operation in {
+            "fallback_load",
+            "recorded_load",
+            "later_peptide_import",
+        }
+        first_ir = create_sample_ir(
+            "initial_analysis" if dedicated_load else root_operation,
+            "initial_step",
+            "Initial step",
+        )
+        first_ir.code_template = "initial_step_marker = True"
+        later_import = create_sample_ir(
+            "peptidomics.import_sequences", "later_import", "Later import"
+        )
+        later_import.code_template = "later_import_marker = True"
+        analysis = create_sample_ir("later_analysis", "analysis", "Later analysis")
+        analysis.code_template = "analysis_marker = True"
+        activities = []
+        if root_operation == "recorded_load":
+            activities.append({"type": "load_dataset", "ir": create_data_loading_ir()})
+        activities.extend(
+            {"type": ir.tool_name, "ir": ir}
+            for ir in (first_ir, later_import, analysis)
+        )
+        ledger_exporter.provenance.activities = activities
+        path = ledger_exporter.export("run_boundary", filter_strategy=strategy)
+        notebook = nbformat.read(path, as_version=4)
+        sources = [c.source for c in notebook.cells if c.cell_type == "code"]
+        reset_indices = []
+        for name in ("lobster_modalities", "lobster_registered", "lobster_epoch"):
+            assignments = [
+                i
+                for i, source in enumerate(sources)
+                for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+            ]
+            assert len(assignments) == 1, (name, assignments)
+            reset_indices.append(assignments[0])
+        assert len(set(reset_indices)) == 1  # all reset state in one boundary
+        reset_index = reset_indices[0]
+        assert (
+            sum("globals().pop('lobster_last_output', None)" in s for s in sources) == 1
+        )
+        assert reset_index < sources.index(first_ir.render())
+        assert sources.count(later_import.render()) == 1  # no appended reset
+        assert sources.count(analysis.render()) == 1
+        load_indices = [
+            i
+            for i, source in enumerate(sources)
+            if "ad.read_h5ad(input_data)" in source
+        ]
+        if dedicated_load:
+            assert load_indices == [reset_index]  # not unconditional + loader reset
+        else:
+            assert load_indices == []
+            # The self-loading path's sole initializer resets stale bindings on
+            # each run before the root/analytical IR, not in every ML/import cell.
+            scope = {}
+            for _ in range(2):
+                scope.update(
+                    lobster_modalities={"old": object()},
+                    lobster_registered={"old": 99},
+                    lobster_epoch=99,
+                    lobster_last_output=object(),
+                )
+                exec(sources[reset_index], scope)
+                assert scope["lobster_modalities"] == {}
+                assert scope["lobster_registered"] == {}
+                assert scope["lobster_epoch"] == 0
+                assert "lobster_last_output" not in scope
+
+    @pytest.mark.parametrize("selected_saving_split", [False, True])
+    def test_final_saver_suppresses_only_explicitly_handled_split_save(
+        self, ledger_exporter, selected_saving_split
+    ):
+        split_ir = create_sample_ir("ml.split", "create_ml_splits", "Split")
+        split_ir.parameters = {
+            "modality_name": "data",
+            "validation_size": 0.1,
+            "save_result": selected_saving_split,
+        }
+        saving_ir = create_data_saving_ir(filename_suffix="data_validation")
+        ledger_exporter.provenance.activities = [
+            {
+                "type": "save_dataset",
+                "parameters": {
+                    "name": "data_validation",
+                    "path": "/workspace/data/data_validation.h5ad",
+                },
+                "ir": saving_ir.to_dict(),
+            }
+        ]
+        source = ledger_exporter._create_data_saving_cell([split_ir]).source
+        if selected_saving_split:
+            assert 'f"{output_prefix}_processed.h5ad"' in source
+            assert 'f"{output_prefix}_data_validation.h5ad"' not in source
+        else:
+            assert source == saving_ir.render()
+        # Backward compatible direct call or unrelated saved modality: no
+        # generic saver string surgery, no change to arbitrary legacy save IR.
+        assert ledger_exporter._create_data_saving_cell().source == saving_ir.render()
+        ledger_exporter.provenance.activities[0]["parameters"][
+            "path"
+        ] = "alternate.h5ad"
+        assert (
+            ledger_exporter._create_data_saving_cell([split_ir]).source
+            == saving_ir.render()
+        )
+        ledger_exporter.provenance.activities[0]["parameters"]["name"] = "other"
+        assert (
+            ledger_exporter._create_data_saving_cell([split_ir]).source
+            == saving_ir.render()
+        )
+
     def test_save_ir_alone_bypasses_zero_ir_guard(self, notebook_with_only_save_ir):
         notebook = notebook_with_only_save_ir
 
@@ -941,7 +1102,10 @@ class TestNotebookExportCharacterization:
         assert notebook.metadata.lobster.ir_statistics["n_irs_extracted"] == 1
         assert notebook.metadata.lobster.ir_statistics["n_activities"] == 2
         assert code.count(visible_ir.render()) == 1
-        assert code.count(hidden_ir.render()) == 1
+        if activity_type == "load_dataset":
+            assert sum(source.startswith(hidden_ir.render()) for source in code) == 1
+        else:
+            assert code.count(hidden_ir.render()) == 1
 
     def test_comment_only_ir_exports_a_valid_cell_without_executable_statements(
         self, ledger_exporter

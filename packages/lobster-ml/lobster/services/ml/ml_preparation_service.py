@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # cell has rebound ``adata`` since the last ML cell; if so it starts a new
 # epoch, and every name registered in an earlier epoch is refused (it may or
 # may not still mean the same data) until an ML cell registers it again.
+# The exporter's input-load cell resets this stopgap once per notebook run.
+# Only the first input can bind an unregistered name to loaded ``adata``;
+# later inputs must already have been produced/registered by this run.
 ML_NOTEBOOK_BINDINGS = (
     "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
     "lobster_registered = globals().setdefault('lobster_registered', {})\n"
@@ -54,6 +57,11 @@ ML_NOTEBOOK_BINDINGS = (
     "    return known\n"
     "def lobster_input(name):\n"
     "    known = lobster_lookup(name)\n"
+    "    if known is None and lobster_modalities:\n"
+    "        raise ValueError(\n"
+    "            f'Unregistered ML input {name!r}: this notebook did not load or '\n"
+    "            'produce that modality; refusing to reuse the current adata.'\n"
+    "        )\n"
     "    value = adata if known is None else known\n"
     "    lobster_register(name, value)\n"
     "    return value\n"
@@ -1104,7 +1112,7 @@ print(f"Recommendations: {recommendations}")
                 "# that split, so replay never prepares features on other samples.\n"
                 "split_view = lobster_lookup({{ split_modality | repr }})\n"
                 "split_tag = adata.uns.get('ml_split_source', {})\n"
-                "if split_view is None and split_tag.get('modality') == {{ split_modality | repr }}:\n"
+                "if split_view is None and not lobster_modalities and split_tag.get('modality') == {{ split_modality | repr }}:\n"
                 "    split_view = adata  # the split itself was loaded as input\n"
                 "if split_view is None or (\n"
                 "    split_view.uns.get('ml_split_source', {}).get('split_id')\n"

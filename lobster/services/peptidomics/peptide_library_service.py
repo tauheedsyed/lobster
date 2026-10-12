@@ -7,6 +7,8 @@ replays the same service call (or, for database lookups, the recorded result)
 on a notebook's ``adata``, so an exported notebook reproduces the library.
 """
 
+import hashlib
+import json
 import logging
 import random
 from pathlib import Path
@@ -249,6 +251,61 @@ class PeptideLibraryService:
     # Variant generation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _library_fingerprint(adata: ad.AnnData) -> str:
+        """Identity of the ordered biological input, including duplicate labels.
+
+        Variants consume labels and sequences, not expression matrices or other
+        annotations. This guard deliberately does not implement dataset routing.
+        """
+        record = {
+            "obs_names": adata.obs_names.tolist(),
+            "sequences": adata.obs["sequence"].tolist(),
+        }
+        return hashlib.sha256(
+            json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _replay_variants(
+        self,
+        adata: ad.AnnData,
+        variant_type: str,
+        parent_name: str,
+        parent_sequence: str,
+        parent_position: int,
+        input_library_fingerprint: str,
+        random_seed: Optional[int] = None,
+    ) -> Tuple[ad.AnnData, Dict[str, Any], AnalysisStep]:
+        """Rebuild the recorded parent only after verifying the current input.
+
+        A notebook has one current ``adata``; it cannot resolve an earlier named
+        library after a branch. Fail before creating variants rather than route
+        to a different peptide, even if the recorded parent survived filtering.
+        """
+        if (
+            "sequence" not in adata.obs.columns
+            or self._library_fingerprint(adata) != input_library_fingerprint
+            or not 0 <= parent_position < adata.n_obs
+            or adata.obs_names[parent_position] != parent_name
+            or adata.obs["sequence"].iloc[parent_position] != parent_sequence
+        ):
+            raise ValueError(
+                "Peptide variant replay input mismatch: current notebook library "
+                "is not the recorded input/positional parent. Variants on a "
+                "non-current library cannot be replayed without dataset bindings."
+            )
+
+        # Generate from the verified record, never a label-based .loc lookup or
+        # a newly selected row. Preserve the original position in replay stats/IR.
+        return self._variants_from_parent(
+            parent_sequence,
+            parent_name,
+            parent_position,
+            input_library_fingerprint,
+            variant_type,
+            random_seed,
+        )
+
     def generate_variants(
         self,
         adata: ad.AnnData,
@@ -261,20 +318,55 @@ class PeptideLibraryService:
         ``random_seed`` only affects ``"scrambled"``. When it is None a seed is
         drawn and recorded in the IR, so the scrambled set can be regenerated.
 
+        An empty target selects row zero by position. Explicit labels must exist
+        exactly once; missing or duplicate labels are never first-row fallbacks.
+        Replay requires the same ordered library and recorded positional parent;
+        returning to an earlier library after a notebook branch fails closed.
+
         Raises:
             ValueError: For an unknown variant type, a missing ``sequence``
-                column, or when no variants result.
+                column, empty library, ambiguous/missing target, or no variants.
         """
         if "sequence" not in adata.obs.columns:
             raise ValueError("No 'sequence' column in modality")
+        if adata.n_obs == 0:
+            raise ValueError("Cannot generate variants from an empty peptide library")
 
-        if target_peptide and target_peptide in adata.obs_names:
-            seq = adata.obs.loc[target_peptide, "sequence"]
-            parent_name = target_peptide
+        if target_peptide:
+            positions = [
+                i for i, name in enumerate(adata.obs_names) if name == target_peptide
+            ]
+            if not positions:
+                raise ValueError(f"Target peptide '{target_peptide}' not found")
+            if len(positions) != 1:
+                raise ValueError(
+                    f"Ambiguous target peptide '{target_peptide}': "
+                    f"{len(positions)} rows have that label"
+                )
+            parent_position = positions[0]
         else:
-            seq = adata.obs["sequence"].iloc[0]
-            parent_name = adata.obs_names[0]
+            parent_position = 0
+        seq = adata.obs["sequence"].iloc[parent_position]
+        parent_name = adata.obs_names[parent_position]
+        return self._variants_from_parent(
+            seq,
+            parent_name,
+            parent_position,
+            self._library_fingerprint(adata),
+            variant_type,
+            random_seed,
+        )
 
+    def _variants_from_parent(
+        self,
+        seq: str,
+        parent_name: str,
+        parent_position: int,
+        input_library_fingerprint: str,
+        variant_type: str,
+        random_seed: Optional[int],
+    ) -> Tuple[ad.AnnData, Dict[str, Any], AnalysisStep]:
+        """Shared calculation from the runtime-resolved or replay-verified parent."""
         variants: List[Dict[str, Any]] = []
         if variant_type == "alanine_scan":
             for i, aa in enumerate(seq):
@@ -335,12 +427,16 @@ class PeptideLibraryService:
             "variant_type": variant_type,
             "parent": str(parent_name),
             "parent_sequence": str(seq),
+            "parent_position": parent_position,
             "n_variants": len(variants),
             "random_seed": random_seed,
         }
         params: Dict[str, Any] = {
             "variant_type": variant_type,
-            "target_peptide": str(parent_name),
+            "parent_name": str(parent_name),
+            "parent_sequence": str(seq),
+            "parent_position": parent_position,
+            "input_library_fingerprint": input_library_fingerprint,
         }
         if variant_type == "scrambled":
             params["random_seed"] = random_seed
@@ -349,11 +445,15 @@ class PeptideLibraryService:
             tool_name="generate_peptide_variants",
             description=f"{variant_type}: {len(variants)} variants of {parent_name}",
             call=(
-                "adata, variant_stats, _ = PeptideLibraryService().generate_variants(\n"
+                "adata, variant_stats, _ = PeptideLibraryService()._replay_variants(\n"
                 "    adata,\n"
                 "{args})"
             ),
             parameters=params,
+            execution_context={
+                "replay_policy": "current_library_only",
+                "input_identity": "ordered_labels_and_sequences_sha256",
+            },
         )
         return adata_out, stats, ir
 

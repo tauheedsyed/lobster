@@ -426,7 +426,10 @@ def create_peptide_tools(
         Args:
             modality_name: Peptide modality
             variant_type: "alanine_scan", "point_mutations", or "scrambled"
-            target_peptide: Specific peptide name/index to target (empty = first)
+            target_peptide: Unique peptide label to target (empty = first row by
+                position, including when labels repeat). Missing or ambiguous
+                explicit labels are rejected. Notebook replay fails closed if
+                its current library differs from this recorded input.
         """
         if modality_name not in data_manager.list_modalities():
             return f"Modality '{modality_name}' not found. Available: {data_manager.list_modalities()}"
@@ -451,7 +454,14 @@ def create_peptide_tools(
 
         data_manager.log_tool_usage(
             tool_name="generate_peptide_variants",
-            parameters={"modality_name": modality_name, "variant_type": variant_type},
+            parameters={
+                "modality_name": modality_name,
+                "variant_type": variant_type,
+                "target_peptide": target_peptide,
+                "parent": parent_name,
+                "parent_sequence": stats["parent_sequence"],
+                "parent_position": stats["parent_position"],
+            },
             description=f"{variant_type}: {n_variants} variants",
             ir=ir,
             agent=agent_name,

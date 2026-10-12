@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import anndata as ad
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -65,10 +67,19 @@ def test_variants_replay(library, variant_type):
     produced = dm.modalities[f"peptides_{variant_type}"]
     source = dm.modalities["peptides"].copy()
     ir = _ir(dm, "generate_peptide_variants")
+    assert ir.parameters["parent_name"] == "p2"
+    assert ir.parameters["parent_sequence"] == "KWKLFKKIGAVLKVL"
+    assert ir.parameters["parent_position"] == 1
+    assert ir.execution_context["replay_policy"] == "current_library_only"
     if variant_type == "scrambled":
         # The drawn seed is recorded, so the scrambled set can be regenerated.
         assert isinstance(ir.parameters["random_seed"], int)
-    replayed = replay_ir(ir, adata=source)["adata"]
+    scope = replay_ir(ir, adata=source)
+    replayed = scope["adata"]
+    assert scope["variant_stats"]["parent_position"] == 1
+    assert scope["variant_stats"]["parent_sequence"] == ir.parameters["parent_sequence"]
+    assert scope["variant_stats"]["n_variants"] == produced.n_obs
+    assert scope["_"].parameters == ir.parameters
     pd.testing.assert_frame_equal(replayed.obs, produced.obs)
 
 
@@ -174,7 +185,10 @@ def test_later_peptide_import_keeps_the_input_load(tmp_path):
 
     exporter = NotebookExporter.__new__(NotebookExporter)
     first = [pair("peptidomics.import_sequences"), pair("peptidomics.filter_peptides")]
-    later = [pair("lobster.ml.select_ml_features"), pair("peptidomics.import_sequences")]
+    later = [
+        pair("lobster.ml.select_ml_features"),
+        pair("peptidomics.import_sequences"),
+    ]
     assert exporter._has_download_activity(first) is True
     assert exporter._has_download_activity(later) is False
 
@@ -183,3 +197,238 @@ def test_report_export_is_utility(library):
     _, tools, _ = library
     tool = tools["export_peptide_report"]
     assert tool.metadata == {"categories": ["UTILITY"], "provenance": False}
+
+
+def _sequence_file(tmp_path, format, labels, sequences):
+    path = tmp_path / f"library.{format}"
+    if format == "fasta":
+        path.write_text("".join(f">{n}\n{s}\n" for n, s in zip(labels, sequences)))
+    else:
+        pd.DataFrame({"name": labels, "sequence": sequences}).to_csv(path, index=False)
+    return path
+
+
+def _notebook_tools(tmp_path, monkeypatch):
+    """Real storage/provenance/export; only environment metadata is stubbed."""
+    from lobster.core.notebooks.exporter import NotebookExporter
+    from lobster.core.runtime.data_manager import DataManagerV2
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(NotebookExporter, "_get_system_info", lambda self: {})
+    dm = DataManagerV2(workspace_path=tmp_path / "ws", auto_scan=False)
+    return dm, {t.name: t for t in create_peptide_tools(dm, workspace_path=tmp_path)}
+
+
+def _export_and_run(dm, strategy, scope):
+    import nbformat
+
+    nb = nbformat.read(
+        dm.export_notebook(name="variants", filter_strategy=strategy), as_version=4
+    )
+    for number, cell in enumerate(nb.cells):
+        if cell.cell_type == "code":
+            exec(
+                compile(cell.source, f"<notebook-cell:{number}>", "exec"), scope
+            )  # nosec B102
+
+
+def _assert_variants_equal(replayed, produced):
+    assert replayed.shape == produced.shape
+    assert all(isinstance(s, str) for s in replayed.obs["sequence"])
+    # H5AD writing may categorize strings; biological values and order must agree.
+    pd.testing.assert_frame_equal(
+        replayed.obs.astype(object), produced.obs.astype(object), check_dtype=False
+    )
+    np.testing.assert_array_equal(replayed.X, produced.X)
+    assert list(replayed.var_names) == list(produced.var_names)
+
+
+@pytest.mark.parametrize("format", ["fasta", "csv"])
+def test_duplicate_labels_default_records_positional_parent(tmp_path, format):
+    path = _sequence_file(tmp_path, format, ["dup", "dup"], ["ACDE", "FGHI"])
+    dm = RecordingDataManager(workspace_path=tmp_path)
+    tools = {t.name: t for t in create_peptide_tools(dm, workspace_path=tmp_path)}
+    tools["import_peptide_sequences"].invoke({"file_path": str(path)})
+    result = tools["generate_peptide_variants"].invoke({"modality_name": "peptides"})
+    assert "parent_sequence=ACDE" in result
+    ir = _ir(dm, "generate_peptide_variants")
+    assert ir.parameters["parent_name"] == "dup"
+    assert ir.parameters["parent_sequence"] == "ACDE"
+    assert ir.parameters["parent_position"] == 0
+    source = dm.modalities["peptides"].copy()
+    replayed = replay_ir(ir, adata=source)["adata"]
+    assert list(replayed.obs["sequence"]) == ["AADE", "ACAE", "ACDA"]
+    _assert_variants_equal(replayed, dm.modalities["peptides_alanine_scan"])
+    # Reordering duplicate labels must not silently change the positional parent.
+    with pytest.raises(ValueError, match="replay input mismatch"):
+        replay_ir(ir, adata=source[::-1].copy())
+
+
+@pytest.mark.parametrize("format", ["fasta", "csv"])
+@pytest.mark.parametrize(
+    "target,error", [("dup", "Ambiguous"), ("absent", "not found")]
+)
+def test_explicit_invalid_target_does_not_store_or_log(tmp_path, format, target, error):
+    path = _sequence_file(tmp_path, format, ["dup", "dup"], ["ACDE", "FGHI"])
+    dm = RecordingDataManager(workspace_path=tmp_path)
+    tools = {t.name: t for t in create_peptide_tools(dm, workspace_path=tmp_path)}
+    tools["import_peptide_sequences"].invoke({"file_path": str(path)})
+    with pytest.raises(ValueError, match=error):
+        PeptideLibraryService().generate_variants(
+            dm.modalities["peptides"], target_peptide=target
+        )
+    before_calls, before_modalities = len(dm.calls), list(dm.modalities)
+    response = tools["generate_peptide_variants"].invoke(
+        {"modality_name": "peptides", "target_peptide": target}
+    )
+    assert error in response and "STATUS: complete" not in response
+    assert len(dm.calls) == before_calls
+    assert list(dm.modalities) == before_modalities
+
+
+def test_empty_parent_library_fails_clearly():
+    empty = ad.AnnData(obs=pd.DataFrame({"sequence": []}))
+    with pytest.raises(ValueError, match="empty"):
+        PeptideLibraryService().generate_variants(empty)
+
+
+@pytest.mark.parametrize(
+    "change", ["missing", "sequence", "label", "other_row", "no_sequence"]
+)
+def test_replay_rejects_changed_input_even_when_parent_survives(library, change):
+    dm, tools, _ = library
+    tools["generate_peptide_variants"].invoke({"modality_name": "peptides"})
+    ir = _ir(dm, "generate_peptide_variants")
+    source = dm.modalities["peptides"].copy()
+    if change == "missing":
+        source = source[1:].copy()
+    elif change == "sequence":
+        source.obs.iloc[0, source.obs.columns.get_loc("sequence")] = "ACDE"
+    elif change == "label":
+        source.obs_names = ["renamed", "p2"]
+    elif change == "no_sequence":
+        del source.obs["sequence"]
+    else:
+        source = source[:1].copy()  # same parent, not the recorded input library
+    scope = {"adata": source}
+    with pytest.raises(ValueError, match="replay input mismatch"):
+        exec(ir.render(), scope)  # nosec B102
+    assert scope["adata"] is source  # fail before replacing the current library
+
+
+@pytest.mark.parametrize("strategy", ["successful", "replay"])
+@pytest.mark.parametrize("format", ["fasta", "csv"])
+def test_duplicate_default_full_notebook_matches_runtime(
+    tmp_path, monkeypatch, strategy, format
+):
+    dm, tools = _notebook_tools(tmp_path, monkeypatch)
+    path = _sequence_file(tmp_path, format, ["dup", "dup"], ["ACDE", "FGHI"])
+    tools["import_peptide_sequences"].invoke({"file_path": str(path)})
+    tools["generate_peptide_variants"].invoke({"modality_name": "peptides"})
+    produced = dm.get_modality("peptides_alanine_scan").copy()
+    scope = {}
+    _export_and_run(dm, strategy, scope)
+    _assert_variants_equal(scope["adata"], produced)
+    saved = ad.read_h5ad(scope["output_path"])
+    _assert_variants_equal(saved, produced)
+    assert saved.n_obs == 3
+    assert list(saved.obs["parent"]) == ["dup"] * 3
+
+
+@pytest.mark.parametrize("strategy", ["successful", "replay"])
+@pytest.mark.parametrize(
+    "variant_type", ["alanine_scan", "point_mutations", "scrambled"]
+)
+def test_straight_line_variants_full_notebook_parity(
+    tmp_path, monkeypatch, strategy, variant_type
+):
+    dm, tools = _notebook_tools(tmp_path, monkeypatch)
+    path = _sequence_file(
+        tmp_path, "fasta", ["p1", "p2"], ["ACDEFGHIK", "KWKLFKKIGAVLKVL"]
+    )
+    tools["import_peptide_sequences"].invoke({"file_path": str(path)})
+    tools["filter_peptides"].invoke({"modality_name": "peptides", "min_length": 10})
+    result = tools["generate_peptide_variants"].invoke(
+        {"modality_name": "peptides_filtered", "variant_type": variant_type}
+    )
+    assert "parent_sequence=KWKLFKKIGAVLKVL" in result
+    produced = dm.get_modality(f"peptides_filtered_{variant_type}").copy()
+    scope = {}
+    _export_and_run(dm, strategy, scope)
+    _assert_variants_equal(scope["adata"], produced)
+    _assert_variants_equal(ad.read_h5ad(scope["output_path"]), produced)
+    expected_count = {"alanine_scan": 14, "point_mutations": 285, "scrambled": 10}[
+        variant_type
+    ]
+    assert produced.n_obs == expected_count
+    assert list(produced.obs["parent"]) == ["p2"] * expected_count
+
+
+@pytest.mark.parametrize("strategy", ["successful", "replay"])
+@pytest.mark.parametrize("target", ["p1", "p2"])
+def test_original_library_branch_full_notebook_fails_closed(
+    tmp_path, monkeypatch, strategy, target
+):
+    """Canonical short-p1 branch, and a surviving-p2 branch, cannot alias the filter."""
+    dm, tools = _notebook_tools(tmp_path, monkeypatch)
+    path = _sequence_file(
+        tmp_path, "fasta", ["p1", "p2"], ["ACDEFGHIK", "KWKLFKKIGAVLKVL"]
+    )
+    tools["import_peptide_sequences"].invoke({"file_path": str(path)})
+    tools["filter_peptides"].invoke({"modality_name": "peptides", "min_length": 10})
+    result = tools["generate_peptide_variants"].invoke(
+        {"modality_name": "peptides", "target_peptide": target}
+    )
+    produced = dm.get_modality("peptides_alanine_scan")
+    assert "STATUS: complete" in result
+    assert produced.n_obs == (8 if target == "p1" else 14)
+    assert list(produced.obs["parent"]) == [target] * produced.n_obs
+    scope = {}
+    with pytest.raises(ValueError, match="replay input mismatch.*non-current library"):
+        _export_and_run(dm, strategy, scope)
+    assert list(scope["adata"].obs_names) == ["p2"]  # no variant output substituted
+    assert "output_path" not in scope  # saving must never be reached
+    assert not list(tmp_path.glob("*_processed.h5ad"))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("parent_position", 0),
+        ("parent_position", 99),
+        ("parent_name", "absent"),
+        ("parent_sequence", "ACDE"),
+    ],
+)
+def test_recorded_parent_must_match_its_position(library, field, value):
+    dm, tools, _ = library
+    tools["generate_peptide_variants"].invoke(
+        {"modality_name": "peptides", "target_peptide": "p2"}
+    )
+    ir = _ir(dm, "generate_peptide_variants")
+    ir.parameters[field] = value
+    with pytest.raises(ValueError, match="replay input mismatch"):
+        replay_ir(ir, adata=dm.modalities["peptides"].copy())
+
+
+@pytest.mark.parametrize("strategy", ["successful", "replay"])
+def test_original_branch_rejected_with_unchanged_positional_parent(
+    tmp_path, monkeypatch, strategy
+):
+    """Checking only the selected row cannot certify the actual input library."""
+    dm, tools = _notebook_tools(tmp_path, monkeypatch)
+    path = _sequence_file(
+        tmp_path, "fasta", ["p1", "p2"], ["KWKLFKKIGAVLKVL", "ACDEFGHIK"]
+    )
+    tools["import_peptide_sequences"].invoke({"file_path": str(path)})
+    tools["filter_peptides"].invoke({"modality_name": "peptides", "min_length": 10})
+    result = tools["generate_peptide_variants"].invoke(
+        {"modality_name": "peptides", "target_peptide": "p1"}
+    )
+    assert "STATUS: complete" in result and "variants_generated=14" in result
+    scope = {}
+    with pytest.raises(ValueError, match="replay input mismatch.*non-current library"):
+        _export_and_run(dm, strategy, scope)
+    assert list(scope["adata"].obs_names) == ["p1"]
+    assert list(scope["adata"].obs["sequence"]) == ["KWKLFKKIGAVLKVL"]
+    assert "output_path" not in scope
