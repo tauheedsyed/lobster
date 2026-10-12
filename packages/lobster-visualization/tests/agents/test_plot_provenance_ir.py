@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pytest
-import scanpy as sc
 
 from lobster.agents.visualization_expert import visualization_expert
 from lobster.core.provenance.analysis_ir import AnalysisStep
@@ -25,26 +24,30 @@ GENES = ["gene_0", "gene_1", "gene_2"]
 
 @pytest.fixture(scope="module")
 def cells() -> ad.AnnData:
+    """Plot-ready cells built with numpy only (the package CI has no scanpy)."""
     rng = np.random.default_rng(0)
-    adata = ad.AnnData(
-        # 1000 genes: create_qc_plots refuses smaller (subset-like) matrices.
-        X=rng.poisson(3, size=(80, 1000)).astype(np.float32),
-        obs=pd.DataFrame(
-            {
-                "cluster": pd.Categorical([str(i % 3) for i in range(80)]),
-                "sample": pd.Categorical(["s1", "s2"] * 40),
-            },
-            index=[f"cell_{i}" for i in range(80)],
-        ),
-        var=pd.DataFrame(index=[f"gene_{i}" for i in range(1000)]),
+    n_cells, n_genes = 80, 1000  # create_qc_plots refuses subset-sized matrices
+    counts = rng.poisson(3, size=(n_cells, n_genes)).astype(np.float32)
+    obs = pd.DataFrame(
+        {
+            "cluster": pd.Categorical([str(i % 3) for i in range(n_cells)]),
+            "sample": pd.Categorical(["s1", "s2"] * (n_cells // 2)),
+            "n_genes_by_counts": (counts > 0).sum(axis=1),
+            "total_counts": counts.sum(axis=1),
+            "pct_counts_mt": rng.uniform(0, 10, n_cells),
+        },
+        index=[f"cell_{i}" for i in range(n_cells)],
     )
-    adata.var["mt"] = False
-    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], percent_top=None, inplace=True)
-    adata.raw = adata.copy()
-    sc.pp.log1p(adata)
-    sc.pp.pca(adata, n_comps=10)
-    sc.pp.neighbors(adata, n_neighbors=10)
-    sc.tl.umap(adata, random_state=0)
+    adata = ad.AnnData(
+        X=np.log1p(counts),
+        obs=obs,
+        var=pd.DataFrame(index=[f"gene_{i}" for i in range(n_genes)]),
+    )
+    adata.raw = ad.AnnData(X=counts, obs=obs, var=adata.var.copy())
+    adata.obsm["X_pca"] = rng.normal(size=(n_cells, 10))
+    adata.obsm["X_umap"] = rng.normal(size=(n_cells, 2))
+    ratios = np.sort(rng.uniform(0.01, 0.2, 10))[::-1]
+    adata.uns["pca"] = {"variance_ratio": ratios, "variance": ratios * 5}
     return adata
 
 
