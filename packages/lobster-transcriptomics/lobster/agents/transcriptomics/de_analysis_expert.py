@@ -28,6 +28,7 @@ AGENT_CONFIG = AgentRegistryConfig(
 )
 
 # === Heavy imports below ===
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,6 +89,143 @@ def _plain(value: Any) -> Any:
         except (TypeError, ValueError):
             return value
     return value
+
+
+def _de_result_keys(adata) -> List[str]:
+    """Include explicit historical choices, but never infer their chronology."""
+    return sorted(
+        key
+        for key, value in adata.uns.items()
+        if (key.startswith("de_results_") or key.startswith("de_iteration_results_"))
+        and isinstance(value, dict)
+    )
+
+
+def _resolve_de_results_key(adata, requested: Optional[str] = None) -> str:
+    """Use recorded identity; legacy data is safe only with one possible result."""
+    key = (
+        requested if requested is not None else adata.uns.get("de_current_results_key")
+    )
+    available = _de_result_keys(adata)
+    if key is not None:
+        # Caller-supplied identity is not limited by automatic discovery prefixes.
+        if key not in adata.uns or (requested is None and key not in available):
+            raise ValueError(
+                f"DE results key {key!r} is unavailable. Choose an explicit "
+                f"de_results_key from {available}."
+            )
+        result = adata.uns[key]
+        if not isinstance(result, dict) or not isinstance(
+            result.get("results_df"), pd.DataFrame
+        ):
+            raise ValueError(
+                f"Invalid DE results format at {key!r}. "
+                "Expected dict with 'results_df' DataFrame."
+            )
+        return key
+    if len(available) == 1:
+        return available[0]
+    if not available:
+        raise ValueError(
+            "No DE results found. Run differential expression analysis first."
+        )
+    raise ValueError(
+        "Current DE result identity is unavailable; choose an explicit "
+        f"de_results_key from {available}. Dictionary order is not analysis time."
+    )
+
+
+def _read_de_iterations(adata) -> Dict[str, Any]:
+    """Decode versioned H5AD-safe history, or migrate legacy input on next write."""
+    if "de_iterations_json" in adata.uns:
+        tracker = json.loads(adata.uns["de_iterations_json"])
+        if not isinstance(tracker, dict) or tracker.get("version") != 1:
+            raise ValueError(
+                "Unsupported DE iteration ledger version; history was not changed."
+            )
+    else:
+        tracker = _plain(
+            adata.uns.get(
+                "de_iterations",
+                {
+                    "iterations": [],
+                    "current_iteration": 0,
+                },
+            )
+        )
+    if (
+        not isinstance(tracker, dict)
+        or not isinstance(tracker.get("iterations"), list)
+        or any(not isinstance(i, dict) for i in tracker["iterations"])
+        or not isinstance(tracker.get("current_iteration"), int)
+        or tracker["current_iteration"] < 0
+    ):
+        raise ValueError("Invalid DE iteration ledger; history was not changed.")
+    return tracker
+
+
+def _write_de_iterations(adata, tracker: Dict[str, Any]) -> None:
+    """Persist a JSON scalar, not a heterogeneous list that H5AD cannot write."""
+
+    def json_value(value):
+        value = _plain(value)
+        if isinstance(value, dict):
+            return {k: json_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [json_value(v) for v in value]
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        return value
+
+    encoded = json.dumps(json_value({**tracker, "version": 1}), allow_nan=False)
+    adata.uns["de_iterations_json"] = encoded
+    adata.uns.pop("de_iterations", None)
+
+
+def _snapshot_ids(adata) -> List[int]:
+    ids = []
+    for key in adata.uns:
+        for prefix in ("de_iteration_results_", "de_results_iteration_"):
+            if key.startswith(prefix) and key[len(prefix) :].isdigit():
+                ids.append(int(key[len(prefix) :]))
+    return ids
+
+
+def _next_de_iteration(adata, tracker: Dict[str, Any]) -> int:
+    """Existing snapshots reserve IDs even when the ledger was lost."""
+    return max([tracker["current_iteration"], *_snapshot_ids(adata)]) + 1
+
+
+def _record_de_iteration(
+    adata, iteration_info: Dict[str, Any], current_iter: int
+) -> None:
+    """Shared runtime/replay snapshot writer: immutable history, durable ledger."""
+    key = iteration_info["results_key"]
+    if key in adata.uns or current_iter in _snapshot_ids(adata):
+        raise ValueError(
+            f"Refusing to overwrite existing DE iteration snapshot {key!r}."
+        )
+    tracker = _read_de_iterations(adata)
+    source = adata.uns[f"de_results_formula_{iteration_info['contrast_name']}"]
+    tracker["iterations"].append(iteration_info)
+    tracker["current_iteration"] = current_iter
+    snapshot = {
+        "results_df": source["results_df"].copy(),
+        "analysis_stats": dict(source["analysis_stats"]),
+    }
+    # Serialize first: unsupported metadata must not leave a partial snapshot.
+    _write_de_iterations(adata, tracker)
+    adata.uns[key] = snapshot
+    adata.uns["de_current_results_key"] = key
+
+
+def _with_current_de_ir(
+    ir: AnalysisStep, results_key: str, target: str = "adata"
+) -> AnalysisStep:
+    """Add identity bookkeeping to an existing DE calculation, without changing it."""
+    ir.code_template += f"\n{target}.uns['de_current_results_key'] = {{{{ current_de_results_key | repr }}}}"
+    ir.parameters["current_de_results_key"] = results_key
+    return ir
 
 
 def _de_design_ir(
@@ -219,7 +357,8 @@ def _formula_de_ir(
             "        'lfc_threshold': {{ lfc_threshold | repr }},\n"
             "        'reference_levels': {{ reference_levels | repr }},\n"
             "    },\n"
-            "}"
+            "}\n"
+            "adata.uns['de_current_results_key'] = {{ results_key | repr }}"
         ),
         imports=[],
         parameters={
@@ -257,16 +396,8 @@ def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> A
         description=f"Record DE iteration '{iteration_info.get('name')}'",
         library="lobster",
         code_template=(
-            "{% if iteration_info.results_key %}"
-            "adata.uns[{{ iteration_info.results_key | repr }}] = {\n"
-            "    'results_df': adata.uns[{{ ('de_results_formula_' ~ iteration_info.contrast_name) | repr }}]['results_df'].copy(),\n"
-            "    'analysis_stats': dict(adata.uns[{{ ('de_results_formula_' ~ iteration_info.contrast_name) | repr }}]['analysis_stats']),\n"
-            "}\n"
-            "{% endif %}"
-            "if 'de_iterations' not in adata.uns:\n"
-            "    adata.uns['de_iterations'] = {'iterations': [], 'current_iteration': 0}\n"
-            "adata.uns['de_iterations']['iterations'].append({{ iteration_info | repr }})\n"
-            "adata.uns['de_iterations']['current_iteration'] = {{ current_iter | repr }}"
+            "from lobster.agents.transcriptomics.de_analysis_expert import _record_de_iteration\n"
+            "_record_de_iteration(adata, {{ iteration_info | repr }}, {{ current_iter | repr }})"
         ),
         imports=[],
         parameters={
@@ -294,7 +425,8 @@ def _iteration_comparison_ir(
         description=f"Compare DE iterations '{iteration_1}' and '{iteration_2}'",
         library="pandas",
         code_template=(
-            "de_iterations = adata.uns['de_iterations']['iterations']\n"
+            "from lobster.agents.transcriptomics.de_analysis_expert import _read_de_iterations\n"
+            "de_iterations = _read_de_iterations(adata)['iterations']\n"
             "def find_iteration(name, results_key):\n"
             "    if results_key:\n"
             "        return next(i for i in de_iterations if i.get('results_key') == results_key)\n"
@@ -918,6 +1050,7 @@ def de_analysis_expert(
                     },
                 }
 
+                adata.uns["de_current_results_key"] = f"de_results_{contrast_name}"
                 data_manager.store_modality(
                     name=modality_name,
                     adata=adata,
@@ -959,6 +1092,7 @@ def de_analysis_expert(
                     imports=["pydeseq2"],
                 )
 
+                ir = _with_current_de_ir(ir, f"de_results_{contrast_name}")
                 data_manager.log_tool_usage(
                     tool_name="run_differential_expression",
                     parameters={
@@ -1021,6 +1155,12 @@ def de_analysis_expert(
                     )
                 )
 
+                adata_de.uns["de_current_results_key"] = de_stats["de_results_key"]
+                ir = _with_current_de_ir(
+                    ir,
+                    de_stats["de_results_key"],
+                    "adata_de" if internal_method == "deseq2_like" else "adata",
+                )
                 # Save as new modality
                 de_modality_name = f"{modality_name}_de_{group1}_vs_{group2}"
                 data_manager.store_modality(
@@ -1684,6 +1824,7 @@ def de_analysis_expert(
                 },
             }
 
+            adata.uns["de_current_results_key"] = f"de_results_formula_{contrast_name}"
             # Update modality
             data_manager.store_modality(
                 name=pseudobulk_modality,
@@ -1798,12 +1939,8 @@ def de_analysis_expert(
             # Get the pseudobulk data
             adata = data_manager.get_modality(pseudobulk_modality)
 
-            # Initialize iteration tracking if not exists
-            if "de_iterations" not in adata.uns:
-                adata.uns["de_iterations"] = {"iterations": [], "current_iteration": 0}
-
-            iteration_tracker = adata.uns["de_iterations"]
-            current_iter = iteration_tracker["current_iteration"] + 1
+            iteration_tracker = _read_de_iterations(adata)
+            current_iter = _next_de_iteration(adata, iteration_tracker)
 
             # Determine iteration name
             if iteration_name is None:
@@ -1869,13 +2006,9 @@ def de_analysis_expert(
             # result key depends only on the contrast, so the next iteration of
             # the same contrast would overwrite it and comparisons would then
             # compare the latest result with itself.
-            results_key = f"de_results_iteration_{current_iter}"
-            adata.uns[results_key] = {
-                "results_df": adata.uns[current_key]["results_df"].copy(),
-                "analysis_stats": dict(adata.uns[current_key]["analysis_stats"]),
-            }
-            current_results = adata.uns[results_key]["results_df"]
-            current_stats = adata.uns[results_key]["analysis_stats"]
+            results_key = f"de_iteration_results_{current_iter}"
+            current_results = adata.uns[current_key]["results_df"]
+            current_stats = adata.uns[current_key]["analysis_stats"]
 
             # Store iteration information
             iteration_info = {
@@ -1919,9 +2052,8 @@ def de_analysis_expert(
                 iteration_info["comparison"] = comparison_results
 
             # Update iteration tracking
-            iteration_tracker["iterations"].append(iteration_info)
-            iteration_tracker["current_iteration"] = current_iter
-            adata.uns["de_iterations"] = iteration_tracker
+            _record_de_iteration(adata, iteration_info, current_iter)
+            iteration_tracker = _read_de_iterations(adata)
 
             # Update modality
             data_manager.store_modality(
@@ -1959,7 +2091,7 @@ def de_analysis_expert(
             response += f"- Current iteration: {current_iter}\n"
 
             response += f"\n**Results stored in**: adata.uns['de_results_formula_{contrast_name}']\n"
-            response += "**Iteration tracking**: adata.uns['de_iterations']\n"
+            response += "**Iteration tracking**: adata.uns['de_iterations_json']\n"
 
             response += "\n**Next steps**: Use `compare_de_iterations` to compare all iterations or continue iterating with different parameters."
 
@@ -2018,12 +2150,10 @@ def de_analysis_expert(
             # Get the pseudobulk data
             adata = data_manager.get_modality(pseudobulk_modality)
 
-            # Check iteration tracking exists
-            if "de_iterations" not in adata.uns:
-                return "No iteration tracking found. Run `iterate_de_analysis` first to create iterations."
-
-            iteration_tracker = adata.uns["de_iterations"]
+            iteration_tracker = _read_de_iterations(adata)
             iterations = iteration_tracker["iterations"]
+            if not iterations:
+                return "No iteration tracking found. Run `iterate_de_analysis` first to create iterations."
 
             if len(iterations) < 2:
                 return f"Only {len(iterations)} iteration(s) available. Need at least 2 for comparison."
@@ -2213,6 +2343,7 @@ def de_analysis_expert(
         analysis_type: str = "GO",
         modality_name: str = None,
         save_result: bool = True,
+        de_results_key: str = None,
     ) -> str:
         """
         Run pathway enrichment analysis on gene lists from differential expression results.
@@ -2222,18 +2353,22 @@ def de_analysis_expert(
             analysis_type: Type of analysis ("GO" or "KEGG")
             modality_name: Optional modality name to extract genes from DE results
             save_result: Whether to save enrichment results
+            de_results_key: Explicit DE result choice if current identity is unavailable
         """
         try:
             # If modality name provided, extract significant genes from it
             if modality_name and modality_name in data_manager.list_modalities():
                 adata = data_manager.get_modality(modality_name)
 
-                # Look for DE results in uns
-                de_keys = [
-                    key for key in adata.uns.keys() if key.startswith("de_results")
-                ]
-                if de_keys:
-                    de_results = adata.uns[de_keys[0]]
+                # A supplied gene list can be used when this modality has no DE.
+                # Ambiguous or stale result identity must never select by order.
+                if (
+                    _de_result_keys(adata)
+                    or de_results_key is not None
+                    or "de_current_results_key" in adata.uns
+                ):
+                    selected_key = _resolve_de_results_key(adata, de_results_key)
+                    de_results = adata.uns[selected_key]
                     if isinstance(de_results, dict) and "results_df" in de_results:
                         de_df = de_results["results_df"]
                         if "padj" in de_df.columns:
@@ -2338,18 +2473,7 @@ def de_analysis_expert(
 
             adata = data_manager.get_modality(modality_name)
 
-            # Find DE results key
-            if de_results_key is None:
-                de_keys = [
-                    key for key in adata.uns.keys() if key.startswith("de_results")
-                ]
-                if not de_keys:
-                    return "No DE results found in adata.uns. Run differential expression analysis first."
-                de_results_key = de_keys[-1]  # Use most recent
-
-            if de_results_key not in adata.uns:
-                return f"DE results key '{de_results_key}' not found. Available: {[k for k in adata.uns.keys() if k.startswith('de_results')]}"
-
+            de_results_key = _resolve_de_results_key(adata, de_results_key)
             de_data = adata.uns[de_results_key]
             if not isinstance(de_data, dict) or "results_df" not in de_data:
                 return f"Invalid DE results format at '{de_results_key}'. Expected dict with 'results_df'."
@@ -2428,6 +2552,10 @@ def de_analysis_expert(
                 parameters={
                     "modality_name": modality_name,
                     "de_results_key": de_results_key,
+                    "padj_col": padj_col,
+                    "lfc_col": lfc_col,
+                    "basemean_col": basemean_col,
+                    "save_result": save_result,
                     "padj_threshold": padj_threshold,
                     "lfc_threshold": lfc_threshold,
                     "min_base_mean": min_base_mean,
@@ -2435,13 +2563,26 @@ def de_analysis_expert(
                 parameter_schema={},
                 code_template=(
                     "# Filter DE results\n"
-                    "results_df = adata.uns['{{ de_results_key }}']['results_df']\n"
-                    "mask = (results_df['{{ padj_col }}'] < {{ padj_threshold }}) & "
-                    "(abs(results_df['{{ lfc_col }}']) > {{ lfc_threshold }})"
-                    "{% if basemean_col %} & (results_df['{{ basemean_col }}'] > {{ min_base_mean }}){% endif %}\n"
-                    "filtered_df = results_df[mask]"
+                    "results_df = adata.uns[{{ de_results_key | repr }}]['results_df']\n"
+                    "mask = (results_df[{{ padj_col | repr }}] < {{ padj_threshold | repr }}) & "
+                    "(abs(results_df[{{ lfc_col | repr }}]) > {{ lfc_threshold | repr }})"
+                    "{% if basemean_col %} & (results_df[{{ basemean_col | repr }}] > {{ min_base_mean | repr }}){% endif %}\n"
+                    "filtered_df = results_df[mask].copy()\n"
+                    "{% if save_result %}"
+                    "adata.uns[{{ ('filtered_' ~ de_results_key) | repr }}] = {\n"
+                    "    'results_df': filtered_df,\n"
+                    "    'filter_stats': {\n"
+                    "        'padj_threshold': {{ padj_threshold | repr }},\n"
+                    "        'lfc_threshold': {{ lfc_threshold | repr }},\n"
+                    "        'min_base_mean': {{ min_base_mean | repr }},\n"
+                    "        'n_input': len(results_df), 'n_filtered': len(filtered_df),\n"
+                    "        'n_upregulated': int((filtered_df[{{ lfc_col | repr }}] > 0).sum()),\n"
+                    "        'n_downregulated': int((filtered_df[{{ lfc_col | repr }}] < 0).sum()),\n"
+                    "    },\n"
+                    "}\n"
+                    "{% endif %}"
                 ),
-                imports=["pandas"],
+                imports=[],
             )
 
             data_manager.log_tool_usage(
@@ -2533,14 +2674,7 @@ def de_analysis_expert(
 
             adata = data_manager.get_modality(modality_name)
 
-            # Find DE results key
-            if de_results_key is None:
-                de_keys = [
-                    key for key in adata.uns.keys() if key.startswith("de_results")
-                ]
-                if not de_keys:
-                    return "No DE results found in adata.uns. Run differential expression analysis first."
-                de_results_key = de_keys[-1]
+            de_results_key = _resolve_de_results_key(adata, de_results_key)
 
             # If filtered_only, look for filtered version first
             actual_key = de_results_key
@@ -2777,6 +2911,7 @@ def de_analysis_expert(
                 )
             )
 
+            adata_de.uns["de_current_results_key"] = de_stats["de_results_key"]
             # Store result modality
             de_modality_name = f"{modality_name}_de_{group1}_vs_{group2}"
             data_manager.store_modality(
@@ -2818,6 +2953,7 @@ def de_analysis_expert(
                 imports=["pydeseq2"],
             )
 
+            ir = _with_current_de_ir(ir, de_stats["de_results_key"])
             data_manager.log_tool_usage(
                 tool_name="run_bulk_de_direct",
                 parameters={
@@ -2921,18 +3057,7 @@ def de_analysis_expert(
 
             adata = data_manager.get_modality(modality_name)
 
-            # Find DE results key
-            if de_results_key is None:
-                de_keys = [
-                    key for key in adata.uns.keys() if key.startswith("de_results")
-                ]
-                if not de_keys:
-                    return "No DE results found in adata.uns. Run differential expression analysis first."
-                de_results_key = de_keys[-1]  # Use most recent
-
-            if de_results_key not in adata.uns:
-                return f"DE results key '{de_results_key}' not found. Available: {[k for k in adata.uns.keys() if k.startswith('de_results')]}"
-
+            de_results_key = _resolve_de_results_key(adata, de_results_key)
             de_data = adata.uns[de_results_key]
             if not isinstance(de_data, dict) or "results_df" not in de_data:
                 return f"Invalid DE results format at '{de_results_key}'. Expected dict with 'results_df'."
@@ -3129,18 +3254,7 @@ def de_analysis_expert(
 
             adata = data_manager.get_modality(modality_name)
 
-            # Find DE results key
-            if de_results_key is None:
-                de_keys = [
-                    key for key in adata.uns.keys() if key.startswith("de_results")
-                ]
-                if not de_keys:
-                    return "No DE results found in adata.uns. Run differential expression analysis first."
-                de_results_key = de_keys[-1]
-
-            if de_results_key not in adata.uns:
-                return f"DE results key '{de_results_key}' not found. Available: {[k for k in adata.uns.keys() if k.startswith('de_results')]}"
-
+            de_results_key = _resolve_de_results_key(adata, de_results_key)
             de_data = adata.uns[de_results_key]
             if not isinstance(de_data, dict) or "results_df" not in de_data:
                 return f"Invalid DE results format at '{de_results_key}'."

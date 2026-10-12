@@ -47,6 +47,7 @@ def _ml_split_ir(
     stratify_by: Optional[str],
     random_state: int,
     split_id: str,
+    save_result: bool = False,
 ) -> AnalysisStep:
     """IR for create_ml_splits: the same seeded scikit-learn splits.
 
@@ -115,6 +116,11 @@ def _ml_split_ir(
             "    }\n"
             "    lobster_register({{ modality_name | repr }} + '_' + split_name, split_view)\n"
             "    globals()['adata_' + split_name] = split_view\n"
+            "{% if save_result %}"
+            "    # Persist each split itself, never the complete parent adata.\n"
+            "    split_path = f\"{output_prefix}_\" + {{ modality_name | repr }} + '_' + split_name + '.h5ad'\n"
+            "    split_view.write_h5ad(split_path, compression='gzip')\n"
+            "{% endif %}"
             "lobster_last_output = adata"
         ),
         imports=[],
@@ -125,6 +131,7 @@ def _ml_split_ir(
             "stratify_by": stratify_by,
             "random_state": random_state,
             "split_id": split_id,
+            "save_result": save_result,
         },
         parameter_schema={},
         input_entities=["adata"],
@@ -600,6 +607,7 @@ def machine_learning_expert(
                     stratify_by,
                     random_state,
                     split_id,
+                    save_result=save_result,
                 ),
                 agent=agent_name,
             )
