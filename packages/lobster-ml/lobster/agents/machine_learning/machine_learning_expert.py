@@ -12,8 +12,9 @@ from lobster.agents.machine_learning.config import ML_EXPERT_CONFIG
 AGENT_CONFIG = ML_EXPERT_CONFIG
 
 # === Heavy imports below ===
+import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -32,29 +33,42 @@ from lobster.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Exported notebooks pass one ``adata`` from cell to cell, but the ML tools
+# branch it into named split modalities. These IRs keep the named modalities in
+# a notebook dict, ``lobster_modalities``, so every step replays on the
+# modality it actually used, not on whatever the previous cell left in adata.
+_REGISTRY = "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
+
+
 def _ml_split_ir(
+    modality_name: str,
     test_size: float,
     validation_size: float,
     stratify_by: Optional[str],
     random_state: int,
+    split_id: str,
 ) -> AnalysisStep:
     """IR for create_ml_splits: the same seeded scikit-learn splits.
 
     With the recorded ``random_state`` the notebook assigns every sample to the
-    same train/test/validation set as the tool did.
+    same train/test/validation set as the tool did. The split modalities are
+    registered under the tool's names and tagged with ``split_id``, so later
+    steps find exactly the split they used.
     """
     return AnalysisStep(
         operation="sklearn.model_selection.train_test_split",
         tool_name="create_ml_splits",
         description=(
-            f"Train/test/validation split (test={test_size}, val={validation_size}, "
-            f"stratify={stratify_by}, seed={random_state})"
+            f"Train/test/validation split of '{modality_name}' (test={test_size}, "
+            f"val={validation_size}, stratify={stratify_by}, seed={random_state})"
         ),
         library="sklearn",
         code_template=(
             "import numpy as np\n"
             "from sklearn.model_selection import train_test_split\n"
             "\n"
+            + _REGISTRY
+            + "adata = lobster_modalities.get({{ modality_name | repr }}, adata)\n"
             "indices = np.arange(adata.n_obs)\n"
             "{% if stratify_by %}"
             "stratify_labels = adata.obs[{{ stratify_by | repr }}].values\n"
@@ -84,16 +98,32 @@ def _ml_split_ir(
             "adata.obs.loc[adata.obs_names[test_idx], 'ml_split'] = 'test'\n"
             "if len(val_idx) > 0:\n"
             "    adata.obs.loc[adata.obs_names[val_idx], 'ml_split'] = 'validation'\n"
-            "adata_train = adata[train_idx, :].copy()\n"
-            "adata_test = adata[test_idx, :].copy()\n"
-            "adata_validation = adata[val_idx, :].copy() if len(val_idx) > 0 else None"
+            "adata.uns['ml_split_id'] = {{ split_id | repr }}\n"
+            "lobster_modalities[{{ modality_name | repr }}] = adata\n"
+            "adata_validation = None\n"
+            "for split_name, split_idx in (\n"
+            "    ('train', train_idx), ('test', test_idx), ('validation', val_idx)\n"
+            "):\n"
+            "    if len(split_idx) == 0:\n"
+            "        continue\n"
+            "    split_view = adata[split_idx, :].copy()\n"
+            "    split_view.uns['ml_split_source'] = {\n"
+            "        'modality': {{ modality_name | repr }} + '_' + split_name,\n"
+            "        'parent': {{ modality_name | repr }},\n"
+            "        'split': split_name,\n"
+            "        'split_id': {{ split_id | repr }},\n"
+            "    }\n"
+            "    lobster_modalities[{{ modality_name | repr }} + '_' + split_name] = split_view\n"
+            "    globals()['adata_' + split_name] = split_view"
         ),
         imports=[],
         parameters={
+            "modality_name": modality_name,
             "test_size": test_size,
             "validation_size": validation_size,
             "stratify_by": stratify_by,
             "random_state": random_state,
+            "split_id": split_id,
         },
         parameter_schema={},
         input_entities=["adata"],
@@ -101,26 +131,19 @@ def _ml_split_ir(
     )
 
 
-def _split_of(data_manager, modality_name: str, adata) -> Optional[str]:
-    """Return "train"/"test"/"validation" if ``adata`` is that create_ml_splits split.
+def _split_binding(modality_name: str, adata) -> Optional[Dict[str, str]]:
+    """The create_ml_splits split ``adata`` is, read from its own tag, else None.
 
-    True only when the parent modality (name without the suffix) is loaded,
-    carries the ``ml_split`` column, and its samples labelled with that split
-    are exactly ``adata``'s samples.
+    The tag (``uns['ml_split_source']``) is written when the split is created,
+    so it identifies the split even after its parent has been split again.
     """
-    for split in ("train", "test", "validation"):
-        suffix = f"_{split}"
-        if not modality_name.endswith(suffix):
-            continue
-        parent_name = modality_name[: -len(suffix)]
-        if parent_name not in data_manager.list_modalities():
-            return None
-        parent = data_manager.get_modality(parent_name)
-        if "ml_split" not in parent.obs.columns:
-            return None
-        in_split = parent.obs_names[parent.obs["ml_split"].astype(str) == split]
-        return split if set(in_split) == set(adata.obs_names) else None
-    return None
+    source = adata.uns.get("ml_split_source")
+    if not isinstance(source, dict) or source.get("modality") != modality_name:
+        return None
+    if not source.get("split_id") or not source.get("split"):
+        return None
+    return {"modality": modality_name, "split": str(source["split"]),
+            "split_id": str(source["split_id"])}
 
 
 class MachineLearningError(Exception):
@@ -341,10 +364,9 @@ def machine_learning_expert(
             adata = data_manager.get_modality(modality_name)
             logger.info(f"Preparing ML features from '{modality_name}': {adata.shape}")
 
-            # A modality made by create_ml_splits holds one split; the IR
-            # needs to know so a replayed notebook selects the same samples.
-            # Verified against the split's parent, not inferred from the name.
-            split_subset = _split_of(data_manager, modality_name, adata)
+            # A modality made by create_ml_splits carries its split tag; the IR
+            # then replays on exactly that split rather than the current adata.
+            split_binding = _split_binding(modality_name, adata)
 
             adata_ml, _, ir = ml_prep_service.select_ml_features(
                 adata,
@@ -353,7 +375,7 @@ def machine_learning_expert(
                 n_features=n_features,
                 scale=scale,
                 handle_zeros=handle_zeros,
-                split_subset=split_subset,
+                split_binding=split_binding,
             )
 
             # Save as new modality
@@ -503,9 +525,24 @@ def machine_learning_expert(
             if len(val_idx) > 0:
                 adata.obs.loc[adata.obs_names[val_idx], "ml_split"] = "validation"
 
+            # Tag this split generation, so each split modality can later be
+            # matched to exactly the split cell that produced it.
+            split_id = uuid.uuid4().hex
+            adata.uns["ml_split_id"] = split_id
+
+            def tagged(split_idx, split_name):
+                view = adata[split_idx, :].copy()
+                view.uns["ml_split_source"] = {
+                    "modality": f"{modality_name}_{split_name}",
+                    "parent": modality_name,
+                    "split": split_name,
+                    "split_id": split_id,
+                }
+                return view
+
             # Create separate modalities for each split
-            adata_train = adata[train_idx, :].copy()
-            adata_test = adata[test_idx, :].copy()
+            adata_train = tagged(train_idx, "train")
+            adata_test = tagged(test_idx, "test")
 
             train_modality = f"{modality_name}_train"
             test_modality = f"{modality_name}_test"
@@ -524,7 +561,7 @@ def machine_learning_expert(
             )
 
             if len(val_idx) > 0:
-                adata_val = adata[val_idx, :].copy()
+                adata_val = tagged(val_idx, "validation")
                 val_modality = f"{modality_name}_validation"
                 data_manager.store_modality(
                     name=val_modality,
@@ -555,7 +592,14 @@ def machine_learning_expert(
                     "random_state": random_state,
                 },
                 description=f"Created ML splits: train={len(train_idx)}, test={len(test_idx)}, val={len(val_idx)}",
-                ir=_ml_split_ir(test_size, validation_size, stratify_by, random_state),
+                ir=_ml_split_ir(
+                    modality_name,
+                    test_size,
+                    validation_size,
+                    stratify_by,
+                    random_state,
+                    split_id,
+                ),
                 agent=agent_name,
             )
 
