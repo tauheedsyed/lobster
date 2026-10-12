@@ -27,6 +27,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Exported notebooks pass one ``adata`` from cell to cell, but ML steps work on
+# named modalities (a dataset, its splits, their features). ML IR cells keep
+# those in ``lobster_modalities`` and resolve their input through
+# ``lobster_input``. When a non-ML cell has changed ``adata`` since the last ML
+# cell, a registered name may or may not still mean the same data, so the cell
+# refuses to guess.
+ML_NOTEBOOK_BINDINGS = (
+    "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
+    "def lobster_input(name):\n"
+    "    known = lobster_modalities.get(name)\n"
+    "    if known is None or known is adata:\n"
+    "        lobster_modalities[name] = adata\n"
+    "        return adata\n"
+    "    if globals().get('lobster_last_output') is not adata:\n"
+    "        raise ValueError(\n"
+    "            f'Ambiguous input {name!r}: a non-ML step changed adata after this '\n"
+    "            'modality was registered, so replay cannot tell which data it used.'\n"
+    "        )\n"
+    "    return known\n"
+)
+
 
 class MLPreparationService:
     """
@@ -1059,14 +1080,16 @@ print(f"Recommendations: {recommendations}")
             "scale": scale,
             "handle_zeros": handle_zeros,
         }
-        registry = "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
-        # Take the input by name when an earlier lobster step registered it.
-        split_prelude = "adata = lobster_modalities.get({{ modality_name | repr }}, adata)\n"
+        registry = ML_NOTEBOOK_BINDINGS
+        split_prelude = "adata = lobster_input({{ modality_name | repr }})\n"
         if split_binding:
             split_prelude = (
                 "# This step ran on one split from create_ml_splits. Take exactly\n"
                 "# that split, so replay never prepares features on other samples.\n"
                 "split_view = lobster_modalities.get({{ split_modality | repr }})\n"
+                "split_tag = adata.uns.get('ml_split_source', {})\n"
+                "if split_view is None and split_tag.get('modality') == {{ split_modality | repr }}:\n"
+                "    split_view = adata  # the split itself was loaded as input\n"
                 "if split_view is None or (\n"
                 "    split_view.uns.get('ml_split_source', {}).get('split_id')\n"
                 "    != {{ split_id | repr }}\n"
@@ -1100,7 +1123,8 @@ print(f"Recommendations: {recommendations}")
                 "    adata,\n"
                 + "".join(f"    {k}={{{{ {k} | repr }}}},\n" for k in params)
                 + ")\n"
-                + "lobster_modalities[{{ output_modality | repr }}] = adata"
+                + "lobster_modalities[{{ output_modality | repr }}] = adata\n"
+                + "lobster_last_output = adata"
             ),
             imports=[],
             parameters=ir_parameters,

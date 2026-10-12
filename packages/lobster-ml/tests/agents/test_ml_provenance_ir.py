@@ -199,6 +199,47 @@ def test_resplit_after_a_feature_step_splits_the_parent(samples):
     _assert_same(_replay_all(dm, original)["adata"], dm.modalities["data_train_ml_features"])
 
 
+@pytest.mark.parametrize("second_step", ["prepare_original", "split_original"])
+def test_original_is_still_available_after_its_features(samples, second_step):
+    """Preparing features must not lose the original: a later step on it
+    replays on the original, not on the previous step's output."""
+    original = samples.copy()
+    dm, tools = _tools(samples)
+    _prepare(tools, "data", feature_selection="pca", n_features=10)
+    if second_step == "prepare_original":
+        _prepare(tools, "data")
+        expected = dm.modalities["data_ml_features"]
+    else:
+        _split(tools)
+        _prepare(tools, "data_train")
+        expected = dm.modalities["data_train_ml_features"]
+    replayed = _replay_all(dm, original)["adata"]
+    _assert_same(replayed, expected)
+    assert replayed.n_vars == 200
+
+
+def test_replay_refuses_a_name_a_non_ml_step_may_have_replaced(samples):
+    """After a non-ML cell rebinds adata, a registered name is ambiguous."""
+    original = samples.copy()
+    dm, tools = _tools(samples)
+    _split(tools)
+    scope = _replay_all(dm, original)
+    scope["adata"] = original[:12, :3].copy()  # e.g. a re-import under the same name
+    _prepare(tools, "data")
+    with pytest.raises(ValueError, match="Ambiguous input 'data'"):
+        replay_ir(dm.last_ir("prepare_ml_features"), **scope)
+
+
+def test_split_loaded_as_input_replays_without_its_split_step(samples):
+    """A saved split loaded in a new session carries its tag and replays alone."""
+    dm, tools = _tools(samples)
+    _split(tools)
+    _prepare(tools, "data_train")
+    loaded = dm.modalities["data_train"].copy()
+    replayed = replay_ir(dm.last_ir("prepare_ml_features"), adata=loaded)["adata"]
+    _assert_same(replayed, dm.modalities["data_train_ml_features"])
+
+
 def test_split_feature_step_fails_closed_without_its_split(samples):
     original = samples.copy()
     dm, tools = _tools(samples)
