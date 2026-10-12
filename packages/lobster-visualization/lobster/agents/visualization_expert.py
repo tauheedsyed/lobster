@@ -53,12 +53,17 @@ logger = get_logger(__name__)
 
 
 def _plot_ir(
-    tool_name: str, service_method: str, plot_kwargs: dict, description: str
+    tool_name: str,
+    service_method: str,
+    plot_kwargs: dict,
+    description: str,
+    replayable: bool = False,
 ) -> AnalysisStep:
     """IR that regenerates a figure by calling the same visualization service.
 
-    Plots change no data, so the step is exported (the notebook redraws the
-    figure) but not replayable (reproducing the result never needs it).
+    A plot that changes no data is exported (the notebook redraws the figure)
+    but not replayable. A plot whose service also writes into ``adata`` must
+    pass ``replayable=True``, or replaying would drop those changes.
     """
     kwargs_template = "".join(
         f"    {name}={{{{ plot_kwargs[{name!r}] | repr }}}},\n" for name in plot_kwargs
@@ -83,8 +88,8 @@ def _plot_ir(
         parameters={"plot_kwargs": dict(plot_kwargs)},
         parameter_schema={},
         input_entities=["adata"],
-        output_entities=["fig"],
-        replayable=False,
+        output_entities=["adata", "fig"] if replayable else ["fig"],
+        replayable=replayable,
     )
 
 
@@ -413,11 +418,14 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                     "plot_id": plot_id,
                 },
                 description=f"Created QC plots (ID: {plot_id})",
+                # The QC service also adds QC metric columns (n_genes, n_counts,
+                # percent_mito, ...) to adata.obs, so replay must include it.
                 ir=_plot_ir(
                     "create_qc_plots",
                     "create_qc_plots",
                     plot_kwargs,
-                    f"QC plots of '{modality_name}'",
+                    f"QC plots of '{modality_name}' (adds QC metric columns to obs)",
+                    replayable=True,
                 ),
                 agent=agent_name,
             )

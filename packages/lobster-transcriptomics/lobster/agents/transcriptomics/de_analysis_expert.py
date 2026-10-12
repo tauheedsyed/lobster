@@ -237,11 +237,19 @@ def _formula_de_ir(
     )
 
 
-def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> AnalysisStep:
-    """IR for iterate_de_analysis: append the iteration record to uns.
+def _iteration_results_key(iteration_info: Dict[str, Any]) -> str:
+    """uns key holding an iteration's own results (older records: by contrast)."""
+    return iteration_info.get("results_key") or (
+        f"de_results_formula_{iteration_info['contrast_name']}"
+    )
 
-    The DE run itself is recorded separately by run_de_with_formula's IR; this
-    step restores the iteration bookkeeping exactly as recorded.
+
+def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> AnalysisStep:
+    """IR for iterate_de_analysis: snapshot the results and record the iteration.
+
+    The DE run itself is recorded separately by run_de_with_formula's IR, which
+    replays just before this step. This step copies that result to the
+    iteration's own key and restores the iteration bookkeeping as recorded.
     """
     return AnalysisStep(
         operation="lobster.record_de_iteration",
@@ -249,6 +257,12 @@ def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> A
         description=f"Record DE iteration '{iteration_info.get('name')}'",
         library="lobster",
         code_template=(
+            "{% if iteration_info.results_key %}"
+            "adata.uns[{{ iteration_info.results_key | repr }}] = {\n"
+            "    'results_df': adata.uns[{{ ('de_results_formula_' ~ iteration_info.contrast_name) | repr }}]['results_df'].copy(),\n"
+            "    'analysis_stats': dict(adata.uns[{{ ('de_results_formula_' ~ iteration_info.contrast_name) | repr }}]['analysis_stats']),\n"
+            "}\n"
+            "{% endif %}"
             "if 'de_iterations' not in adata.uns:\n"
             "    adata.uns['de_iterations'] = {'iterations': [], 'current_iteration': 0}\n"
             "adata.uns['de_iterations']['iterations'].append({{ iteration_info | repr }})\n"
@@ -278,8 +292,11 @@ def _iteration_comparison_ir(
             "de_iterations = adata.uns['de_iterations']['iterations']\n"
             "iter1_info = next(i for i in de_iterations if i['name'] == {{ iteration_1 | repr }})\n"
             "iter2_info = next(i for i in de_iterations if i['name'] == {{ iteration_2 | repr }})\n"
-            "results1 = adata.uns[f\"de_results_formula_{iter1_info['contrast_name']}\"]['results_df']\n"
-            "results2 = adata.uns[f\"de_results_formula_{iter2_info['contrast_name']}\"]['results_df']\n"
+            "def iteration_results(info):\n"
+            "    key = info.get('results_key') or f\"de_results_formula_{info['contrast_name']}\"\n"
+            "    return adata.uns[key]['results_df']\n"
+            "results1 = iteration_results(iter1_info)\n"
+            "results2 = iteration_results(iter2_info)\n"
             "sig1 = set(results1[results1['padj'] < 0.05].index)\n"
             "sig2 = set(results2[results2['padj'] < 0.05].index)\n"
             "overlap, unique1, unique2 = sig1 & sig2, sig1 - sig2, sig2 - sig1\n"
@@ -1786,7 +1803,7 @@ def de_analysis_expert(
             previous_iteration = None
             if compare_to_previous and iteration_tracker["iterations"]:
                 previous_iteration = iteration_tracker["iterations"][-1]
-                prev_key = f"de_results_formula_{previous_iteration['contrast_name']}"
+                prev_key = _iteration_results_key(previous_iteration)
                 if prev_key in adata.uns:
                     previous_results = adata.uns[prev_key]["results_df"]
 
@@ -1830,8 +1847,17 @@ def de_analysis_expert(
             if current_key not in adata.uns:
                 return "Results not found after analysis. Analysis may have failed."
 
-            current_results = adata.uns[current_key]["results_df"]
-            current_stats = adata.uns[current_key]["analysis_stats"]
+            # Snapshot this iteration's results under its own key. The formula
+            # result key depends only on the contrast, so the next iteration of
+            # the same contrast would overwrite it and comparisons would then
+            # compare the latest result with itself.
+            results_key = f"de_results_iteration_{current_iter}"
+            adata.uns[results_key] = {
+                "results_df": adata.uns[current_key]["results_df"].copy(),
+                "analysis_stats": dict(adata.uns[current_key]["analysis_stats"]),
+            }
+            current_results = adata.uns[results_key]["results_df"]
+            current_stats = adata.uns[results_key]["analysis_stats"]
 
             # Store iteration information
             iteration_info = {
@@ -1839,6 +1865,7 @@ def de_analysis_expert(
                 "formula": new_formula,
                 "contrast": new_contrast,
                 "contrast_name": contrast_name,
+                "results_key": results_key,
                 "n_significant": current_stats["n_significant_genes"],
                 "timestamp": pd.Timestamp.now().isoformat(),
                 "filter_criteria": filter_criteria or {},
@@ -2009,8 +2036,8 @@ def de_analysis_expert(
                     )
 
             # Get results DataFrames
-            iter1_key = f"de_results_formula_{iter1_info['contrast_name']}"
-            iter2_key = f"de_results_formula_{iter2_info['contrast_name']}"
+            iter1_key = _iteration_results_key(iter1_info)
+            iter2_key = _iteration_results_key(iter2_info)
 
             if iter1_key not in adata.uns or iter2_key not in adata.uns:
                 return "Results not found for one or both iterations."

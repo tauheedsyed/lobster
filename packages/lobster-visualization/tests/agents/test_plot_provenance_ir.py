@@ -22,7 +22,7 @@ MODULE = "lobster.agents.visualization_expert"
 GENES = ["gene_0", "gene_1", "gene_2"]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def cells() -> ad.AnnData:
     """Plot-ready cells built with numpy only (the package CI has no scanpy)."""
     rng = np.random.default_rng(0)
@@ -72,6 +72,7 @@ CASES = [
 @pytest.mark.parametrize("tool_name,args", CASES, ids=[c[0] for c in CASES])
 def test_plot_ir_redraws_the_same_figure(cells, monkeypatch, tool_name, args):
     monkeypatch.setattr(go.Figure, "show", lambda self, *a, **k: None)
+    original = cells.copy()  # replay input: the data before the tool ran
     dm = RecordingDataManager({"cells": cells})
     tools = factory_tools(visualization_expert, MODULE, dm)
 
@@ -82,9 +83,19 @@ def test_plot_ir_redraws_the_same_figure(cells, monkeypatch, tool_name, args):
 
     ir = dm.last_ir(tool_name)
     assert isinstance(ir, AnalysisStep)
-    assert ir.replayable is False and ir.exportable is True
+    assert ir.exportable is True
     ir.validate_rendered_code()
 
     produced = dm.plot_manager.add_plot.call_args.kwargs["plot"]
-    replayed = replay_ir(ir, adata=cells.copy())["fig"]
-    assert replayed.to_json() == produced.to_json()
+    scope = replay_ir(ir, adata=original.copy())
+    assert scope["fig"].to_json() == produced.to_json()
+
+    # A plot may only be non-replayable if it left the data unchanged.
+    changed_obs = sorted(set(cells.obs.columns) - set(original.obs.columns))
+    if changed_obs:
+        assert ir.replayable is True, f"{tool_name} adds {changed_obs} but is not replayable"
+        pd.testing.assert_frame_equal(scope["adata"].obs, cells.obs)
+    else:
+        assert ir.replayable is False
+    if tool_name == "create_qc_plots":
+        assert "percent_mito" in changed_obs  # the QC service writes QC metrics

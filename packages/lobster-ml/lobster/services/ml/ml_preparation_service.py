@@ -910,6 +910,7 @@ print(f"Recommendations: {recommendations}")
         n_features: int = 2000,
         scale: bool = True,
         handle_zeros: str = "keep",
+        split_subset: Optional[str] = None,
     ) -> Tuple["AnnData", Dict[str, Any], AnalysisStep]:
         """
         Select, clean and scale features for ML, as the ML expert's
@@ -923,6 +924,10 @@ print(f"Recommendations: {recommendations}")
             scale: Z-score each feature (scanpy ``pp.scale``)
             handle_zeros: "keep", "remove" (drop features >=90% zeros) or
                 "impute" (replace zeros with the feature's non-zero mean)
+            split_subset: "train", "test" or "validation" when ``adata`` is one
+                split made by create_ml_splits. Only affects the IR: the
+                notebook carries one ``adata``, so the IR first selects that
+                split instead of preparing features on all samples.
 
         Returns:
             Tuple of (ml_ready_adata, stats, AnalysisStep). The IR calls this
@@ -1053,6 +1058,19 @@ print(f"Recommendations: {recommendations}")
             "scale": scale,
             "handle_zeros": handle_zeros,
         }
+        if split_subset not in (None, "train", "test", "validation"):
+            raise ValueError(f"Unknown split_subset: {split_subset!r}")
+        split_prelude = ""
+        if split_subset:
+            split_prelude = (
+                f"# This step ran on the {split_subset!r} split only: select it so\n"
+                "# replay does not prepare features on held-out samples.\n"
+                f"if globals().get('adata_{split_subset}') is not None:\n"
+                f"    adata = adata_{split_subset}\n"
+                "elif 'ml_split' in adata.obs and "
+                f"(adata.obs['ml_split'] != {split_subset!r}).any():\n"
+                f"    adata = adata[adata.obs['ml_split'] == {split_subset!r}].copy()\n"
+            )
         ir = AnalysisStep(
             operation="lobster.ml.select_ml_features",
             tool_name="prepare_ml_features",
@@ -1064,7 +1082,8 @@ print(f"Recommendations: {recommendations}")
             code_template=(
                 "from lobster.services.ml.ml_preparation_service import MLPreparationService\n"
                 "\n"
-                "adata, ml_feature_stats, _ = MLPreparationService().select_ml_features(\n"
+                + split_prelude
+                + "adata, ml_feature_stats, _ = MLPreparationService().select_ml_features(\n"
                 "    adata,\n"
                 + "".join(f"    {k}={{{{ {k} | repr }}}},\n" for k in params)
                 + ")"

@@ -104,3 +104,44 @@ def test_create_ml_splits_replays(samples, validation_size, stratify_by):
         )
     else:
         assert scope["adata_validation"] is None
+
+
+@pytest.mark.parametrize("split", ["train", "test"])
+def test_features_on_a_split_replay_on_that_split_only(samples, split):
+    """split -> prepare(<split>) must not replay feature preparation on all samples.
+
+    The notebook carries a single `adata`, so the feature step has to select the
+    split itself; otherwise held-out samples leak into the training features.
+    """
+    original = samples.copy()
+    dm, tools = _tools(samples)
+    tools["create_ml_splits"].invoke(
+        {
+            "modality_name": "data",
+            "test_size": 0.25,
+            "validation_size": 0.0,
+            "random_state": 7,
+            "save_result": False,
+        }
+    )
+    tools["prepare_ml_features"].invoke(
+        {
+            "modality_name": f"data_{split}",
+            "feature_selection": "all",
+            "scale": False,
+            "save_result": False,
+        }
+    )
+    produced = dm.modalities[f"data_{split}_ml_features"]
+
+    # With the split's variables available (sequential notebook replay) ...
+    scope = replay_ir(dm.last_ir("create_ml_splits"), adata=original.copy())
+    scope = replay_ir(dm.last_ir("prepare_ml_features"), **scope)
+    assert list(scope["adata"].obs_names) == list(produced.obs_names)
+    np.testing.assert_allclose(np.asarray(scope["adata"].X), np.asarray(produced.X))
+
+    # ... and with only the split-annotated adata (the split cell's variables gone).
+    annotated = replay_ir(dm.last_ir("create_ml_splits"), adata=original.copy())["adata"]
+    alone = replay_ir(dm.last_ir("prepare_ml_features"), adata=annotated)["adata"]
+    assert sorted(alone.obs_names) == sorted(produced.obs_names)
+    assert set(alone.obs["ml_split"]) == {split}

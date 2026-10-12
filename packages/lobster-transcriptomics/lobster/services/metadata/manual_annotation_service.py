@@ -1029,7 +1029,12 @@ The colors in this terminal [bold]exactly match[/bold] your UMAP plot colors for
         if cluster_key not in adata.obs.columns:
             raise KeyError(f"Cluster column '{cluster_key}' not found in adata.obs")
 
-        mapping = {str(k): str(v) for k, v in mapping.items()}
+        # Null labels (e.g. JSON null) stay unmapped and get ``fill_value``.
+        mapping = {
+            str(k): str(v)
+            for k, v in mapping.items()
+            if v is not None and not (isinstance(v, float) and v != v)
+        }
         adata_copy = adata.copy()
         adata_copy.obs[target_column] = (
             adata_copy.obs[cluster_key].astype(str).map(mapping).fillna(fill_value)

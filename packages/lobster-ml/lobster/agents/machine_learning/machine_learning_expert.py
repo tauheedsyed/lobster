@@ -319,6 +319,17 @@ def machine_learning_expert(
             adata = data_manager.get_modality(modality_name)
             logger.info(f"Preparing ML features from '{modality_name}': {adata.shape}")
 
+            # A modality made by create_ml_splits holds one split; the IR
+            # needs to know so a replayed notebook selects the same samples.
+            split_subset = None
+            if "ml_split" in adata.obs.columns:
+                split_values = set(adata.obs["ml_split"].astype(str).unique())
+                for candidate in ("train", "test", "validation"):
+                    if split_values == {candidate} and modality_name.endswith(
+                        f"_{candidate}"
+                    ):
+                        split_subset = candidate
+
             adata_ml, _, ir = ml_prep_service.select_ml_features(
                 adata,
                 modality_name=modality_name,
@@ -326,6 +337,7 @@ def machine_learning_expert(
                 n_features=n_features,
                 scale=scale,
                 handle_zeros=handle_zeros,
+                split_subset=split_subset,
             )
 
             # Save as new modality

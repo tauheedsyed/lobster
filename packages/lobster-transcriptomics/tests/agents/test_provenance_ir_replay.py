@@ -213,6 +213,28 @@ class TestAnnotationToolIR:
         )
 
 
+    def test_imported_null_labels_stay_unassigned(self, annotation_setup, tmp_path):
+        """JSON null must not become a cell type literally named 'None'."""
+        adata, dm, tools = annotation_setup
+        mapping_file = tmp_path / "mapping.json"
+        mapping_file.write_text(
+            json.dumps(
+                {
+                    "cluster_column": "seurat_clusters",
+                    "cluster_to_celltype": {"0": None, "1": "B cells"},
+                }
+            )
+        )
+        tools["import_annotation_mapping"].invoke(
+            {"modality_name": "cells", "mapping_file": str(mapping_file), "save_result": False}
+        )
+        labels = dm.modalities["cells_imported_annotations"].obs["cell_type_imported"]
+        assert "None" not in set(labels)
+        assert set(labels) == {"B cells", "Unassigned"}
+        replayed = replay_ir(dm.last_ir("import_annotation_mapping"), adata=adata.copy())
+        pd.testing.assert_series_equal(replayed["adata"].obs["cell_type_imported"], labels)
+
+
 # ---------------------------------------------------------------------------
 # Formula-based differential expression
 # ---------------------------------------------------------------------------
@@ -234,7 +256,8 @@ def _pseudobulk(seed: int = 0) -> ad.AnnData:
 
 
 @pytest.fixture
-def de_setup():
+def de_setup(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # the DE IR's BulkRNASeqService writes ./bulk_results
     adata = _pseudobulk()
     original = adata.copy()
     dm = RecordingDataManager({"pb": adata})
@@ -332,6 +355,46 @@ class TestFormulaDEToolIR:
         assert sorted(replayed_cmp["overlap_genes"]) == sorted(
             produced["overlap_genes"]
         )
+
+    def test_same_contrast_iterations_keep_their_own_results(self, de_setup):
+        """Two formulas for one contrast must not be compared as one result.
+
+        The formula result key depends only on the contrast, so the second run
+        overwrote the first and the comparison reported 100% overlap.
+        """
+        original, dm, tools = de_setup
+        for name, formula in (("base", "~condition"), ("batch", "~batch + condition")):
+            tools["iterate_de_analysis"].invoke(
+                {
+                    "pseudobulk_modality": "pb",
+                    "new_formula": formula,
+                    "new_contrast": CONTRAST,
+                    "iteration_name": name,
+                }
+            )
+        uns = dm.modalities["pb"].uns
+        base = uns["de_results_iteration_1"]["results_df"]
+        batch = uns["de_results_iteration_2"]["results_df"]
+        lfc_delta = (base["log2FoldChange"] - batch["log2FoldChange"]).abs().max()
+        assert lfc_delta > 1e-3, "the two formulas must give different results"
+
+        tools["compare_de_iterations"].invoke({"pseudobulk_modality": "pb"})
+        cmp = uns["iteration_comparisons"]["iteration_comparison_batch_vs_base"]
+        expected_corr = batch.loc[cmp["overlap_genes"], "log2FoldChange"].corr(
+            base.loc[cmp["overlap_genes"], "log2FoldChange"]
+        )
+        assert cmp["correlation"] == pytest.approx(expected_corr)
+        assert cmp["correlation"] < 1.0 - 1e-9
+
+        # Replaying every step reproduces the same, non-trivial comparison.
+        replayed = original.copy()
+        for call in dm.calls:
+            replayed = replay_ir(call.ir, adata=replayed)["adata"]
+        replayed_cmp = replayed.uns["iteration_comparisons"][
+            "iteration_comparison_batch_vs_base"
+        ]
+        assert replayed_cmp["summary_stats"] == cmp["summary_stats"]
+        assert replayed_cmp["correlation"] == pytest.approx(cmp["correlation"])
 
     def test_comparison_without_saving_is_not_replayable(self, de_setup):
         _, dm, tools = de_setup
