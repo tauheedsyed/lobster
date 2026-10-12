@@ -376,8 +376,7 @@ class DownloadOrchestrator:
                 f"({adata.n_obs} obs × {adata.n_vars} vars)"
             )
 
-            # Step 7: Log provenance (unless the caller logs it with the IR)
-            if not return_ir:
+            def log_download_provenance() -> None:
                 self.data_manager.log_tool_usage(
                     "download_orchestrator.execute_download",
                     {
@@ -392,10 +391,22 @@ class DownloadOrchestrator:
                 )
                 logger.info("Provenance logged for download operation")
 
+            # Step 7: Log provenance (unless the caller logs it with the IR)
+            if not return_ir:
+                log_download_provenance()
+
             # Step 8: Update queue status to COMPLETED
-            self.data_manager.download_queue.update_status(
-                entry_id, DownloadStatus.COMPLETED, modality_name=modality_name
-            )
+            try:
+                self.data_manager.download_queue.update_status(
+                    entry_id, DownloadStatus.COMPLETED, modality_name=modality_name
+                )
+            except Exception:
+                # The modality is already stored. If the caller was to log it,
+                # it never receives the IR now, so record provenance here
+                # rather than leave stored data without any.
+                if return_ir:
+                    log_download_provenance()
+                raise
             logger.info(
                 f"Download completed successfully for entry '{entry_id}' → '{modality_name}'"
             )

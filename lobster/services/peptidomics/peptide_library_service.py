@@ -378,8 +378,11 @@ class PeptideLibraryService:
 
         provider_classes = list(providers)
         sequences = adata.obs["sequence"].astype(str).tolist()
-        annotations: List[str] = []
-        for seq in sequences:
+        # One lookup per distinct sequence: duplicate peptides get the same
+        # outcome (also when a provider fails), so the sequence-keyed record
+        # in the IR reproduces every row.
+        label_by_sequence: Dict[str, str] = {}
+        for seq in dict.fromkeys(sequences):
             found_activities: List[str] = []
             for provider_cls in provider_classes:
                 try:
@@ -389,11 +392,12 @@ class PeptideLibraryService:
                             found_activities.extend(r.activities)
                 except Exception as e:
                     logger.warning(f"Annotation lookup failed: {e}")
-            annotations.append(
+            label_by_sequence[seq] = (
                 ", ".join(sorted(set(found_activities)))
                 if found_activities
                 else "unknown"
             )
+        annotations = [label_by_sequence[seq] for seq in sequences]
 
         adata_out = adata.copy()
         adata_out.obs["known_activities"] = annotations

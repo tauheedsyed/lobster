@@ -93,6 +93,76 @@ def test_activity_annotation_reapplies_recorded_hits(library):
     assert list(adata_out.obs["known_activities"]) == ["antibacterial", "unknown"]
 
 
+def test_duplicate_sequences_get_one_consistent_outcome(library):
+    """Duplicates are looked up once, so the sequence-keyed IR replays every row."""
+    import anndata as ad
+
+    calls = []
+
+    class FlakyProvider:
+        def search_sequences(self, query, max_results=3):
+            calls.append(query)
+            if len(calls) > 1:
+                raise RuntimeError("transient provider failure")
+            return [SimpleNamespace(sequence="ACDE", activities=["antibacterial"])]
+
+    peptides = ad.AnnData(
+        obs=pd.DataFrame({"sequence": ["ACDE", "ACDE"]}, index=["a", "b"])
+    )
+    adata_out, _, ir = PeptideLibraryService().annotate_known_activity(
+        peptides, providers=[FlakyProvider], database="dbaasp"
+    )
+    assert len(calls) == 1
+    assert list(adata_out.obs["known_activities"]) == ["antibacterial", "antibacterial"]
+    replayed = replay_ir(ir, adata=peptides.copy())["adata"]
+    pd.testing.assert_series_equal(
+        replayed.obs["known_activities"], adata_out.obs["known_activities"]
+    )
+
+
+def test_unbounded_filter_replays(library):
+    """inf bounds must render as runnable Python, not the undefined name `inf`."""
+    dm, tools, _ = library
+    tools["filter_peptides"].invoke(
+        {
+            "modality_name": "peptides",
+            "min_charge": float("-inf"),
+            "max_charge": float("inf"),
+        }
+    )
+    produced = dm.modalities["peptides_filtered"]
+    source = dm.modalities["peptides"].copy()
+    replayed = replay_ir(_ir(dm, "filter_peptides"), adata=source)["adata"]
+    pd.testing.assert_frame_equal(replayed.obs, produced.obs)
+
+
+def test_import_only_notebook_runs_without_an_h5ad_input(tmp_path, monkeypatch):
+    """The exported notebook must build adata from the FASTA, not load dataset.h5ad."""
+    import nbformat
+
+    monkeypatch.chdir(tmp_path)  # the notebook's save cell writes to the cwd
+
+    from lobster.core.runtime.data_manager import DataManagerV2
+
+    fasta = tmp_path / "lib.fasta"
+    fasta.write_text(FASTA)
+    dm = DataManagerV2(workspace_path=tmp_path / "ws", auto_scan=False)
+    tools = {t.name: t for t in create_peptide_tools(dm, workspace_path=tmp_path)}
+    tools["import_peptide_sequences"].invoke({"file_path": str(fasta)})
+    tools["filter_peptides"].invoke({"modality_name": "peptides", "max_length": 20})
+
+    nb = nbformat.read(
+        dm.export_notebook(name="peptides", filter_strategy="replay"), as_version=4
+    )
+    code = "\n".join(c.source for c in nb.cells if c.cell_type == "code")
+    assert "read_h5ad(input_data)" not in code
+    scope = {}
+    for cell in nb.cells:
+        if cell.cell_type == "code":
+            exec(compile(cell.source, "<cell>", "exec"), scope)  # nosec B102
+    assert list(scope["adata"].obs_names) == ["p2"]
+
+
 def test_report_export_is_utility(library):
     _, tools, _ = library
     tool = tools["export_peptide_report"]

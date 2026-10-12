@@ -120,6 +120,8 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+_ENRICHMENT_MODES = frozenset({"column_scan", "llm_auto", "manual", "hybrid"})
+
 # Sample fields written by the disease-enrichment phases.
 _DISEASE_FIELDS = (
     "disease",
@@ -149,11 +151,16 @@ def _disease_enrichment_ir(
     samples: List[Dict[str, Any]],
     dry_run: bool,
 ) -> AnalysisStep:
-    """IR that re-applies the disease labels this enrichment wrote.
+    """IR that records, and can re-apply, the disease labels this enrichment wrote.
 
     The labels come from column re-scans, LLM extraction and manual mappings.
     LLM output is not deterministic, so the IR records each changed sample's
-    new disease fields and re-applies them, which reproduces the result exactly.
+    new disease fields rather than re-running the extraction.
+
+    Exported notebooks only carry ``adata``; sample records in the metadata
+    store have no notebook binding. So the step is exported as a record (its
+    cell applies the updates only when ``samples`` is bound) but is not
+    replayable. A dry run changed nothing and is not exported at all.
     """
     updates = []
     for index, (old, sample) in enumerate(zip(before, samples)):
@@ -173,13 +180,16 @@ def _disease_enrichment_ir(
         ),
         library="lobster",
         code_template=(
-            "# `samples`: the sample records stored under metadata key\n"
-            "# {{ workspace_key | repr }} (metadata_store[key]['samples']).\n"
-            "# Labels came from {{ enrichment_mode }} enrichment; LLM extraction is not\n"
-            "# deterministic, so the recorded labels are re-applied here.\n"
+            "# Disease labels written by enrichment of metadata key {{ workspace_key | repr }}\n"
+            "# (mode {{ enrichment_mode | repr }}). LLM extraction is not deterministic,\n"
+            "# so the recorded labels are re-applied rather than re-extracted.\n"
             "disease_updates = {{ updates | repr }}\n"
-            "for update in disease_updates:\n"
-            "    samples[update['index']].update(update['fields'])"
+            "if 'samples' in globals():\n"
+            "    for update in disease_updates:\n"
+            "        samples[update['index']].update(update['fields'])\n"
+            "else:\n"
+            "    binding = 'metadata_store[%r][\"samples\"]' % {{ workspace_key | repr }}\n"
+            "    print(f'{len(disease_updates)} recorded disease updates; bind `samples` to {binding} to apply them.')"
         ),
         imports=[],
         parameters={
@@ -191,8 +201,8 @@ def _disease_enrichment_ir(
         input_entities=["samples"],
         output_entities=["samples"],
         execution_context={"dry_run": dry_run},
-        # A dry run changes nothing, so there is nothing to replay.
-        replayable=not dry_run,
+        exportable=not dry_run,
+        replayable=False,
     )
 
 
@@ -2750,6 +2760,12 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
         Example:
             enrich_samples_with_disease(workspace_key="aggregated_filtered_samples")
         """
+        if enrichment_mode not in _ENRICHMENT_MODES:
+            return (
+                f"❌ Invalid enrichment_mode {enrichment_mode!r}. "
+                f"Use one of: {', '.join(sorted(_ENRICHMENT_MODES))}"
+            )
+
         # Step 1: Load samples from workspace
         if workspace_key not in data_manager.metadata_store:
             return f"❌ Workspace key '{workspace_key}' not found in metadata_store"

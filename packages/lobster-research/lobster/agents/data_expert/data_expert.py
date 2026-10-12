@@ -328,7 +328,11 @@ Dataset: {entry.dataset_id}
                     entry_id, strategy_override_dict, return_ir=True
                 )
 
-                result_adata = data_manager.get_modality(modality_name)
+                if not modality_name:
+                    # Another worker claimed the entry first; nothing was stored.
+                    return (
+                        f"Entry '{entry_id}' is currently being downloaded by another agent"
+                    )
 
                 # Provenance: logged as soon as the modality is stored.
                 data_manager.log_tool_usage(
@@ -343,6 +347,8 @@ Dataset: {entry.dataset_id}
                     ir=download_ir,
                     agent=agent_name,
                 )
+
+                result_adata = data_manager.get_modality(modality_name)
 
                 logger.info(f"Download complete: {entry.dataset_id} → {modality_name}")
 

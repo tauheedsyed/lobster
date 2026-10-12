@@ -390,6 +390,8 @@ class NotebookExporter:
             "sra_download",
             "pride.download.download_dataset",
             "metabolights.download.download_dataset",
+            # Builds adata from a FASTA/CSV/TSV file itself.
+            "peptidomics.import_sequences",
         }
         return any(ir.operation in download_ops for _, ir in exportable_pairs)
 
