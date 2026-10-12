@@ -62,14 +62,22 @@ def _has_provenance_call(tree: ast.AST) -> bool:
     """Check if AST contains log_tool_usage(ir=...) call.
 
     Inlined from lobster.config.aquadif.has_provenance_call to avoid imports.
+    Keep the two in sync — a literal ``ir=None`` satisfies the keyword's name
+    while writing no provenance, so it must not count as a provenance call.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr == "log_tool_usage":
                     for keyword in node.keywords:
-                        if keyword.arg == "ir":
-                            return True
+                        if keyword.arg != "ir":
+                            continue
+                        if (
+                            isinstance(keyword.value, ast.Constant)
+                            and keyword.value.value is None
+                        ):
+                            continue  # ir=None writes no provenance
+                        return True
     return False
 
 
@@ -285,6 +293,19 @@ def _check_aquadif_metadata(plugin_dir: Path) -> List[ValidationResult]:
 # Check 6: Provenance calls
 # ---------------------------------------------------------------------------
 
+def _has_only_hollow_provenance(tree: ast.AST) -> bool:
+    """True if log_tool_usage is called with ir= but only ever as literal None."""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "log_tool_usage"
+            and any(keyword.arg == "ir" for keyword in node.keywords)
+        ):
+            return True
+    return False
+
+
 def _check_provenance_calls(plugin_dir: Path) -> List[ValidationResult]:
     results = []
     for module_path in _find_agent_modules(plugin_dir):
@@ -309,6 +330,17 @@ def _check_provenance_calls(plugin_dir: Path) -> List[ValidationResult]:
                     check="Provenance calls",
                     passed=True,
                     message=f"{module_path.name}: log_tool_usage(ir=ir) calls found",
+                ))
+            elif _has_only_hollow_provenance(tree):
+                # Transition: one release of warning before ir=None fails.
+                results.append(ValidationResult(
+                    check="Provenance calls",
+                    passed=True,
+                    message=(
+                        f"WARNING {module_path.name}: provenance=True but only "
+                        "log_tool_usage(ir=None) found, which records nothing "
+                        "reproducible; this will fail in a future release"
+                    ),
                 ))
             else:
                 results.append(ValidationResult(

@@ -7,6 +7,9 @@ from langchain_core.tools import StructuredTool
 
 from lobster.testing.contract_mixins import AgentContractTestMixin
 
+# The fixtures below are only inspected as source, never called.
+data_manager = None
+
 
 def sync_logged():
     ir = object()
@@ -32,6 +35,10 @@ def synthetic_sync_wrapper():
 
 async def async_no_logging():
     return "no provenance"
+
+
+def sync_hollow_ir():
+    data_manager.log_tool_usage(tool_name="example", ir=None)
 
 
 class TestContractCallableSelection(unittest.TestCase):
@@ -101,6 +108,15 @@ class TestContractCallableSelection(unittest.TestCase):
                 self.assertRaisesRegex(AssertionError, "does NOT call log_tool_usage"),
             ):
                 self.validate(func, coroutine)
+
+    def test_literal_ir_none_rejected(self):
+        with self.assertRaisesRegex(AssertionError, "passed literally as ir=None"):
+            self.validate(sync_hollow_ir)
+
+    def test_uninspectable_source_is_a_failure_not_a_skip(self):
+        # A builtin has no Python source; the gate must not wave it through.
+        with self.assertRaisesRegex(AssertionError, "could not be verified"):
+            self.validate(len)
 
     def test_async_invalid_cannot_hide_behind_valid_sync_callable(self):
         with self.assertRaisesRegex(AssertionError, "does NOT call log_tool_usage"):

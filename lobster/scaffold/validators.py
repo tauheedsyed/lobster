@@ -339,6 +339,19 @@ def _check_aquadif_metadata(plugin_dir: Path) -> List[ValidationResult]:
     return results
 
 
+def _has_only_hollow_provenance(tree: ast.AST) -> bool:
+    """True if log_tool_usage is called with ``ir=`` but only ever as literal None."""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "log_tool_usage"
+            and any(keyword.arg == "ir" for keyword in node.keywords)
+        ):
+            return True
+    return False
+
+
 def _check_provenance_calls(plugin_dir: Path) -> List[ValidationResult]:
     """Check 6: Provenance tools call log_tool_usage(ir=ir) (AST check).
 
@@ -374,6 +387,23 @@ def _check_provenance_calls(plugin_dir: Path) -> List[ValidationResult]:
                         check="Provenance calls",
                         passed=True,
                         message=f"{module_path.name}: log_tool_usage(ir=ir) calls found",
+                    )
+                )
+            elif _has_only_hollow_provenance(tree):
+                # Transition: `ir=None` was documented as an acceptable bridge, so
+                # existing plugins get one release of warning before it fails.
+                results.append(
+                    ValidationResult(
+                        check="Provenance calls",
+                        passed=True,
+                        message=(
+                            f"{module_path.name}: tools declare provenance=True but "
+                            "only call log_tool_usage(ir=None), which records nothing "
+                            "reproducible. Pass a real AnalysisStep, or set "
+                            "provenance=False for tools that change no data. This "
+                            "will fail in a future release."
+                        ),
+                        severity="warning",
                     )
                 )
             else:

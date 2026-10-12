@@ -6,6 +6,8 @@ depend on. They ensure the enum has exactly 10 categories with correct names,
 values, and provenance requirements.
 """
 
+import ast
+
 import pytest
 
 from lobster.config.aquadif import (
@@ -174,3 +176,134 @@ def my_tool(data):
 
         tree = ast.parse("pass")
         assert has_provenance_call(tree) is False
+
+    def test_rejects_literal_ir_none(self):
+        """A literal ir=None writes no provenance and must not satisfy the check.
+
+        This is the case that let 34 tools declare provenance=True and pass: the
+        check matched the keyword's *name* and never looked at its value.
+        """
+        import ast
+
+        tree = ast.parse('data_manager.log_tool_usage("test", params, stats, ir=None)')
+        assert has_provenance_call(tree) is False
+
+    def test_accepts_ir_expression_that_cannot_be_evaluated_statically(self):
+        """A call or attribute is taken at face value — only literal None is rejected."""
+        import ast
+
+        for expr in ("build_ir()", "result.ir", "ir or fallback_ir"):
+            tree = ast.parse(f'data_manager.log_tool_usage("t", p, s, ir={expr})')
+            assert has_provenance_call(tree) is True, expr
+
+    def test_one_real_ir_among_several_calls_is_enough(self):
+        """A tool logging twice, once with real IR, still tracks provenance."""
+        import ast
+
+        source = """
+data_manager.log_tool_usage("audit", {}, {}, ir=None)
+data_manager.log_tool_usage("analyze", {}, stats, ir=ir)
+"""
+        assert has_provenance_call(ast.parse(source)) is True
+
+    def test_all_calls_passing_none_is_a_violation(self):
+        """Every log_tool_usage call is examined, not just the first."""
+        import ast
+
+        source = """
+data_manager.log_tool_usage("a", {}, {}, ir=None)
+data_manager.log_tool_usage("b", {}, {}, ir=None)
+"""
+        assert has_provenance_call(ast.parse(source)) is False
+
+
+class TestProvenanceGateInspection:
+    """Guard the two inspection helpers the AQUADIF provenance gate relies on.
+
+    These live in lobster.testing.contract_mixins but are tested here because
+    tests/unit/config is one of the four paths Basic CI actually selects — a
+    guard CI never runs is not a guard.
+
+    Both helpers exist because the gate previously mis-read the code it was
+    validating and reported 1 violation where there were 31.
+    """
+
+    def test_parses_indented_source_containing_a_column_zero_string(self):
+        """dedent alone cannot handle a code_template that starts at column 0.
+
+        Tools defined inside a factory are indented, but many embed a notebook
+        ``code_template`` whose lines deliberately begin at column 0. That makes
+        dedent's common prefix empty, so it strips nothing and ast.parse raises
+        "unexpected indent" — silently exempting the tools with the richest
+        provenance IR from validation.
+        """
+        import textwrap
+
+        from lobster.testing.contract_mixins import AgentContractTestMixin
+
+        source = '''    @tool
+    def load_thing(path: str) -> str:
+        """Docstring."""
+        ir = AnalysisStep(
+            code_template="""# Load it
+import anndata as ad
+adata = ad.read_h5ad(path)""",
+        )
+        data_manager.log_tool_usage("load_thing", {}, {}, ir=ir)
+        return "done"
+'''
+        # Establish the precondition: the old approach genuinely fails here.
+        with pytest.raises(SyntaxError):
+            ast.parse(textwrap.dedent(source))
+
+        tree = AgentContractTestMixin._parse_tool_source(source)
+        assert tree is not None, "indented source with a column-0 template must parse"
+        assert has_provenance_call(tree) is True
+
+    def test_parse_returns_none_for_genuinely_broken_source(self):
+        """Unparseable source must report failure, not be silently accepted."""
+        from lobster.testing.contract_mixins import AgentContractTestMixin
+
+        assert AgentContractTestMixin._parse_tool_source("def broken(:\n") is None
+
+    def test_implementations_include_the_coroutine_behind_a_sync_wrapper(self):
+        """An async tool's body lives in .coroutine, not .func.
+
+        enable_sync_fallback assigns .func a wrapper that merely awaits the
+        coroutine, so inspecting .func alone finds no log_tool_usage call and
+        every async tool looks like a violation regardless of what it does.
+        """
+        from langchain_core.tools import tool as lc_tool
+
+        from lobster.testing.contract_mixins import AgentContractTestMixin
+        from lobster.tools._async_compat import enable_sync_fallback
+
+        @lc_tool
+        async def async_thing(x: str) -> str:
+            """An async tool."""
+            return x
+
+        assert async_thing.func is None
+        enable_sync_fallback(async_thing)
+        assert async_thing.func is not None  # now a wrapper
+
+        impls = AgentContractTestMixin._tool_implementations(async_thing)
+        names = [getattr(f, "__name__", None) for f in impls]
+        assert (
+            "async_thing" in names
+        ), f"the real implementation must be inspected, got {names}"
+
+    def test_implementations_of_a_sync_tool_is_its_function(self):
+        """A plain sync tool yields exactly its own function, once."""
+        from langchain_core.tools import tool as lc_tool
+
+        from lobster.testing.contract_mixins import AgentContractTestMixin
+
+        @lc_tool
+        def sync_thing(x: str) -> str:
+            """A sync tool."""
+            return x
+
+        assert sync_thing.coroutine is None
+        impls = AgentContractTestMixin._tool_implementations(sync_thing)
+        assert [getattr(f, "__name__", None) for f in impls] == ["sync_thing"]
