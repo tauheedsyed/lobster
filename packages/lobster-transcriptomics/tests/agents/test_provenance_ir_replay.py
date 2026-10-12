@@ -213,6 +213,18 @@ class TestAnnotationToolIR:
         )
 
 
+    def test_missing_label_scalars_stay_unassigned(self, annotation_setup):
+        from lobster.services.metadata.manual_annotation_service import (
+            ManualAnnotationService,
+        )
+
+        adata, _, _ = annotation_setup
+        mapping = {"0": None, "1": np.float32("nan"), "2": pd.NA, "3": "B cells"}
+        out, _, _ = ManualAnnotationService().apply_cluster_mapping(
+            adata, cluster_key="seurat_clusters", mapping=mapping
+        )
+        assert set(out.obs["cell_type_manual"]) == {"Unassigned", "B cells"}
+
     def test_imported_null_labels_stay_unassigned(self, annotation_setup, tmp_path):
         """JSON null must not become a cell type literally named 'None'."""
         adata, dm, tools = annotation_setup
@@ -395,6 +407,59 @@ class TestFormulaDEToolIR:
         ]
         assert replayed_cmp["summary_stats"] == cmp["summary_stats"]
         assert replayed_cmp["correlation"] == pytest.approx(cmp["correlation"])
+
+    def test_duplicate_iteration_names_replay_the_same_comparison(self, de_setup):
+        """Iterations are matched by results_key, so repeated names cannot collide."""
+        original, dm, tools = de_setup
+        for formula in ("~condition", "~batch + condition"):
+            tools["iterate_de_analysis"].invoke(
+                {
+                    "pseudobulk_modality": "pb",
+                    "new_formula": formula,
+                    "new_contrast": CONTRAST,
+                    "iteration_name": "same",
+                }
+            )
+        tools["compare_de_iterations"].invoke({"pseudobulk_modality": "pb"})
+        cmp = dm.modalities["pb"].uns["iteration_comparisons"][
+            "iteration_comparison_same_vs_same"
+        ]
+        assert cmp["correlation"] < 1.0 - 1e-9
+
+        replayed = original.copy()
+        for call in dm.calls:
+            replayed = replay_ir(call.ir, adata=replayed)["adata"]
+        replayed_cmp = replayed.uns["iteration_comparisons"][
+            "iteration_comparison_same_vs_same"
+        ]
+        assert replayed_cmp["summary_stats"] == cmp["summary_stats"]
+        assert replayed_cmp["correlation"] == pytest.approx(cmp["correlation"])
+
+    def test_rejected_design_records_no_iteration(self, de_setup):
+        """A design run_de_with_formula rejects must not reuse an older result."""
+        _, dm, tools = de_setup
+        tools["iterate_de_analysis"].invoke(
+            {
+                "pseudobulk_modality": "pb",
+                "new_formula": "~condition",
+                "new_contrast": CONTRAST,
+                "iteration_name": "good",
+            }
+        )
+        n_calls = len(dm.calls)
+        result = tools["iterate_de_analysis"].invoke(
+            {
+                "pseudobulk_modality": "pb",
+                "new_formula": "~missing_covariate",
+                "new_contrast": CONTRAST,
+                "iteration_name": "bad",
+            }
+        )
+        assert result.startswith("Error in iteration 'bad'"), result
+        tracker = dm.modalities["pb"].uns["de_iterations"]
+        assert [i["name"] for i in tracker["iterations"]] == ["good"]
+        assert "de_results_iteration_2" not in dm.modalities["pb"].uns
+        assert [c.tool_name for c in dm.calls[n_calls:]] == []
 
     def test_comparison_without_saving_is_not_replayable(self, de_setup):
         _, dm, tools = de_setup
