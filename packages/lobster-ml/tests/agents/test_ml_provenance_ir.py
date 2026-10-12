@@ -529,17 +529,39 @@ def test_full_notebook_rejects_unloaded_cohort_after_known_ml_inputs(
 def test_self_loading_peptide_split_run_all_twice_starts_fresh(
     tmp_path, monkeypatch, strategy
 ):
-    """The real initial peptide import has no dedicated H5AD load cell."""
-    from lobster.agents.proteomics.peptide_tools import create_peptide_tools
+    """The core self-loading importer works in an ML-only package installation."""
+    import builtins
 
+    from lobster.services.peptidomics.peptide_library_service import (
+        PeptideLibraryService,
+    )
+
+    original_import = builtins.__import__
+
+    def no_optional_proteomics(name, *args, **kwargs):
+        if name.startswith("lobster.agents.proteomics"):
+            raise ModuleNotFoundError("ML replay must not require the proteomics agent")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_optional_proteomics)
     fasta = tmp_path / "cohort.fasta"
     fasta.write_text("".join(f">peptide_{i}\nACDEFGHIK\n" for i in range(60)))
     dm = DataManagerV2(workspace_path=tmp_path / "workspace", auto_scan=False)
-    peptide_tools = {
-        tool.name: tool for tool in create_peptide_tools(dm, workspace_path=tmp_path)
-    }
-    result = peptide_tools["import_peptide_sequences"].invoke({"file_path": str(fasta)})
-    assert "STATUS: complete" in result, result
+    # Use the actual core producer and real manager, preserving its self-loading
+    # IR. The optional agent wrapper makes these same store/provenance calls;
+    # installing or mocking that wrapper would hide the ML package boundary.
+    imported, stats, import_ir = PeptideLibraryService().import_sequences(str(fasta))
+    dm.store_modality(
+        name="peptides",
+        adata=imported,
+        step_summary=f"Imported {stats['n_sequences']} peptide sequences",
+    )
+    dm.log_tool_usage(
+        tool_name="import_peptide_sequences",
+        parameters={"file_path": str(fasta), "format": stats["format"]},
+        description=f"Import {stats['n_sequences']} peptides",
+        ir=import_ir,
+    )
     assert dm.get_modality("peptides").obs_names.tolist() == [
         f"peptide_{i}" for i in range(60)
     ]
