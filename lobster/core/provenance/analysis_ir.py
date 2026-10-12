@@ -48,8 +48,15 @@ def _python_literal(value: Any) -> str:
     NumPy arrays (``array([...])``), which become plain Python values/lists.
     """
     if type(value).__module__ == "numpy" and hasattr(value, "tolist"):
-        # ndarray or numpy scalar (np.float64 subclasses float, so check first)
-        return _python_literal(value.tolist())
+        # ndarray or numpy scalar (np.float64 subclasses float, so check first).
+        # Only bool/int/float/complex/str convert to plain Python; datetimes,
+        # objects and extended precision (whose tolist() stays numpy) keep repr.
+        if getattr(getattr(value, "dtype", None), "kind", "") not in "biufcUS":
+            return repr(value)
+        converted = value.tolist()
+        if type(converted).__module__ == "numpy":
+            return repr(value)
+        return _python_literal(converted)
     if isinstance(value, float):
         if math.isnan(value):
             return "float('nan')"

@@ -390,10 +390,16 @@ class NotebookExporter:
             "sra_download",
             "pride.download.download_dataset",
             "metabolights.download.download_dataset",
-            # Builds adata from a FASTA/CSV/TSV file itself.
-            "peptidomics.import_sequences",
         }
-        return any(ir.operation in download_ops for _, ir in exportable_pairs)
+        if any(ir.operation in download_ops for _, ir in exportable_pairs):
+            return True
+        # Steps that build adata from a file themselves replace the generic
+        # load only when they come first; a later one must not remove the
+        # input load that the earlier cells depend on.
+        self_loading_ops = {"peptidomics.import_sequences"}
+        return bool(exportable_pairs) and (
+            exportable_pairs[0][1].operation in self_loading_ops
+        )
 
     def _create_header_cell(
         self, name: str, description: str, n_irs: int

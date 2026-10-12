@@ -163,6 +163,22 @@ def test_import_only_notebook_runs_without_an_h5ad_input(tmp_path, monkeypatch):
     assert list(scope["adata"].obs_names) == ["p2"]
 
 
+def test_later_peptide_import_keeps_the_input_load(tmp_path):
+    """Only a first-step import replaces the notebook's input load."""
+    from types import SimpleNamespace as NS
+
+    from lobster.core.notebooks.exporter import NotebookExporter
+
+    def pair(op):
+        return ({}, NS(operation=op))
+
+    exporter = NotebookExporter.__new__(NotebookExporter)
+    first = [pair("peptidomics.import_sequences"), pair("peptidomics.filter_peptides")]
+    later = [pair("lobster.ml.select_ml_features"), pair("peptidomics.import_sequences")]
+    assert exporter._has_download_activity(first) is True
+    assert exporter._has_download_activity(later) is False
+
+
 def test_report_export_is_utility(library):
     _, tools, _ = library
     tool = tools["export_peptide_report"]

@@ -63,3 +63,19 @@ def test_template_with_inf_runs():
     scope = {}
     exec(ir.render(), scope)  # nosec B102
     assert scope["bound"] == math.inf
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.longdouble("1.25"),
+        np.clongdouble(1 + 2j),
+        np.datetime64("2026-01-01"),
+        np.datetime64("2026-01-01", "ns"),
+        np.array(["a"], dtype=object),
+    ],
+    ids=repr,
+)
+def test_unsupported_numpy_values_keep_their_repr(value):
+    """No recursion, and no silent change of meaning (e.g. a datetime to an int)."""
+    assert _python_literal(value) == repr(value)
