@@ -1062,14 +1062,25 @@ print(f"Recommendations: {recommendations}")
             raise ValueError(f"Unknown split_subset: {split_subset!r}")
         split_prelude = ""
         if split_subset:
+            s_ = repr(split_subset)
+            var = f"adata_{split_subset}"
             split_prelude = (
-                f"# This step ran on the {split_subset!r} split only: select it so\n"
-                "# replay does not prepare features on held-out samples.\n"
-                f"if globals().get('adata_{split_subset}') is not None:\n"
-                f"    adata = adata_{split_subset}\n"
-                "elif 'ml_split' in adata.obs and "
-                f"(adata.obs['ml_split'] != {split_subset!r}).any():\n"
-                f"    adata = adata[adata.obs['ml_split'] == {split_subset!r}].copy()\n"
+                f"# This step ran on the {s_} split only. Select exactly that split, so\n"
+                "# replay never prepares features on held-out samples.\n"
+                "if 'ml_split' not in adata.obs:\n"
+                "    raise ValueError(\n"
+                f"        'Feature preparation ran on the ' + {s_} + ' split, but adata has '\n"
+                "        'no ml_split column: run the create_ml_splits step first.'\n"
+                "    )\n"
+                f"split_mask = (adata.obs['ml_split'].astype(str) == {s_}).to_numpy()\n"
+                "if not split_mask.all():\n"
+                f"    split_view = globals().get({var!r})\n"
+                "    if split_view is not None and set(split_view.obs_names) == set(\n"
+                "        adata.obs_names[split_mask]\n"
+                "    ):\n"
+                "        adata = split_view  # same samples, in the split's order\n"
+                "    else:\n"
+                "        adata = adata[split_mask].copy()\n"
             )
         ir = AnalysisStep(
             operation="lobster.ml.select_ml_features",

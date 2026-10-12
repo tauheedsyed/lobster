@@ -145,3 +145,49 @@ def test_features_on_a_split_replay_on_that_split_only(samples, split):
     alone = replay_ir(dm.last_ir("prepare_ml_features"), adata=annotated)["adata"]
     assert sorted(alone.obs_names) == sorted(produced.obs_names)
     assert set(alone.obs["ml_split"]) == {split}
+
+
+@pytest.mark.parametrize("with_parent", [False, True])
+def test_unrelated_train_named_modality_gets_no_split_selection(samples, with_parent):
+    """A modality that merely ends in _train, with ml_split == 'train', is not a split
+    unless its samples are exactly the parent's train samples."""
+    dm, tools = _tools(samples)
+    if with_parent:
+        tools["create_ml_splits"].invoke(
+            {"modality_name": "data", "test_size": 0.25, "validation_size": 0.0,
+             "random_state": 7, "save_result": False}
+        )
+    cohort = samples[:8].copy()
+    cohort.obs["ml_split"] = "train"
+    dm.modalities["data_train"] = cohort  # replaces any real split
+    tools["prepare_ml_features"].invoke(
+        {"modality_name": "data_train", "feature_selection": "all", "scale": False,
+         "save_result": False}
+    )
+    code = dm.last_ir("prepare_ml_features").render()
+    assert "ml_split" not in code
+
+
+def test_split_selection_fails_closed_and_ignores_mismatched_views(samples):
+    unsplit = samples.copy()  # create_ml_splits annotates the stored modality
+    dm, tools = _tools(samples)
+    tools["create_ml_splits"].invoke(
+        {"modality_name": "data", "test_size": 0.25, "validation_size": 0.0,
+         "random_state": 7, "save_result": False}
+    )
+    tools["prepare_ml_features"].invoke(
+        {"modality_name": "data_train", "feature_selection": "all", "scale": False,
+         "save_result": False}
+    )
+    ir = dm.last_ir("prepare_ml_features")
+    expected = sorted(dm.modalities["data_train"].obs_names)
+
+    # No ml_split column: refuse instead of preparing features on everything.
+    with pytest.raises(ValueError, match="ml_split"):
+        replay_ir(ir, adata=unsplit)
+
+    # A stale adata_train with other samples is ignored; the mask is used.
+    annotated = dm.modalities["data"].copy()
+    stale = annotated[:5].copy()
+    replayed = replay_ir(ir, adata=annotated, adata_train=stale)["adata"]
+    assert sorted(replayed.obs_names) == expected

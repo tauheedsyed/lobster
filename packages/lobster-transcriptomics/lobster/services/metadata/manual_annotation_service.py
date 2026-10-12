@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from rich import box
 from rich.console import Console
@@ -34,6 +35,14 @@ from lobster.core.provenance.analysis_ir import AnalysisStep
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+def _is_missing(value: Any) -> bool:
+    """True for None, NaN of any float type and pd.NA; False for anything else."""
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):  # list-like values are not missing scalars
+        return False
 
 
 @dataclass
@@ -1029,12 +1038,8 @@ The colors in this terminal [bold]exactly match[/bold] your UMAP plot colors for
         if cluster_key not in adata.obs.columns:
             raise KeyError(f"Cluster column '{cluster_key}' not found in adata.obs")
 
-        # Null labels (e.g. JSON null) stay unmapped and get ``fill_value``.
-        mapping = {
-            str(k): str(v)
-            for k, v in mapping.items()
-            if v is not None and not (isinstance(v, float) and v != v)
-        }
+        # Missing labels (JSON null, NaN, pd.NA) stay unmapped and get ``fill_value``.
+        mapping = {str(k): str(v) for k, v in mapping.items() if not _is_missing(v)}
         adata_copy = adata.copy()
         adata_copy.obs[target_column] = (
             adata_copy.obs[cluster_key].astype(str).map(mapping).fillna(fill_value)

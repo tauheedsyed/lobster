@@ -280,9 +280,14 @@ def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> A
 
 
 def _iteration_comparison_ir(
-    iteration_1: str, iteration_2: str, save_comparison: bool
+    iter1_info: Dict[str, Any], iter2_info: Dict[str, Any], save_comparison: bool
 ) -> AnalysisStep:
-    """IR for compare_de_iterations: recompute the comparison from stored results."""
+    """IR for compare_de_iterations: recompute the comparison from stored results.
+
+    Iterations are found by their unique results_key, not their display name:
+    names may repeat, and a name lookup could pick the same record twice.
+    """
+    iteration_1, iteration_2 = iter1_info["name"], iter2_info["name"]
     return AnalysisStep(
         operation="lobster.compare_de_iterations",
         tool_name="compare_de_iterations",
@@ -290,8 +295,12 @@ def _iteration_comparison_ir(
         library="pandas",
         code_template=(
             "de_iterations = adata.uns['de_iterations']['iterations']\n"
-            "iter1_info = next(i for i in de_iterations if i['name'] == {{ iteration_1 | repr }})\n"
-            "iter2_info = next(i for i in de_iterations if i['name'] == {{ iteration_2 | repr }})\n"
+            "def find_iteration(name, results_key):\n"
+            "    if results_key:\n"
+            "        return next(i for i in de_iterations if i.get('results_key') == results_key)\n"
+            "    return next(i for i in de_iterations if i['name'] == name)\n"
+            "iter1_info = find_iteration({{ iteration_1 | repr }}, {{ results_key_1 | repr }})\n"
+            "iter2_info = find_iteration({{ iteration_2 | repr }}, {{ results_key_2 | repr }})\n"
             "def iteration_results(info):\n"
             "    key = info.get('results_key') or f\"de_results_formula_{info['contrast_name']}\"\n"
             "    return adata.uns[key]['results_df']\n"
@@ -331,6 +340,8 @@ def _iteration_comparison_ir(
         parameters={
             "iteration_1": iteration_1,
             "iteration_2": iteration_2,
+            "results_key_1": iter1_info.get("results_key"),
+            "results_key_2": iter2_info.get("results_key"),
             "save_comparison": save_comparison,
         },
         parameter_schema={},
@@ -1821,6 +1832,13 @@ def de_analysis_expert(
                 f"Starting DE iteration '{iteration_name}' on '{pseudobulk_modality}'"
             )
 
+            contrast_name = f"{new_contrast[0]}_{new_contrast[1]}_vs_{new_contrast[2]}"
+            current_key = f"de_results_formula_{contrast_name}"
+            # Identity of any earlier result for this contrast: the run below
+            # must replace it, or it did not succeed (e.g. a rejected design
+            # returns a message rather than raising).
+            stale_results = adata.uns.get(current_key, {}).get("results_df")
+
             # Run the analysis with new parameters
             # run_de_with_formula is a LangChain tool object, so it must be
             # invoked rather than called. It logs its own provenance.
@@ -1840,12 +1858,12 @@ def de_analysis_expert(
             if "Error" in run_result:
                 return f"Error in iteration '{iteration_name}': {run_result}"
 
-            # Get current results
-            contrast_name = f"{new_contrast[0]}_{new_contrast[1]}_vs_{new_contrast[2]}"
-            current_key = f"de_results_formula_{contrast_name}"
-
-            if current_key not in adata.uns:
-                return "Results not found after analysis. Analysis may have failed."
+            new_results = adata.uns.get(current_key, {}).get("results_df")
+            if new_results is None or new_results is stale_results:
+                return (
+                    f"Error in iteration '{iteration_name}': the DE run produced no "
+                    f"new results, so no iteration was recorded.\n\n{run_result}"
+                )
 
             # Snapshot this iteration's results under its own key. The formula
             # result key depends only on the contrast, so the next iteration of
@@ -2176,9 +2194,7 @@ def de_analysis_expert(
                     "show_unique": show_unique,
                 },
                 description=f"Compared iterations: {len(overlap)} overlapping, {len(unique1)}+{len(unique2)} unique genes",
-                ir=_iteration_comparison_ir(
-                    iter1_info["name"], iter2_info["name"], save_comparison
-                ),
+                ir=_iteration_comparison_ir(iter1_info, iter2_info, save_comparison),
                 agent=agent_name,
             )
 
