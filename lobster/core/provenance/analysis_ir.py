@@ -8,6 +8,7 @@ executable code without manual mapping registries.
 """
 
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -35,7 +36,43 @@ logger = logging.getLogger(__name__)
 # python-literal-hardening filter is tracked as separate future work.
 # Generates Python source, not HTML; HTML escaping would corrupt Python literals.
 _JINJA_ENV = Environment(autoescape=False)  # nosec B701
-_JINJA_ENV.filters["repr"] = repr
+
+
+def _python_literal(value: Any) -> str:
+    """Render ``value`` as Python source that evaluates back to it.
+
+    Identical to ``repr`` for plain str/int/float/bool/None and containers of
+    them. It differs only where ``repr`` produces source that does not run in a
+    notebook: non-finite floats (``inf``/``nan`` are undefined names), NumPy
+    scalars (``np.float64(1.0)`` needs numpy imported under that alias) and
+    NumPy arrays (``array([...])``), which become plain Python values/lists.
+    """
+    if type(value).__module__ == "numpy" and hasattr(value, "tolist"):
+        # ndarray or numpy scalar (np.float64 subclasses float, so check first)
+        return _python_literal(value.tolist())
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "float('nan')"
+        if math.isinf(value):
+            return "float('inf')" if value > 0 else "float('-inf')"
+        return repr(value)
+    if isinstance(value, (str, bytes, bool, int)) or value is None:
+        return repr(value)
+    if isinstance(value, dict):
+        items = ", ".join(
+            f"{_python_literal(k)}: {_python_literal(v)}" for k, v in value.items()
+        )
+        return "{" + items + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(_python_literal(v) for v in value) + "]"
+    if isinstance(value, tuple):
+        if len(value) == 1:
+            return "(" + _python_literal(value[0]) + ",)"
+        return "(" + ", ".join(_python_literal(v) for v in value) + ")"
+    return repr(value)
+
+
+_JINJA_ENV.filters["repr"] = _python_literal
 
 
 @dataclass
