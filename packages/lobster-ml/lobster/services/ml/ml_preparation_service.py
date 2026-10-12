@@ -910,7 +910,7 @@ print(f"Recommendations: {recommendations}")
         n_features: int = 2000,
         scale: bool = True,
         handle_zeros: str = "keep",
-        split_subset: Optional[str] = None,
+        split_binding: Optional[Dict[str, str]] = None,
     ) -> Tuple["AnnData", Dict[str, Any], AnalysisStep]:
         """
         Select, clean and scale features for ML, as the ML expert's
@@ -924,10 +924,11 @@ print(f"Recommendations: {recommendations}")
             scale: Z-score each feature (scanpy ``pp.scale``)
             handle_zeros: "keep", "remove" (drop features >=90% zeros) or
                 "impute" (replace zeros with the feature's non-zero mean)
-            split_subset: "train", "test" or "validation" when ``adata`` is one
-                split made by create_ml_splits. Only affects the IR: the
-                notebook carries one ``adata``, so the IR first selects that
-                split instead of preparing features on all samples.
+            split_binding: For a split made by create_ml_splits, its tag
+                ({"modality", "split", "split_id"}). Only affects the IR: the
+                notebook passes one ``adata`` along, so the IR takes this exact
+                split from the notebook's ``lobster_modalities`` and refuses
+                to run if it is not there.
 
         Returns:
             Tuple of (ml_ready_adata, stats, AnalysisStep). The IR calls this
@@ -1058,30 +1059,30 @@ print(f"Recommendations: {recommendations}")
             "scale": scale,
             "handle_zeros": handle_zeros,
         }
-        if split_subset not in (None, "train", "test", "validation"):
-            raise ValueError(f"Unknown split_subset: {split_subset!r}")
-        split_prelude = ""
-        if split_subset:
-            s_ = repr(split_subset)
-            var = f"adata_{split_subset}"
+        registry = "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
+        # Take the input by name when an earlier lobster step registered it.
+        split_prelude = "adata = lobster_modalities.get({{ modality_name | repr }}, adata)\n"
+        if split_binding:
             split_prelude = (
-                f"# This step ran on the {s_} split only. Select exactly that split, so\n"
-                "# replay never prepares features on held-out samples.\n"
-                "if 'ml_split' not in adata.obs:\n"
+                "# This step ran on one split from create_ml_splits. Take exactly\n"
+                "# that split, so replay never prepares features on other samples.\n"
+                "split_view = lobster_modalities.get({{ split_modality | repr }})\n"
+                "if split_view is None or (\n"
+                "    split_view.uns.get('ml_split_source', {}).get('split_id')\n"
+                "    != {{ split_id | repr }}\n"
+                "):\n"
                 "    raise ValueError(\n"
-                f"        'Feature preparation ran on the ' + {s_} + ' split, but adata has '\n"
-                "        'no ml_split column: run the create_ml_splits step first.'\n"
+                "        'Feature preparation needs split ' + {{ split_modality | repr }}\n"
+                "        + ' from its create_ml_splits step, which this notebook did not produce.'\n"
                 "    )\n"
-                f"split_mask = (adata.obs['ml_split'].astype(str) == {s_}).to_numpy()\n"
-                "if not split_mask.all():\n"
-                f"    split_view = globals().get({var!r})\n"
-                "    if split_view is not None and set(split_view.obs_names) == set(\n"
-                "        adata.obs_names[split_mask]\n"
-                "    ):\n"
-                "        adata = split_view  # same samples, in the split's order\n"
-                "    else:\n"
-                "        adata = adata[split_mask].copy()\n"
+                "adata = split_view\n"
             )
+        ir_parameters = {
+            **params,
+            "split_modality": split_binding["modality"] if split_binding else None,
+            "split_id": split_binding["split_id"] if split_binding else None,
+            "output_modality": f"{modality_name}_ml_features",
+        }
         ir = AnalysisStep(
             operation="lobster.ml.select_ml_features",
             tool_name="prepare_ml_features",
@@ -1093,14 +1094,16 @@ print(f"Recommendations: {recommendations}")
             code_template=(
                 "from lobster.services.ml.ml_preparation_service import MLPreparationService\n"
                 "\n"
+                + registry
                 + split_prelude
                 + "adata, ml_feature_stats, _ = MLPreparationService().select_ml_features(\n"
                 "    adata,\n"
                 + "".join(f"    {k}={{{{ {k} | repr }}}},\n" for k in params)
-                + ")"
+                + ")\n"
+                + "lobster_modalities[{{ output_modality | repr }}] = adata"
             ),
             imports=[],
-            parameters=params,
+            parameters=ir_parameters,
             parameter_schema={},
             input_entities=["adata"],
             output_entities=["adata"],
