@@ -341,13 +341,19 @@ Choose by what the tool does:
 
 | The tool... | Category | IR |
 |---|---|---|
-| changes data (stores or mutates a modality or sample metadata) | provenance-required | real IR, `replayable=True` (default) |
+| changes a modality (stores or mutates AnnData) | provenance-required | real IR, `replayable=True` (default) |
+| changes metadata-store records (sample tables outside AnnData) | provenance-required | real IR recording the change, `replayable=False`: notebooks only carry `adata`, so the cell is a record |
+| only checks or plots, but its service also writes into `adata` (e.g. QC metrics) | its category | real IR, `replayable=True`, or replay loses those columns |
 | only checks or plots data that is loaded | its category (e.g. QUALITY, ANALYZE) | real IR with `replayable=False`: exported so the notebook shows the check or redraws the figure, skipped when replaying results |
 | queries external services, manages queues, writes reports | UTILITY | none (`provenance: False`) |
 
 Non-deterministic steps (LLM extraction, live database lookups, unseeded
 randomness) must record their outcome, or the seed, in the IR so replay gives
 the same result.
+
+Exported notebooks carry a single `adata` from cell to cell. A tool that works
+on a derived modality (for example the `_train` split) must make its IR select
+that data itself, or the replay silently runs on the wrong samples.
 
 ### For non-provenance tools (UTILITY, DELEGATE):
 
