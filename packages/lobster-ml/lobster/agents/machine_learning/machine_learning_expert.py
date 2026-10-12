@@ -101,6 +101,28 @@ def _ml_split_ir(
     )
 
 
+def _split_of(data_manager, modality_name: str, adata) -> Optional[str]:
+    """Return "train"/"test"/"validation" if ``adata`` is that create_ml_splits split.
+
+    True only when the parent modality (name without the suffix) is loaded,
+    carries the ``ml_split`` column, and its samples labelled with that split
+    are exactly ``adata``'s samples.
+    """
+    for split in ("train", "test", "validation"):
+        suffix = f"_{split}"
+        if not modality_name.endswith(suffix):
+            continue
+        parent_name = modality_name[: -len(suffix)]
+        if parent_name not in data_manager.list_modalities():
+            return None
+        parent = data_manager.get_modality(parent_name)
+        if "ml_split" not in parent.obs.columns:
+            return None
+        in_split = parent.obs_names[parent.obs["ml_split"].astype(str) == split]
+        return split if set(in_split) == set(adata.obs_names) else None
+    return None
+
+
 class MachineLearningError(Exception):
     """Base exception for machine learning operations."""
 
@@ -321,14 +343,8 @@ def machine_learning_expert(
 
             # A modality made by create_ml_splits holds one split; the IR
             # needs to know so a replayed notebook selects the same samples.
-            split_subset = None
-            if "ml_split" in adata.obs.columns:
-                split_values = set(adata.obs["ml_split"].astype(str).unique())
-                for candidate in ("train", "test", "validation"):
-                    if split_values == {candidate} and modality_name.endswith(
-                        f"_{candidate}"
-                    ):
-                        split_subset = candidate
+            # Verified against the split's parent, not inferred from the name.
+            split_subset = _split_of(data_manager, modality_name, adata)
 
             adata_ml, _, ir = ml_prep_service.select_ml_features(
                 adata,
