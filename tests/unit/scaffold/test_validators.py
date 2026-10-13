@@ -133,3 +133,40 @@ class TestValidatePlugin:
         ), "Scaffolded package with children should pass all checks:\n" + "\n".join(
             f"  FAIL [{r.check}] {r.message}" for r in failures
         )
+
+
+class TestHollowProvenanceTransition:
+    """`ir=None` was a documented bridge: validate-plugin warns before failing."""
+
+    @staticmethod
+    def _provenance_results(tmp_path, transform):
+        pkg_dir = scaffold_agent(
+            name="test_expert",
+            display_name="Test Expert",
+            description="Test",
+            tier="free",
+            output_dir=tmp_path,
+        )
+        shared = next(pkg_dir.rglob("shared_tools.py"))
+        shared.write_text(transform(shared.read_text()))
+        results = validate_plugin(pkg_dir)
+        return [r for r in results if r.check == "Provenance calls"]
+
+    def test_only_ir_none_is_a_warning_not_a_failure(self, tmp_path):
+        results = self._provenance_results(
+            tmp_path, lambda src: src.replace("ir=ir,", "ir=None,")
+        )
+        assert results and all(r.passed for r in results)
+        assert any(
+            r.severity == "warning" and "ir=None" in r.message for r in results
+        )
+
+    def test_no_ir_keyword_still_fails(self, tmp_path):
+        results = self._provenance_results(
+            tmp_path, lambda src: src.replace("ir=ir,", "")
+        )
+        assert any(not r.passed for r in results)
+
+    def test_real_ir_passes_without_warning(self, tmp_path):
+        results = self._provenance_results(tmp_path, lambda src: src)
+        assert results and all(r.passed and r.severity == "error" for r in results)

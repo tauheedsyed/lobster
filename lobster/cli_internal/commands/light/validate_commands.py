@@ -41,9 +41,16 @@ def validate_plugin_cmd(
 
     passed = 0
     failed = 0
+    warned = 0
 
     for result in results:
-        icon = "✓" if result.passed else "✗"
+        if not result.passed:
+            icon = "✗"
+        elif result.severity == "warning":
+            icon = "!"
+            warned += 1
+        else:
+            icon = "✓"
         typer.echo(f"  {icon} [{result.check}] {result.message}")
         if result.passed:
             passed += 1
@@ -52,7 +59,8 @@ def validate_plugin_cmd(
 
     typer.echo("")
     if failed == 0:
-        typer.echo(f"All {passed} checks passed.")
+        suffix = f" ({warned} with warnings)" if warned else ""
+        typer.echo(f"All {passed} checks passed{suffix}.")
     else:
         typer.echo(f"{failed} check(s) failed, {passed} passed.")
         raise typer.Exit(1)

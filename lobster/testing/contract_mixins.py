@@ -208,6 +208,52 @@ class AgentContractTestMixin:
 
         return has_provenance_call(tree)
 
+    @staticmethod
+    def _tool_implementations(tool) -> list:
+        """Return the callable that actually implements ``tool``.
+
+        Inspecting ``tool.func`` alone is not enough. For an ``async def`` tool
+        LangChain leaves ``func=None`` and puts the body in ``coroutine``, and
+        ``enable_sync_fallback`` then assigns ``func`` a ``_sync_fallback``
+        closure that merely awaits the coroutine. Reading only ``func`` therefore
+        inspects a wrapper whose body contains no ``log_tool_usage`` call at all.
+
+        The coroutine, when present, is the implementation and must carry the
+        provenance call itself: a compliant sync callable cannot vouch for a
+        non-compliant coroutine. Without a coroutine, ``func`` is inspected.
+        """
+        fn = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
+        if fn is None:
+            return []
+        return [inspect.unwrap(fn)]  # strip functools.wraps chains
+
+    @staticmethod
+    def _parse_tool_source(source: str) -> ast.AST | None:
+        """Parse tool source that may be indented, returning None if impossible.
+
+        ``textwrap.dedent`` is not sufficient on its own. Tools defined inside a
+        factory are indented, but many also embed a notebook ``code_template``
+        as a triple-quoted string whose lines deliberately start at column 0.
+        That makes dedent's common prefix empty, so it strips nothing and
+        ``ast.parse`` raises "unexpected indent" on line 1 — which silently
+        exempted the tools building the *richest* provenance IR from validation.
+
+        Wrapping in a dummy block makes the leading indentation legal; the
+        column-0 lines are inside a string literal, so the parser does not care
+        about their position.
+        """
+        candidates = (
+            textwrap.dedent(source),
+            source,
+            "if True:\n" + source,
+        )
+        for candidate in candidates:
+            try:
+                return ast.parse(candidate)
+            except SyntaxError:
+                continue
+        return None
+
     def _require_tools(self) -> list:
         """Get tools, failing or skipping based on tools_required setting."""
         import pytest
@@ -693,32 +739,56 @@ class AgentContractTestMixin:
             if not (declared_prov or requires_prov):
                 continue
 
-            # Try to get tool source code
-            try:
-                # Async tools can expose a synthetic sync-fallback wrapper as
-                # func; inspect the actual coroutine implementation when present.
-                implementation = getattr(tool, "coroutine", None) or tool.func
-                source = inspect.getsource(implementation)
-                # Dedent in case source is indented (nested functions)
-                source = textwrap.dedent(source)
-            except (OSError, TypeError) as e:
-                # Cannot get source (built-in, dynamically generated, etc.)
-                import warnings
-
-                warnings.warn(
-                    f"Cannot validate provenance for tool '{tool_name}': "
-                    f"source code not available ({e.__class__.__name__})"
+            # Inspect the callable that implements the tool, which for async
+            # tools is the coroutine rather than .func — see _tool_implementations.
+            #
+            # Source that cannot be read or parsed is a FAILURE, not a skip. This
+            # used to warn and `continue`, which turned an uninspectable tool into
+            # a passing one and hid real violations behind a warning nobody reads.
+            implementations = self._tool_implementations(tool)
+            if not implementations:
+                violations.append(
+                    (
+                        tool_name,
+                        primary_category.value,
+                        "declares provenance but exposes no inspectable "
+                        "implementation (both .func and .coroutine are None)",
+                    )
                 )
                 continue
 
-            # Parse source and check for log_tool_usage(ir=ir) call
-            try:
-                tree = ast.parse(source)
-                has_ir_call = self._has_log_tool_usage_with_ir(tree)
-            except SyntaxError as e:
-                import warnings
+            has_ir_call = False
+            unreadable = []
+            for fn in implementations:
+                try:
+                    source = inspect.getsource(fn)
+                except (OSError, TypeError) as e:
+                    unreadable.append(
+                        f"{getattr(fn, '__name__', fn)}: source unavailable "
+                        f"({e.__class__.__name__})"
+                    )
+                    continue
 
-                warnings.warn(f"Cannot parse source for tool '{tool_name}': {e}")
+                tree = self._parse_tool_source(source)
+                if tree is None:
+                    unreadable.append(
+                        f"{getattr(fn, '__name__', fn)}: source could not be parsed"
+                    )
+                    continue
+
+                if self._has_log_tool_usage_with_ir(tree):
+                    has_ir_call = True
+                    break
+
+            if declared_prov and not has_ir_call and unreadable:
+                violations.append(
+                    (
+                        tool_name,
+                        primary_category.value,
+                        "declares provenance=True but its provenance call could "
+                        "not be verified — " + "; ".join(unreadable),
+                    )
+                )
                 continue
 
             # Validate: if provenance is declared, the call must exist
@@ -726,7 +796,10 @@ class AgentContractTestMixin:
                 reason = "declares provenance=True"
                 if requires_prov:
                     reason += f" (and primary category '{primary_category.value}' requires it)"
-                reason += " but does NOT call log_tool_usage(ir=ir)"
+                reason += (
+                    " but does NOT call log_tool_usage with a real ir "
+                    "(absent, or passed literally as ir=None)"
+                )
                 violations.append((tool_name, primary_category.value, reason))
 
         assert (
@@ -737,7 +810,10 @@ class AgentContractTestMixin:
                 f"  - Tool '{tool}' (category: {cat}): {reason}"
                 for tool, cat, reason in violations
             )
-            + "\n\nFix: Ensure tools with provenance=True call log_tool_usage(ir=ir) in their implementation."
+            + "\n\nFix: Ensure tools with provenance=True call log_tool_usage(ir=ir) in their"
+            "\nimplementation, passing an AnalysisStep — `ir=None` does not satisfy this."
+            "\nIf the tool genuinely produces nothing reproducible, the category and"
+            "\nprovenance flag are wrong, not the call."
         )
 
     def test_tool_params_no_bare_collections(self) -> None:

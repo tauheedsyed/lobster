@@ -105,10 +105,20 @@ def requires_provenance(primary_category: str) -> bool:
 
 def has_provenance_call(tree: ast.AST) -> bool:
     """
-    Check if an AST tree contains a log_tool_usage call with an ir= keyword argument.
+    Check if an AST tree contains a log_tool_usage call passing a real ``ir=``.
 
     Walks the AST looking for method calls to ``log_tool_usage`` that include
     an ``ir=`` keyword argument, indicating proper provenance tracking.
+
+    A literal ``ir=None`` does NOT count. It satisfies the keyword's *name* while
+    writing no provenance at all, so accepting it let tools claim
+    ``provenance=True`` and pass this check while emitting nothing reproducible.
+    Any other value is accepted: a name, call, or attribute cannot be evaluated
+    statically, so it is taken at face value rather than guessed at.
+
+    Every ``log_tool_usage`` call is examined, not just the first one carrying an
+    ``ir`` keyword — a tool that logs twice, once with real IR and once without,
+    still tracks provenance.
 
     Used by contract test mixin and ``lobster validate-plugin`` CLI command.
 
@@ -116,13 +126,19 @@ def has_provenance_call(tree: ast.AST) -> bool:
         tree: Parsed AST tree from tool source code.
 
     Returns:
-        True if a ``log_tool_usage(ir=...)`` call is found, False otherwise.
+        True if a ``log_tool_usage(ir=<not None>)`` call is found, False otherwise.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr == "log_tool_usage":
                     for keyword in node.keywords:
-                        if keyword.arg == "ir":
-                            return True
+                        if keyword.arg != "ir":
+                            continue
+                        if (
+                            isinstance(keyword.value, ast.Constant)
+                            and keyword.value.value is None
+                        ):
+                            continue  # ir=None writes no provenance
+                        return True
     return False
