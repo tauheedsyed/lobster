@@ -159,6 +159,10 @@ class SingleCellVisualizationService:
                     f"(improves performance, preserves structure)"
                 )
 
+                # Seeded so the same data always yields the same figure (an
+                # exported notebook must redraw what the tool showed).
+                rng = np.random.default_rng(0)
+
                 # Stratified sampling by color_by variable (preserves cluster proportions)
                 if is_categorical and isinstance(color_data, pd.Series):
                     # Calculate cells per category
@@ -186,7 +190,7 @@ class SingleCellVisualizationService:
                             ),
                         )
                         if len(category_indices) > n_to_sample:
-                            sampled_cat = np.random.choice(
+                            sampled_cat = rng.choice(
                                 category_indices, size=n_to_sample, replace=False
                             )
                         else:
@@ -196,7 +200,7 @@ class SingleCellVisualizationService:
                     sampled_indices = np.array(sampled_indices)
                 else:
                     # Random sampling for continuous variables
-                    sampled_indices = np.random.choice(
+                    sampled_indices = rng.choice(
                         adata.n_obs, size=target_n_points, replace=False
                     )
 
@@ -1363,7 +1367,10 @@ class SingleCellVisualizationService:
             # G. Library saturation curve (row 2, col 3)
             # Sample cells for performance
             n_sample = min(1000, adata.n_obs)
-            sample_idx = np.random.choice(adata.n_obs, n_sample, replace=False)
+            # Seeded so the figure is reproducible from the same data.
+            sample_idx = np.random.default_rng(0).choice(
+                adata.n_obs, n_sample, replace=False
+            )
 
             saturation_x = adata.obs["n_counts"].iloc[sample_idx]
             saturation_y = adata.obs["gene_detection_rate"].iloc[sample_idx]

@@ -12,8 +12,9 @@ from lobster.agents.machine_learning.config import ML_EXPERT_CONFIG
 AGENT_CONFIG = ML_EXPERT_CONFIG
 
 # === Heavy imports below ===
+import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -24,11 +25,133 @@ from lobster.agents.machine_learning.prompts import create_ml_expert_prompt
 from lobster.agents.machine_learning.state import MachineLearningExpertState
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
-from lobster.services.ml.ml_preparation_service import MLPreparationService
+from lobster.services.ml.ml_preparation_service import (
+    ML_NOTEBOOK_BINDINGS,
+    MLPreparationService,
+)
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# The split IR resolves its input and registers its outputs through the
+# notebook bindings in ML_NOTEBOOK_BINDINGS (see ml_preparation_service).
+
+
+def _ml_split_ir(
+    modality_name: str,
+    test_size: float,
+    validation_size: float,
+    stratify_by: Optional[str],
+    random_state: int,
+    split_id: str,
+    save_result: bool = False,
+) -> AnalysisStep:
+    """IR for create_ml_splits: the same seeded scikit-learn splits.
+
+    With the recorded ``random_state`` the notebook assigns every sample to the
+    same train/test/validation set as the tool did. The split modalities are
+    registered under the tool's names and tagged with ``split_id``, so later
+    steps find exactly the split they used.
+    """
+    return AnalysisStep(
+        operation="sklearn.model_selection.train_test_split",
+        tool_name="create_ml_splits",
+        description=(
+            f"Train/test/validation split of '{modality_name}' (test={test_size}, "
+            f"val={validation_size}, stratify={stratify_by}, seed={random_state})"
+        ),
+        library="sklearn",
+        code_template=(
+            "import numpy as np\n"
+            "from sklearn.model_selection import train_test_split\n"
+            "\n"
+            + ML_NOTEBOOK_BINDINGS
+            + "adata = lobster_input({{ modality_name | repr }})\n"
+            "indices = np.arange(adata.n_obs)\n"
+            "{% if stratify_by %}"
+            "stratify_labels = adata.obs[{{ stratify_by | repr }}].values\n"
+            "{% else %}"
+            "stratify_labels = None\n"
+            "{% endif %}"
+            "train_val_idx, test_idx = train_test_split(\n"
+            "    indices,\n"
+            "    test_size={{ test_size | repr }},\n"
+            "    random_state={{ random_state | repr }},\n"
+            "    stratify=stratify_labels,\n"
+            ")\n"
+            "{% if validation_size > 0 %}"
+            "train_idx, val_idx = train_test_split(\n"
+            "    train_val_idx,\n"
+            "    test_size={{ validation_size | repr }},\n"
+            "    random_state={{ random_state | repr }},\n"
+            "    stratify=(\n"
+            "        stratify_labels[train_val_idx] if stratify_labels is not None else None\n"
+            "    ),\n"
+            ")\n"
+            "{% else %}"
+            "train_idx, val_idx = train_val_idx, np.array([], dtype=int)\n"
+            "{% endif %}"
+            "adata.obs['ml_split'] = 'unassigned'\n"
+            "adata.obs.loc[adata.obs_names[train_idx], 'ml_split'] = 'train'\n"
+            "adata.obs.loc[adata.obs_names[test_idx], 'ml_split'] = 'test'\n"
+            "if len(val_idx) > 0:\n"
+            "    adata.obs.loc[adata.obs_names[val_idx], 'ml_split'] = 'validation'\n"
+            "adata.uns['ml_split_id'] = {{ split_id | repr }}\n"
+            "lobster_register({{ modality_name | repr }}, adata)\n"
+            "adata_validation = None\n"
+            "for split_name, split_idx in (\n"
+            "    ('train', train_idx), ('test', test_idx), ('validation', val_idx)\n"
+            "):\n"
+            "    if len(split_idx) == 0:\n"
+            "        continue\n"
+            "    split_view = adata[split_idx, :].copy()\n"
+            "    split_view.uns['ml_split_source'] = {\n"
+            "        'modality': {{ modality_name | repr }} + '_' + split_name,\n"
+            "        'parent': {{ modality_name | repr }},\n"
+            "        'split': split_name,\n"
+            "        'split_id': {{ split_id | repr }},\n"
+            "    }\n"
+            "    lobster_register({{ modality_name | repr }} + '_' + split_name, split_view)\n"
+            "    globals()['adata_' + split_name] = split_view\n"
+            "{% if save_result %}"
+            "    # Persist each split itself, never the complete parent adata.\n"
+            "    split_path = f\"{output_prefix}_\" + {{ modality_name | repr }} + '_' + split_name + '.h5ad'\n"
+            "    split_view.write_h5ad(split_path, compression='gzip')\n"
+            "{% endif %}"
+            "lobster_last_output = adata"
+        ),
+        imports=[],
+        parameters={
+            "modality_name": modality_name,
+            "test_size": test_size,
+            "validation_size": validation_size,
+            "stratify_by": stratify_by,
+            "random_state": random_state,
+            "split_id": split_id,
+            "save_result": save_result,
+        },
+        parameter_schema={},
+        input_entities=["adata"],
+        output_entities=["adata", "adata_train", "adata_test", "adata_validation"],
+    )
+
+
+def _split_binding(modality_name: str, adata) -> Optional[Dict[str, str]]:
+    """The create_ml_splits split ``adata`` is, read from its own tag, else None.
+
+    The tag (``uns['ml_split_source']``) is written when the split is created,
+    so it identifies the split even after its parent has been split again.
+    """
+    source = adata.uns.get("ml_split_source")
+    if not isinstance(source, dict) or source.get("modality") != modality_name:
+        return None
+    if not source.get("split_id") or not source.get("split"):
+        return None
+    return {"modality": modality_name, "split": str(source["split"]),
+            "split_id": str(source["split_id"])}
 
 
 class MachineLearningError(Exception):
@@ -89,6 +212,9 @@ def machine_learning_expert(
 
     # Store ML-specific results and metadata
     ml_results = {"summary": "", "details": {}}
+
+    # Stateless service behind prepare_ml_features (returns provenance IR)
+    ml_prep_service = MLPreparationService()
 
     # -------------------------
     # DATA STATUS AND INSPECTION TOOLS
@@ -246,133 +372,19 @@ def machine_learning_expert(
             adata = data_manager.get_modality(modality_name)
             logger.info(f"Preparing ML features from '{modality_name}': {adata.shape}")
 
-            # Copy to avoid modifying original
-            import anndata
+            # A modality made by create_ml_splits carries its split tag; the IR
+            # then replays on exactly that split rather than the current adata.
+            split_binding = _split_binding(modality_name, adata)
 
-            adata_ml = adata.copy()
-
-            # Feature selection
-            if feature_selection == "highly_variable":
-                try:
-                    import scanpy as sc
-
-                    if "highly_variable" not in adata_ml.var.columns:
-                        sc.pp.highly_variable_genes(adata_ml, n_top_genes=n_features)
-                    adata_ml = adata_ml[:, adata_ml.var.highly_variable]
-                except ImportError:
-                    # Fallback: variance-based selection
-                    variances = np.var(adata_ml.X, axis=0)
-                    if hasattr(variances, "A1"):
-                        variances = variances.A1
-                    top_var_indices = np.argsort(variances)[-n_features:]
-                    adata_ml = adata_ml[:, top_var_indices]
-
-            elif feature_selection == "pca":
-                try:
-                    import scanpy as sc
-
-                    if "X_pca" not in adata_ml.obsm:
-                        sc.pp.pca(
-                            adata_ml, n_comps=min(n_features, adata_ml.shape[1] - 1)
-                        )
-                    pca_data = adata_ml.obsm["X_pca"][:, :n_features]
-                    adata_ml = anndata.AnnData(
-                        X=pca_data,
-                        obs=adata_ml.obs.copy(),
-                        var=pd.DataFrame(
-                            index=[f"PC{i + 1}" for i in range(pca_data.shape[1])]
-                        ),
-                    )
-                except ImportError:
-                    logger.warning(
-                        "Scanpy not available, using variance-based selection instead of PCA"
-                    )
-                    variances = np.var(adata_ml.X, axis=0)
-                    if hasattr(variances, "A1"):
-                        variances = variances.A1
-                    top_var_indices = np.argsort(variances)[-n_features:]
-                    adata_ml = adata_ml[:, top_var_indices]
-
-            elif feature_selection == "marker_genes":
-                if "rank_genes_groups" in adata_ml.uns:
-                    marker_genes = []
-                    groups_key = adata_ml.uns["rank_genes_groups"]["params"]["groupby"]
-                    for group in adata_ml.obs[groups_key].unique():
-                        genes = adata_ml.uns["rank_genes_groups"]["names"][group][
-                            : n_features // 10
-                        ]
-                        marker_genes.extend(genes)
-                    marker_genes = list(set(marker_genes))[:n_features]
-                    available_markers = [
-                        g for g in marker_genes if g in adata_ml.var_names
-                    ]
-                    if available_markers:
-                        adata_ml = adata_ml[:, available_markers]
-                    else:
-                        logger.warning(
-                            "No marker genes found, using highly variable genes"
-                        )
-                else:
-                    logger.warning("No marker genes found, using highly variable genes")
-
-            # Handle zeros
-            if handle_zeros == "remove":
-                from scipy.sparse import issparse
-
-                if hasattr(adata_ml.X, "nnz"):
-                    X_csc = adata_ml.X.tocsc() if issparse(adata_ml.X) else adata_ml.X
-                    non_zeros_per_col = np.diff(X_csc.indptr)
-                    zero_prop = 1.0 - (non_zeros_per_col / adata_ml.shape[0])
-                else:
-                    zero_prop = np.mean(adata_ml.X == 0, axis=0)
-                    if hasattr(zero_prop, "A1"):
-                        zero_prop = zero_prop.A1
-                keep_features = zero_prop < 0.9
-                adata_ml = adata_ml[:, keep_features]
-
-            elif handle_zeros == "impute":
-                if hasattr(adata_ml.X, "toarray"):
-                    X_dense = adata_ml.X.toarray()
-                else:
-                    X_dense = adata_ml.X.copy()
-
-                for j in range(X_dense.shape[1]):
-                    col = X_dense[:, j]
-                    if np.any(col == 0):
-                        non_zero_mean = (
-                            np.mean(col[col != 0]) if np.any(col != 0) else 0
-                        )
-                        col[col == 0] = non_zero_mean
-                        X_dense[:, j] = col
-
-                adata_ml.X = X_dense
-
-            # Scale features
-            if scale:
-                try:
-                    import scanpy as sc
-
-                    sc.pp.scale(adata_ml, zero_center=True)
-                except ImportError:
-                    if hasattr(adata_ml.X, "toarray"):
-                        X_dense = adata_ml.X.toarray()
-                    else:
-                        X_dense = adata_ml.X.copy()
-
-                    X_dense = (X_dense - np.mean(X_dense, axis=0)) / (
-                        np.std(X_dense, axis=0) + 1e-8
-                    )
-                    adata_ml.X = X_dense
-
-            # Add ML metadata
-            adata_ml.uns["ml_preprocessing"] = {
-                "source_modality": modality_name,
-                "feature_selection": feature_selection,
-                "n_features_selected": adata_ml.shape[1],
-                "scaled": scale,
-                "zero_handling": handle_zeros,
-                "original_shape": adata.shape,
-            }
+            adata_ml, _, ir = ml_prep_service.select_ml_features(
+                adata,
+                modality_name=modality_name,
+                feature_selection=feature_selection,
+                n_features=n_features,
+                scale=scale,
+                handle_zeros=handle_zeros,
+                split_binding=split_binding,
+            )
 
             # Save as new modality
             ml_modality_name = f"{modality_name}_ml_features"
@@ -398,7 +410,7 @@ def machine_learning_expert(
                     "handle_zeros": handle_zeros,
                 },
                 description=f"Prepared ML features: {adata_ml.shape}",
-                ir=None,
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -521,9 +533,24 @@ def machine_learning_expert(
             if len(val_idx) > 0:
                 adata.obs.loc[adata.obs_names[val_idx], "ml_split"] = "validation"
 
+            # Tag this split generation, so each split modality can later be
+            # matched to exactly the split cell that produced it.
+            split_id = uuid.uuid4().hex
+            adata.uns["ml_split_id"] = split_id
+
+            def tagged(split_idx, split_name):
+                view = adata[split_idx, :].copy()
+                view.uns["ml_split_source"] = {
+                    "modality": f"{modality_name}_{split_name}",
+                    "parent": modality_name,
+                    "split": split_name,
+                    "split_id": split_id,
+                }
+                return view
+
             # Create separate modalities for each split
-            adata_train = adata[train_idx, :].copy()
-            adata_test = adata[test_idx, :].copy()
+            adata_train = tagged(train_idx, "train")
+            adata_test = tagged(test_idx, "test")
 
             train_modality = f"{modality_name}_train"
             test_modality = f"{modality_name}_test"
@@ -542,7 +569,7 @@ def machine_learning_expert(
             )
 
             if len(val_idx) > 0:
-                adata_val = adata[val_idx, :].copy()
+                adata_val = tagged(val_idx, "validation")
                 val_modality = f"{modality_name}_validation"
                 data_manager.store_modality(
                     name=val_modality,
@@ -573,7 +600,15 @@ def machine_learning_expert(
                     "random_state": random_state,
                 },
                 description=f"Created ML splits: train={len(train_idx)}, test={len(test_idx)}, val={len(val_idx)}",
-                ir=None,
+                ir=_ml_split_ir(
+                    modality_name,
+                    test_size,
+                    validation_size,
+                    stratify_by,
+                    random_state,
+                    split_id,
+                    save_result=save_result,
+                ),
                 agent=agent_name,
             )
 
