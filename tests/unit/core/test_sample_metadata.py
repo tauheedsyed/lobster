@@ -129,9 +129,63 @@ def test_numeric_widening_cannot_change_integer_values(existing, update):
     obs = pd.DataFrame({"large_value": existing}, index=["s1", "s2", "s3"])
     metadata = pd.DataFrame({"large_value": [update]}, index=["s2"])
     before = obs.copy(deep=True)
-    with pytest.raises(ValueError, match="lose integer precision"):
-        merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    result, written = merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    expected = [str(value) for value in existing]
+    expected[1] = str(update)
+    assert list(result["large_value"]) == expected
+    assert written == ["large_value"]
+    assert any(
+        "stored exact values as text" in warning
+        for warning in result.attrs["metadata_writeback_warnings"]
+    )
     pd.testing.assert_frame_equal(obs, before)
+
+
+def test_numeric_category_expansion_preserves_unmatched_values(tmp_path):
+    big = 2**60 + 1
+    obs = pd.DataFrame({"v": pd.Categorical([big, 2, 3])}, index=["s1", "s2", "s3"])
+    path = _table_path(tmp_path, pd.DataFrame({"id": ["s2"], "v": ["0.5"]}), "csv")
+    metadata, _ = read_sample_metadata(path, obs.index)
+    result, _ = merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    assert list(result["v"]) == [str(big), "0.5", "3"]
+    assert int(result.loc["s1", "v"]) == big
+    assert any(
+        "stored exact values as text" in warning
+        for warning in result.attrs["metadata_writeback_warnings"]
+    )
+
+
+@pytest.mark.parametrize("existing", ["integer", "float", "new"])
+@pytest.mark.parametrize("second", ["", "0.5"])
+@pytest.mark.parametrize("suffix", ["csv", "tsv", "xlsx"])
+def test_raw_numeric_precision_survives_parse_and_alignment(
+    tmp_path, existing, second, suffix
+):
+    names = pd.Index(["s1", "s2", "s3"])
+    obs = pd.DataFrame(index=names)
+    if existing == "integer":
+        obs["v"] = [1, 2, 3]
+    elif existing == "float":
+        obs["v"] = [1.0, 2.0, 3.0]
+    big = str(2**60 + 1)
+    path = _table_path(
+        tmp_path, pd.DataFrame({"id": ["s1", "s2"], "v": [big, second]}), suffix
+    )
+    metadata, _ = read_sample_metadata(path, names, "id")
+    result, _ = merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    assert result.loc["s1", "v"] == big
+    assert any(
+        "retained original numeric tokens as text" in warning
+        for warning in result.attrs["metadata_writeback_warnings"]
+    )
+    if second:
+        assert result.loc["s2", "v"] == second
+    else:
+        assert pd.isna(result.loc["s2", "v"])
+    if existing == "new":
+        assert pd.isna(result.loc["s3", "v"])
+    else:
+        assert result.loc["s3", "v"] == ("3" if existing == "integer" else "3.0")
 
 
 def test_matched_missing_boolean_and_numeric_values(tmp_path):

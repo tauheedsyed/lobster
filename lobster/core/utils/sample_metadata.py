@@ -1,17 +1,109 @@
-"""Exact sample identity and dtype-preserving obs metadata alignment."""
+"""Exact sample identity and lossless obs metadata alignment."""
 
+from decimal import Decimal, InvalidOperation
+from numbers import Integral, Real
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from pandas.api import types as pdt
 
+_WARNINGS = "metadata_writeback_warnings"
+
+
+def _missing(value):
+    return bool(pd.isna(value))
+
+
+def _python(value):
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def _boolean_values(values):
+    nonnull = values.dropna()
+    return len(nonnull) > 0 and all(
+        isinstance(value, (bool, np.bool_)) for value in nonnull
+    )
+
+
+def _text_category(values):
+    """String categories bypass H5AD's object-to-numeric coercion."""
+    text = [np.nan if _missing(value) else str(_python(value)) for value in values]
+    return pd.Series(pd.Categorical(text), index=values.index, name=values.name)
+
+
+def _same_number(original, converted):
+    if _missing(original):
+        return _missing(converted)
+    if _missing(converted):
+        return False
+    original, converted = _python(original), _python(converted)
+    if isinstance(original, Integral):
+        # Python's int/float equality does not round the integer first.
+        return int(original) == converted
+    return original == converted
+
+
+def _infer_losslessly(values):
+    """Infer only when every scalar survives; otherwise retain exact text."""
+    values = values.astype(object)
+    nonnull = values.dropna()
+    if _boolean_values(values):
+        return values.astype("boolean" if values.isna().any() else bool), False
+    if len(nonnull) and all(isinstance(_python(value), Real) for value in nonnull):
+        candidate = values.infer_objects()
+        if pdt.is_numeric_dtype(candidate.dtype) and all(
+            _same_number(original, converted)
+            for original, converted in zip(values, candidate)
+        ):
+            return candidate, False
+        return _text_category(values), True
+    if len(nonnull) and all(isinstance(value, str) for value in nonnull):
+        return _text_category(values), False
+    return _text_category(values), bool(len(nonnull))
+
+
+def _numeric_text(values):
+    if values.empty:
+        return False
+    try:
+        return all(Decimal(value).is_finite() for value in values)
+    except InvalidOperation:
+        return False
+
+
+def _numeric_tokens_survive(text, typed):
+    """Check raw numeric tokens before accepting pandas' inferred numbers."""
+    for token, value in zip(text, typed):
+        if _missing(value):
+            continue
+        try:
+            original = Decimal(token)
+            numeric = _python(value)
+            converted = (
+                Decimal(int(numeric))
+                if isinstance(numeric, Integral)
+                else Decimal.from_float(float(numeric))
+            )
+        except (InvalidOperation, ValueError, TypeError, OverflowError):
+            return False
+        if not original.is_finite() or original != converted:
+            return False
+        # Retain identifier-like spellings rather than dropping zeros/signs.
+        spellings = {str(numeric)}
+        if converted == converted.to_integral_value():
+            spellings.add(str(int(converted)))
+        if token not in spellings:
+            return False
+    return True
+
 
 def read_sample_metadata(path, obs_names, sample_id_column="auto"):
-    """Read typed annotations while keeping identifier text before NA/type inference.
+    """Preserve ID text and validate annotation precision before parser inference.
 
-    No case folding, trimming, or numeric ID normalization is performed. Empty
-    IDs and ambiguous auto-detection fail rather than inventing sample identities.
+    No case folding, trimming, or numeric ID normalization is performed. Numeric
+    annotations that cannot retain their exact token values are stored as string
+    categories, with warnings, rather than accepting rounded inferred floats.
     """
     path = Path(path)
     reader = pd.read_excel if path.suffix.lower() in (".xlsx", ".xls") else pd.read_csv
@@ -43,21 +135,26 @@ def read_sample_metadata(path, obs_names, sample_id_column="auto"):
     if not ids.is_unique or not obs_names.is_unique:
         raise ValueError("Sample IDs must be unique in both metadata and modality")
     metadata = reader(path, **kwargs)
-    metadata[sample_id_column] = (
-        ids  # Restore exact text, including literal NA-like IDs.
-    )
-    return metadata.set_index(sample_id_column), sample_id_column
-
-
-def _boolean_values(values):
-    nonnull = values.dropna()
-    return len(nonnull) > 0 and all(
-        isinstance(value, (bool, np.bool_)) for value in nonnull
-    )
+    metadata[sample_id_column] = ids
+    warnings = []
+    for column in metadata.columns:
+        if column == sample_id_column or pdt.is_bool_dtype(metadata[column].dtype):
+            continue
+        numeric = pdt.is_numeric_dtype(metadata[column].dtype) or _numeric_text(
+            text[column][metadata[column].notna()]
+        )
+        if numeric and not _numeric_tokens_survive(text[column], metadata[column]):
+            raw = text[column].where(metadata[column].notna(), np.nan)
+            metadata[column] = _text_category(raw)
+            warnings.append(
+                f"Column '{column}': retained original numeric tokens as text to prevent precision/identity loss"
+            )
+    metadata = metadata.set_index(sample_id_column)
+    metadata.attrs[_WARNINGS] = warnings
+    return metadata, sample_id_column
 
 
 def _aligned_column(existing, incoming):
-    """Assign compatible values without moving bool/numeric columns into object."""
     values = existing.copy()
     if pdt.is_bool_dtype(values.dtype) or _boolean_values(values):
         if len(incoming.dropna()) and not _boolean_values(incoming):
@@ -72,46 +169,46 @@ def _aligned_column(existing, incoming):
             )
         elif incoming.isna().any():
             values = values.astype("boolean")
-    elif isinstance(values.dtype, pd.CategoricalDtype):
-        additions = incoming.dropna().unique()
-        additions = [value for value in additions if value not in values.cat.categories]
+        incoming = incoming.astype("boolean" if incoming.isna().any() else bool)
+        values.loc[incoming.index] = incoming
+        return values, False
+    if isinstance(values.dtype, pd.CategoricalDtype):
+        # Never let category union coerce integer categories to floats. Numeric
+        # categories already require text in H5AD, so encode each scalar exactly
+        # before expansion, preserving unmatched/invalid values and their spelling.
+        numeric_categories = pdt.is_numeric_dtype(values.cat.categories.dtype) or all(
+            isinstance(_python(value), Real) for value in values.cat.categories
+        )
+        if numeric_categories:
+            objects = values.astype(object)
+            objects.loc[incoming.index] = incoming.astype(object)
+            return _text_category(objects), True
+        additions = [
+            value
+            for value in incoming.dropna().unique()
+            if value not in values.cat.categories
+        ]
         if additions:
             values = values.cat.add_categories(additions)
-    elif pdt.is_numeric_dtype(values.dtype):
-        if len(incoming.dropna()) and not pdt.is_numeric_dtype(incoming.dtype):
-            incoming = incoming.infer_objects()
-            if not pdt.is_numeric_dtype(incoming.dtype):
-                raise ValueError("Numeric annotations require numeric values")
-        common = pd.concat([values, incoming]).dtype
-        if not pdt.is_numeric_dtype(common):
-            raise ValueError("Incompatible numeric annotation dtype")
-        if pdt.is_float_dtype(common):
-            for integers in (values, incoming):
-                if pdt.is_integer_dtype(integers.dtype):
-                    widened = integers.astype(common)
-                    for original, converted in zip(integers.tolist(), widened.tolist()):
-                        if not pd.isna(original) and int(original) != float(converted):
-                            raise ValueError(
-                                "Numeric updates would lose integer precision"
-                            )
-        if common != values.dtype:
-            values = values.astype(common)
-    values.loc[incoming.index] = incoming
-    return values
+        values.loc[incoming.index] = incoming
+        return values, False
+    objects = values.astype(object)
+    objects.loc[incoming.index] = incoming.astype(object)
+    return _infer_losslessly(objects)
 
 
 def merge_obs_metadata(
     obs, metadata, *, overwrite_existing=False, preserve_missing=False
 ):
-    """Return updated obs and written columns, preserving unmatched rows and types.
+    """Align on exact obs IDs; report any exact-text numeric retention in attrs.
 
-    ``preserve_missing`` additionally excludes missing updates (standardization
-    does not replace values absent from successfully validated schema rows).
-    New boolean annotations use pandas nullable boolean when unmatched rows exist.
+    Boolean types/missingness are preserved. Object alignment precedes inference
+    so reindexing cannot silently turn large integers into rounded floats.
     """
     if not obs.index.is_unique or not metadata.index.is_unique:
         raise ValueError("Sample IDs must be unique in both metadata and modality")
     result = obs.copy()
+    warnings = list(metadata.attrs.get(_WARNINGS, []))
     matched = obs.index.intersection(metadata.index, sort=False)
     written = []
     for column in metadata.columns:
@@ -123,13 +220,19 @@ def merge_obs_metadata(
         if incoming.empty:
             continue
         if column in obs:
-            result[column] = _aligned_column(obs[column], incoming)
-        else:
+            values, retained = _aligned_column(obs[column], incoming)
+        elif isinstance(incoming.dtype, pd.CategoricalDtype):
             values = incoming.reindex(obs.index)
-            if _boolean_values(values):
-                values = values.astype("boolean" if values.isna().any() else bool)
-            else:
-                values = values.infer_objects()
-            result[column] = values
+            retained = False
+        else:
+            values, retained = _infer_losslessly(
+                incoming.astype(object).reindex(obs.index)
+            )
+        result[column] = values
+        if retained:
+            warnings.append(
+                f"Column '{column}': stored exact values as text to avoid lossy numeric/category coercion"
+            )
         written.append(column)
+    result.attrs[_WARNINGS] = list(dict.fromkeys(warnings))
     return result, written
