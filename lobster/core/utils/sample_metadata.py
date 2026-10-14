@@ -85,6 +85,15 @@ def _aligned_column(existing, incoming):
         common = pd.concat([values, incoming]).dtype
         if not pdt.is_numeric_dtype(common):
             raise ValueError("Incompatible numeric annotation dtype")
+        if pdt.is_float_dtype(common):
+            for integers in (values, incoming):
+                if pdt.is_integer_dtype(integers.dtype):
+                    widened = integers.astype(common)
+                    for original, converted in zip(integers.tolist(), widened.tolist()):
+                        if not pd.isna(original) and int(original) != float(converted):
+                            raise ValueError(
+                                "Numeric updates would lose integer precision"
+                            )
         if common != values.dtype:
             values = values.astype(common)
     values.loc[incoming.index] = incoming

@@ -122,6 +122,37 @@ def test_duplicate_obs_ids_are_rejected(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "existing, update", [([2**60 + 1, 2, 3], 0.5), ([1.0, 2.0, 3.0], 2**60 + 1)]
+)
+def test_numeric_widening_cannot_change_integer_values(existing, update):
+    obs = pd.DataFrame({"large_value": existing}, index=["s1", "s2", "s3"])
+    metadata = pd.DataFrame({"large_value": [update]}, index=["s2"])
+    before = obs.copy(deep=True)
+    with pytest.raises(ValueError, match="lose integer precision"):
+        merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    pd.testing.assert_frame_equal(obs, before)
+
+
+def test_matched_missing_boolean_and_numeric_values(tmp_path):
+    obs = pd.DataFrame(
+        {"use_sample": [True, True, False], "age": [31, 32, 33]},
+        index=["s1", "s2", "s3"],
+    )
+    path = _table_path(
+        tmp_path,
+        pd.DataFrame({"id": ["s1"], "use_sample": [None], "age": [None]}),
+        "csv",
+    )
+    metadata, _ = read_sample_metadata(path, obs.index)
+    result, _ = merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    assert str(result["use_sample"].dtype) == "boolean"
+    assert pd.isna(result.loc["s1", "use_sample"])
+    assert not result.loc["s3", "use_sample"]
+    assert pd.isna(result.loc["s1", "age"])
+    assert list(result["age"].iloc[1:]) == [32, 33]
+
+
 def test_existing_columns_and_missing_values_can_be_preserved():
     obs = pd.DataFrame({"age": [31, 32, 33]}, index=["s1", "s2", "s3"])
     metadata = pd.DataFrame({"age": [64, np.nan]}, index=["s1", "s2"])
