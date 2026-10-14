@@ -195,6 +195,8 @@ def test_raw_numeric_precision_survives_parse_and_alignment(
         ["0.5", "12.75", "0.125", "0.5", "12.75", "0.125"],
         ["1e-1", "2e-1", "3e-1", "1e-1", "2e-1", "3e-1"],
         ["1", "2", "3", "1", "2", "3"],
+        ["0.30000000000000004", "1e-3", "0.10", "0.30000000000000004", "1e-3", "0.10"],
+        ["-0", "0.1", "0.2", "-0", "0.1", "0.2"],
     ],
 )
 @pytest.mark.parametrize("partial_overwrite", [False, True])
@@ -255,6 +257,41 @@ def test_exact_numeric_text_can_update_string_categories(tmp_path):
     metadata, _ = read_sample_metadata(path, obs.index)
     result, _ = merge_obs_metadata(obs, metadata, overwrite_existing=True)
     assert list(result["v"]) == ["004", "002", "003"]
+
+
+def test_shortest_float_repr_property(tmp_path):
+    rng = np.random.default_rng(2026)
+    bits = rng.integers(0, np.iinfo(np.uint64).max, size=512, dtype=np.uint64)
+    generated = bits.view(np.float64)
+    generated = generated[np.isfinite(generated)]
+    tokens = [repr(float(value)) for value in generated]
+    tokens += ["0.30000000000000004", "1e-3", "0.10", "-0", "+0.5"]
+    expected = np.array([float(token) for token in tokens])
+    names = pd.Index([f"s{index}" for index in range(len(tokens))])
+    path = _table_path(tmp_path, pd.DataFrame({"id": names, "v": tokens}), "csv")
+    metadata, _ = read_sample_metadata(path, names)
+    result, _ = merge_obs_metadata(pd.DataFrame(index=names), metadata)
+    assert not result.attrs["metadata_writeback_warnings"]
+    assert pd.api.types.is_float_dtype(result["v"])
+    actual = result["v"].to_numpy()
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(np.signbit(actual), np.signbit(expected))
+
+
+def test_annotation_nan_is_missing_and_infinity_is_reported_text(tmp_path):
+    names = pd.Index(["s1", "s2", "s3"])
+    path = _table_path(
+        tmp_path, pd.DataFrame({"id": names, "v": ["NaN", "inf", "-inf"]}), "csv"
+    )
+    metadata, _ = read_sample_metadata(path, names)
+    result, _ = merge_obs_metadata(pd.DataFrame(index=names), metadata)
+    assert pd.isna(result.loc["s1", "v"])
+    assert result.loc["s2", "v"] == "inf"
+    assert result.loc["s3", "v"] == "-inf"
+    assert any(
+        "retained original numeric tokens as text" in warning
+        for warning in result.attrs["metadata_writeback_warnings"]
+    )
 
 
 def test_matched_missing_boolean_and_numeric_values(tmp_path):

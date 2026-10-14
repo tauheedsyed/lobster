@@ -73,31 +73,42 @@ def _numeric_text(values):
         return False
 
 
-def _numeric_tokens_survive(text, typed):
-    """Check raw numeric tokens before accepting pandas' inferred numbers."""
-    for token, value in zip(text, typed):
-        if _missing(value):
+def _parse_numeric_tokens(text, typed):
+    """Parse raw tokens, not pandas-rounded scalars; return None on lossy input.
+
+    Annotation NA tokens use pandas' normal missing-value policy. Nonfinite
+    numbers are retained as text with warnings. Primary IDs bypass this policy.
+    """
+    values = []
+    for token, inferred in zip(text, typed):
+        if _missing(inferred):
+            values.append(np.nan)
             continue
         try:
             original = Decimal(token)
-            numeric = _python(value)
-            if isinstance(numeric, Integral):
-                exact = original == Decimal(int(numeric))
-            elif original == original.to_integral_value():
-                # Compare integer values without rounding the original first.
-                exact = int(original) == float(numeric)
+            if not original.is_finite():
+                return None
+            if re.fullmatch(r"[+-]?\d+", token.strip()):
+                digits = token.strip().lstrip("+-")
+                if len(digits) > 1 and digits.startswith("0"):
+                    return None  # Preserve identifier-like integer spelling.
+                if original.is_zero() and original.is_signed():
+                    value = -0.0
+                else:
+                    value = int(original)
             else:
-                # Normal decimal/scientific covariates use float64's shortest
-                # round-trip decimal, not its full binary approximation.
-                exact = original == Decimal(repr(float(numeric)))
+                value = float(token)
+                if not np.isfinite(value) or original != Decimal(repr(value)):
+                    return None
+            values.append(value)
         except (InvalidOperation, ValueError, TypeError, OverflowError):
-            return False
-        if not original.is_finite() or not exact:
-            return False
-        # Integer-like identifier spellings still must not drop zeros/signs.
-        if re.fullmatch(r"[+-]?\d+", token.strip()) and token != str(int(original)):
-            return False
-    return True
+            return None
+    # Explicit object construction prevents mixed/missing inputs from rounding
+    # integers before the exact-value inference check can see them.
+    parsed, retained = _infer_losslessly(
+        pd.Series(values, index=text.index, dtype=object)
+    )
+    return None if retained else parsed
 
 
 def read_sample_metadata(path, obs_names, sample_id_column="auto"):
@@ -145,12 +156,16 @@ def read_sample_metadata(path, obs_names, sample_id_column="auto"):
         numeric = pdt.is_numeric_dtype(metadata[column].dtype) or _numeric_text(
             text[column][metadata[column].notna()]
         )
-        if numeric and not _numeric_tokens_survive(text[column], metadata[column]):
-            raw = text[column].where(metadata[column].notna(), np.nan)
-            metadata[column] = _text_category(raw)
-            warnings.append(
-                f"Column '{column}': retained original numeric tokens as text to prevent precision/identity loss"
-            )
+        if numeric:
+            parsed = _parse_numeric_tokens(text[column], metadata[column])
+            if parsed is not None:
+                metadata[column] = parsed
+            else:
+                raw = text[column].where(metadata[column].notna(), np.nan)
+                metadata[column] = _text_category(raw)
+                warnings.append(
+                    f"Column '{column}': retained original numeric tokens as text to prevent precision/identity loss"
+                )
     metadata = metadata.set_index(sample_id_column)
     metadata.attrs[_WARNINGS] = warnings
     return metadata, sample_id_column
