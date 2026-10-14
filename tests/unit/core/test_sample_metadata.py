@@ -188,6 +188,75 @@ def test_raw_numeric_precision_survives_parse_and_alignment(
         assert result.loc["s3", "v"] == ("3" if existing == "integer" else "3.0")
 
 
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["0.1", "0.2", "0.3", "0.1", "0.2", "0.3"],
+        ["0.5", "12.75", "0.125", "0.5", "12.75", "0.125"],
+        ["1e-1", "2e-1", "3e-1", "1e-1", "2e-1", "3e-1"],
+        ["1", "2", "3", "1", "2", "3"],
+    ],
+)
+@pytest.mark.parametrize("partial_overwrite", [False, True])
+@pytest.mark.parametrize("suffix", ["csv", "tsv", "xlsx"])
+def test_continuous_covariates_keep_numeric_design(
+    tmp_path, tokens, partial_overwrite, suffix
+):
+    from lobster.services.analysis.differential_formula_service import (
+        DifferentialFormulaService,
+    )
+
+    names = pd.Index([f"s{index}" for index in range(1, 7)])
+    integers = all(token.isdigit() for token in tokens)
+    expected = np.array([int(token) if integers else float(token) for token in tokens])
+    obs = pd.DataFrame(index=names)
+    if partial_overwrite:
+        obs["dose"] = expected
+    path = _table_path(
+        tmp_path,
+        pd.DataFrame(
+            {
+                "id": names[:1] if partial_overwrite else names,
+                "dose": tokens[:1] if partial_overwrite else tokens,
+            }
+        ),
+        suffix,
+    )
+    metadata, _ = read_sample_metadata(path, names)
+    result, _ = merge_obs_metadata(obs, metadata, overwrite_existing=partial_overwrite)
+    assert not result.attrs["metadata_writeback_warnings"]
+    assert pd.api.types.is_numeric_dtype(result["dose"])
+    assert (
+        pd.api.types.is_integer_dtype(result["dose"])
+        if integers
+        else pd.api.types.is_float_dtype(result["dose"])
+    )
+    np.testing.assert_array_equal(result["dose"].to_numpy(), expected)
+    service = DifferentialFormulaService()
+    reference = pd.DataFrame({"dose": expected}, index=names)
+    reference_design = service.construct_design_matrix(
+        service.parse_formula("~dose", reference), reference
+    )
+    components = service.parse_formula("~dose", result)
+    assert components["variable_info"]["dose"]["type"] == "continuous"
+    design = service.construct_design_matrix(components, result)
+    assert design["design_matrix"].shape == (6, 2)
+    assert design["coefficient_names"] == reference_design["coefficient_names"]
+    np.testing.assert_array_equal(
+        design["design_matrix"], reference_design["design_matrix"]
+    )
+
+
+def test_exact_numeric_text_can_update_string_categories(tmp_path):
+    obs = pd.DataFrame(
+        {"v": pd.Categorical(["001", "002", "003"])}, index=["s1", "s2", "s3"]
+    )
+    path = _table_path(tmp_path, pd.DataFrame({"id": ["s1"], "v": ["004"]}), "csv")
+    metadata, _ = read_sample_metadata(path, obs.index)
+    result, _ = merge_obs_metadata(obs, metadata, overwrite_existing=True)
+    assert list(result["v"]) == ["004", "002", "003"]
+
+
 def test_matched_missing_boolean_and_numeric_values(tmp_path):
     obs = pd.DataFrame(
         {"use_sample": [True, True, False], "age": [31, 32, 33]},

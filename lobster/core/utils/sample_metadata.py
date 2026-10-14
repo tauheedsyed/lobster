@@ -1,5 +1,6 @@
 """Exact sample identity and lossless obs metadata alignment."""
 
+import re
 from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 from pathlib import Path
@@ -80,20 +81,21 @@ def _numeric_tokens_survive(text, typed):
         try:
             original = Decimal(token)
             numeric = _python(value)
-            converted = (
-                Decimal(int(numeric))
-                if isinstance(numeric, Integral)
-                else Decimal.from_float(float(numeric))
-            )
+            if isinstance(numeric, Integral):
+                exact = original == Decimal(int(numeric))
+            elif original == original.to_integral_value():
+                # Compare integer values without rounding the original first.
+                exact = int(original) == float(numeric)
+            else:
+                # Normal decimal/scientific covariates use float64's shortest
+                # round-trip decimal, not its full binary approximation.
+                exact = original == Decimal(repr(float(numeric)))
         except (InvalidOperation, ValueError, TypeError, OverflowError):
             return False
-        if not original.is_finite() or original != converted:
+        if not original.is_finite() or not exact:
             return False
-        # Retain identifier-like spellings rather than dropping zeros/signs.
-        spellings = {str(numeric)}
-        if converted == converted.to_integral_value():
-            spellings.add(str(int(converted)))
-        if token not in spellings:
+        # Integer-like identifier spellings still must not drop zeros/signs.
+        if re.fullmatch(r"[+-]?\d+", token.strip()) and token != str(int(original)):
             return False
     return True
 
@@ -190,7 +192,9 @@ def _aligned_column(existing, incoming):
         ]
         if additions:
             values = values.cat.add_categories(additions)
-        values.loc[incoming.index] = incoming
+        # Incoming categoricals may have a different vocabulary; assign scalars
+        # after expanding the destination rather than categorical codes.
+        values.loc[incoming.index] = incoming.astype(object)
         return values, False
     objects = values.astype(object)
     objects.loc[incoming.index] = incoming.astype(object)
