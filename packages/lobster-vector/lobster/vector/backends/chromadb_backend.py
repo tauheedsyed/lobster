@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # ChromaDB recommended maximum batch size
 _BATCH_SIZE = 5000
 
+# Smaller pages bound the work performed by each native collection.add call
+# when copying a pre-built ontology into the live collection.
+_ONTOLOGY_LOAD_PAGE_SIZE = 500
+
 # S3 URLs for pre-built ontology embedding tarballs
 ONTOLOGY_TARBALLS: dict[str, str] = {
     "mondo_v2024_01": "https://lobster-ontology-data.s3.amazonaws.com/v2/mondo_openai_1536.tar.gz",
@@ -228,6 +232,8 @@ class ChromaDBBackend(BaseVectorBackend):
 
         # --- Step 2: Extract tarball to a temporary directory ---
         temp_dir = None
+        source_client = None
+        loading_started = False
         try:
             temp_dir = tempfile.mkdtemp(prefix="lobster_ontology_")
             try:
@@ -251,9 +257,7 @@ class ChromaDBBackend(BaseVectorBackend):
 
             if not extracted_dir.exists():
                 # Try finding the first directory in temp_dir
-                subdirs = [
-                    p for p in Path(temp_dir).iterdir() if p.is_dir()
-                ]
+                subdirs = [p for p in Path(temp_dir).iterdir() if p.is_dir()]
                 if subdirs:
                     extracted_dir = subdirs[0]
                 else:
@@ -286,14 +290,20 @@ class ChromaDBBackend(BaseVectorBackend):
                         "No collections in tarball for '%s'.",
                         collection_name,
                     )
-                    del source_client
                     return False
 
             # Paginate extraction from source to avoid SQLite variable
             # limits on large collections (e.g. MONDO has 52K+ terms).
             total_source = source_coll.count()
-            page_size = _BATCH_SIZE
+            page_size = min(_BATCH_SIZE, _ONTOLOGY_LOAD_PAGE_SIZE)
             total_loaded = 0
+
+            # Write through the client: self.add_documents would re-enter
+            # _get_or_create_collection -> _ensure_ontology_data during loading.
+            dest_coll = client.get_or_create_collection(
+                name=collection_name, metadata={"hnsw:space": "cosine"}
+            )
+            loading_started = True
 
             for offset in range(0, total_source, page_size):
                 data = source_coll.get(
@@ -304,8 +314,7 @@ class ChromaDBBackend(BaseVectorBackend):
                 if not data["ids"]:
                     break
 
-                self.add_documents(
-                    collection_name,
+                dest_coll.add(
                     ids=data["ids"],
                     embeddings=data["embeddings"],
                     documents=data["documents"],
@@ -320,7 +329,6 @@ class ChromaDBBackend(BaseVectorBackend):
                     collection_name,
                 )
 
-            del source_client
             return True
 
         except Exception as exc:
@@ -330,8 +338,27 @@ class ChromaDBBackend(BaseVectorBackend):
                 collection_name,
                 exc,
             )
+            if loading_started:
+                # Do not leave a partial collection that would pass the populated
+                # check on the next call and be served as a complete ontology.
+                try:
+                    client.delete_collection(collection_name)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Could not discard partially loaded collection %s",
+                        collection_name,
+                    )
             return False
         finally:
+            # Release the source client's resources before deleting its storage.
+            # Dropping the reference alone leaves Chroma's shared System cache.
+            if source_client is not None:
+                close = getattr(source_client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("source client close failed", exc_info=True)
             # Clean up temporary extraction directory
             if temp_dir is not None:
                 import shutil
