@@ -73,6 +73,17 @@ def _numeric_text(values):
         return False
 
 
+def _mixed_numeric_text(values):
+    numeric = 0
+    for value in values:
+        try:
+            Decimal(value)
+            numeric += 1
+        except InvalidOperation:
+            continue  # A legitimate text label, not a numeric token.
+    return 0 < numeric < len(values)
+
+
 def _parse_numeric_tokens(text, typed):
     """Parse raw tokens, not pandas-rounded scalars; return None on lossy input.
 
@@ -156,6 +167,14 @@ def read_sample_metadata(path, obs_names, sample_id_column="auto"):
         numeric = pdt.is_numeric_dtype(metadata[column].dtype) or _numeric_text(
             text[column][metadata[column].notna()]
         )
+        nonmissing_text = text[column][metadata[column].notna()]
+        if not numeric and _mixed_numeric_text(nonmissing_text):
+            metadata[column] = _text_category(
+                text[column].where(metadata[column].notna(), np.nan)
+            )
+            warnings.append(
+                f"Column '{column}': mixed numeric/non-numeric annotation tokens retained as categorical text"
+            )
         if numeric:
             parsed = _parse_numeric_tokens(text[column], metadata[column])
             if parsed is not None:

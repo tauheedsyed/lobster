@@ -294,6 +294,30 @@ def test_annotation_nan_is_missing_and_infinity_is_reported_text(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["9007199254740993", "control", "0.30000000000000004"],
+        ["inf", "control", "NA"],
+    ],
+)
+def test_mixed_numeric_text_reports_typing_warning(tmp_path, tokens):
+    names = pd.Index(["s1", "s2", "s3"])
+    path = _table_path(tmp_path, pd.DataFrame({"id": names, "v": tokens}), "csv")
+    metadata, _ = read_sample_metadata(path, names)
+    result, _ = merge_obs_metadata(pd.DataFrame(index=names), metadata)
+    assert list(result["v"].iloc[:2]) == tokens[:2]
+    if tokens[2] == "NA":
+        assert pd.isna(result.loc["s3", "v"])
+    else:
+        assert result.loc["s3", "v"] == tokens[2]
+    assert isinstance(result["v"].dtype, pd.CategoricalDtype)
+    assert any(
+        "mixed numeric/non-numeric annotation tokens" in warning
+        for warning in result.attrs["metadata_writeback_warnings"]
+    )
+
+
 def test_matched_missing_boolean_and_numeric_values(tmp_path):
     obs = pd.DataFrame(
         {"use_sample": [True, True, False], "age": [31, 32, 33]},
