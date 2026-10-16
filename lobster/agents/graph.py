@@ -50,6 +50,7 @@ from lobster.tools.workspace_tool import (
     create_get_content_from_workspace_tool,
     create_list_modalities_tool,
 )
+from lobster.utils.llm_response_utils import extract_text_from_llm_response
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -201,7 +202,9 @@ async def _invoke_and_store(
     if final_msg is None:
         return f"Agent {agent_name} returned no response."
 
-    content = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+    content = extract_text_from_llm_response(final_msg, allow_empty=True)
+    if not content:
+        return f"Agent {agent_name} returned no text response."
     logger.debug(f"Agent {agent_name} completed. Response length: {len(content)}")
 
     # Dual-write: store full result for later retrieval

@@ -1294,6 +1294,7 @@ class AgentClient(BaseClient):
 
             if result_parts:
                 return "\n\n".join(result_parts).strip()
+            return ""  # Reasoning/tool/media blocks are not a public text answer.
 
         # Ultimate fallback
         return str(content).strip() if content else ""
