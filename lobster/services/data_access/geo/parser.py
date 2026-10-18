@@ -1563,7 +1563,8 @@ class GEOParser:
                                 for s in obs_data
                             ]
                             break
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("Skipping cell-name key %s: %s", possible_key, exc)
                         continue
 
                 if obs_names is None:
@@ -1586,7 +1587,8 @@ class GEOParser:
                                 for s in var_data
                             ]
                             break
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("Skipping gene-name key %s: %s", possible_key, exc)
                         continue
 
                 if var_names is None:
@@ -2054,6 +2056,7 @@ class GEOParser:
             DataFrame: Preview of the file (first 5 rows x 5 columns)
         """
         import tempfile
+        import urllib.parse
         import urllib.request
         from pathlib import Path
 
@@ -2079,8 +2082,10 @@ class GEOParser:
             # Download file with proper SSL context and certificate verification
             logger.info(f"Downloading file from: {target_url}")
             ssl_context = create_ssl_context()
+            if urllib.parse.urlparse(target_url).scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported download URL scheme: {target_url}")
             try:
-                with urllib.request.urlopen(
+                with urllib.request.urlopen(  # nosec B310 - scheme restricted to http(s) above
                     target_url, context=ssl_context
                 ) as response:
                     with open(local_file, "wb") as out_file:

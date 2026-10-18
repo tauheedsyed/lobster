@@ -4,6 +4,7 @@ Tests DownloadExecutor methods in isolation via mocked service.
 Part of Phase 4 Plan 03: GEO Service Decomposition.
 """
 
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +19,7 @@ def mock_service():
     service = MagicMock()
     service.data_manager = MagicMock()
     service.data_manager.metadata_store = {}
-    service.cache_dir = Path("/tmp/test_geo_cache")
+    service.cache_dir = Path(tempfile.gettempdir()) / "test_geo_cache"
     service.console = MagicMock()
     service.geo_downloader = MagicMock()
     service.geo_parser = MagicMock()
