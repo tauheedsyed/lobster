@@ -291,15 +291,40 @@ class DownloadExecutor:
                 and isinstance(geo_result.data, pd.DataFrame)
                 and enhanced_metadata["processing_method"] == "processed_matrix_direct"
             ):
-                # Generic tabular processed matrices carry no format-guaranteed
-                # orientation. Resolve both label axes before registering/saving
-                # any modality; other producers (10x/MTX/H5AD) keep their contract.
-                enhanced_metadata["transpose_info"] = infer_single_cell_orientation(
-                    geo_result.data
-                )
-                should_transpose = enhanced_metadata["transpose_info"][
-                    "transpose_applied"
-                ]
+                # Method names do not guarantee orientation: processed matrices
+                # include both unoriented tables and already-transposed MTX.
+                contract = geo_result.processing_info.get("matrix_contract", {})
+                if not isinstance(contract, dict):
+                    raise ValueError(
+                        "Ambiguous single-cell matrix orientation: invalid parser format contract"
+                    )
+                enhanced_metadata["matrix_contract"] = contract
+                if (
+                    contract.get("source_format") == "tabular"
+                    and contract.get("orientation") == "unoriented"
+                ):
+                    info = infer_single_cell_orientation(geo_result.data)
+                elif (
+                    contract.get("source_format") == "matrix_market"
+                    and contract.get("orientation") == "cells_by_genes"
+                    and contract.get("parser_transpose_applied") is True
+                ):
+                    info = {
+                        "transpose_applied": False,
+                        "transpose_reason": "Matrix Market parser already transposed genes x cells to cells x genes",
+                        "orientation_basis": "format_contract",
+                        "source_format": "matrix_market",
+                        "parser_transpose_applied": True,
+                        "original_shape": list(geo_result.data.shape),
+                        "final_shape": list(geo_result.data.shape),
+                        "format_specific": True,
+                    }
+                else:
+                    raise ValueError(
+                        "Ambiguous single-cell matrix orientation: missing or unsupported parser format contract; supply explicitly oriented H5AD"
+                    )
+                enhanced_metadata["transpose_info"] = info
+                should_transpose = info["transpose_applied"]
 
             # DEFENSIVE VALIDATION: Check if data appears to be metadata file, not expression matrix
             if (
@@ -626,6 +651,9 @@ Multi-Modal Dataset Detected:
                         source=GEODataSource.SUPPLEMENTARY,
                         processing_info={
                             "method": "processed_matrix_direct",
+                            "matrix_contract": matrix.attrs.get(
+                                "geo_matrix_contract", {}
+                            ),
                             "file": f"{matrix_name}.{matrix_type}",
                             "data_type": self.service._determine_data_type_from_metadata(
                                 metadata

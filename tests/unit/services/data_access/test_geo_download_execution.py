@@ -220,6 +220,8 @@ def _cached_processed_matrix(tmp_path, frame, suffix, parser_backend, monkeypatc
         ((80, 80), "prefixed"),
         ((80, 80), "10x"),
         ((80, 80), "sample-qualified"),
+        ((80, 80), "mouse-symbols"),
+        ((80, 80), "bc-symbol-collision"),
     ],
 )
 def test_cached_single_cell_matrix_uses_axis_labels(
@@ -243,7 +245,19 @@ def test_cached_single_cell_matrix_uses_axis_labels(
         f"ENSG{i:011d}" for i in range(n_genes - 4)
     ]
     cells = [f"bc_ctrlI_{i:03d}.001" for i in range(n_cells)]
-    if label_style != "prefixed":
+    if label_style in {"mouse-symbols", "bc-symbol-collision"}:
+        anchors = (
+            ["Actb", "Gapdh", "Cd3d", "Bc1", "mt-Nd1", "mt-Cytb", "mt-Rnr1"]
+            if label_style == "mouse-symbols"
+            else ["ACTB", "GAPDH", "BC200", "Bc1", "MT-CO1"]
+        )
+        genes = anchors + [f"Gene{i}" for i in range(n_genes - len(anchors))]
+    if label_style in {
+        "10x",
+        "sample-qualified",
+        "mouse-symbols",
+        "bc-symbol-collision",
+    }:
         cells = [
             format(i, "016b").translate(str.maketrans("01", "AC")) + "-1"
             for i in range(n_cells)
@@ -256,11 +270,16 @@ def test_cached_single_cell_matrix_uses_axis_labels(
     dm, service, geo_id = _cached_processed_matrix(
         tmp_path, source, suffix, parser_backend, monkeypatch
     )
-    response = service.download_dataset(
-        geo_id,
-        adapter="transcriptomics_single_cell",
-        manual_strategy_override=PipelineType.MATRIX_FIRST,
-    )
+    from lobster.services.data_access.geo.constants import GEOServiceError
+
+    try:
+        response = service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    except GEOServiceError as exc:
+        response = str(exc)
     assert "Successfully downloaded" in response, response
     name = f"geo_{geo_id.lower()}_transcriptomics_single_cell"
     adata = dm.get_modality(name)
@@ -301,12 +320,37 @@ def test_cached_single_cell_matrix_uses_axis_labels(
             [f"ENSG{i:011d}" if i % 2 else f"bc_{i}.001" for i in range(80)],
             [f"bc_case_{i}.001" for i in range(120)],
         ),
+        ([f"Cell{i}" for i in range(80)], [f"Sample{i}" for i in range(120)]),
+        ([f"Sample{i}" for i in range(80)], [f"Cell{i}" for i in range(120)]),
+        ([str(i) for i in range(80)], [f"ENSG{i:011d}" for i in range(120)]),
+        ([str(i + 1) for i in range(80)], [f"bc_cell_{i}" for i in range(120)]),
+        (
+            [f"lowercasesymbol{i}" for i in range(80)],
+            [f"bc_cell_{i}" for i in range(120)],
+        ),
+        (
+            [f"donor1_cell_{i:03d}" for i in range(80)],
+            [f"ENSG{i:011d}" for i in range(120)],
+        ),
+        ([f"TOKEN{i}" for i in range(80)], [f"bc_cell_{i}" for i in range(120)]),
+        (
+            [f"ENSG{i:011d}" if i % 2 else "ACGTACGTACGT-1" for i in range(80)],
+            [f"bc_cell_{i}" for i in range(120)],
+        ),
     ],
     ids=[
         "unrecognized",
         "genes-on-both-axes",
         "cells-on-both-axes",
         "conflicting-row-axis",
+        "cell-vs-sample",
+        "sample-vs-cell",
+        "numeric-cell-indices",
+        "numeric-entrez",
+        "arbitrary-lowercase-symbols",
+        "qualified-non-nucleotide-cells",
+        "weak-capitalized-tokens",
+        "gene-barcode-looking-overlap",
     ],
 )
 def test_cached_ambiguous_single_cell_matrix_refuses_before_loading(
@@ -393,3 +437,67 @@ def test_cached_h5ad_retains_explicit_axes(tmp_path, monkeypatch):
     assert list(adata.obs_names) == list(source.index)
     assert list(adata.var_names) == list(source.columns)
     np.testing.assert_array_equal(adata.X, source.values)
+
+
+@pytest.mark.parametrize("suffix", [".mtx", ".mtx.gz"])
+@pytest.mark.parametrize(
+    "require_contract", [False, True], ids=["values-only", "contract-recorded"]
+)
+def test_cached_matrix_first_mtx_preserves_parser_orientation(
+    tmp_path, monkeypatch, suffix, require_contract
+):
+    """MTX already becomes cells×genes in the parser, before the executor."""
+    import gzip
+
+    import anndata
+    import numpy as np
+    import pandas as pd
+    from scipy import io, sparse
+
+    from lobster.services.data_access.geo.constants import GEOServiceError
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    values = np.arange(128).reshape(8, 16) % 31  # MTX input genes×cells
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, pd.DataFrame(values), ".tsv", "polars", monkeypatch
+    )
+    filename = f"processed_matrix{suffix}"
+    path = service.cache_dir / f"{geo_id}_{filename}"
+    if suffix.endswith(".gz"):
+        with gzip.open(path, "wb") as handle:
+            io.mmwrite(handle, sparse.coo_matrix(values))
+    else:
+        io.mmwrite(path, sparse.coo_matrix(values))
+    entry = dm.metadata_store[geo_id]
+    entry["metadata"]["supplementary_file"] = [f"https://example.invalid/{filename}"]
+    entry["strategy_config"]["processed_matrix_filetype"] = suffix.lstrip(".")
+    try:
+        response = service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    except GEOServiceError as exc:
+        response = str(exc)
+    assert "Successfully downloaded" in response, response
+    name = f"geo_{geo_id.lower()}_transcriptomics_single_cell"
+    adata = dm.get_modality(name)
+    assert list(adata.obs_names) == [f"cell_{i}" for i in range(16)]
+    assert list(adata.var_names) == [f"gene_{i}" for i in range(8)]
+    np.testing.assert_array_equal(adata.X, values.T)
+    saved = anndata.read_h5ad(dm.data_dir / f"{name}_raw.h5ad")
+    assert list(saved.obs_names) == list(adata.obs_names)
+    assert list(saved.var_names) == list(adata.var_names)
+    np.testing.assert_array_equal(saved.X, values.T)
+    if require_contract:
+        contract = saved.uns.get("matrix_contract")
+        assert contract is not None, "Parser orientation contract must reach saved data"
+        assert contract["source_format"] == "matrix_market"
+        assert contract["orientation"] == "cells_by_genes"
+        assert contract["parser_transpose_applied"] == "True"
+        info = saved.uns["transpose_info"]
+        assert info["orientation_basis"] == "format_contract"
+        assert (
+            info["transpose_applied"] == "False"
+        ), "No executor-level second transpose"
+        assert info["parser_transpose_applied"] == "True"
