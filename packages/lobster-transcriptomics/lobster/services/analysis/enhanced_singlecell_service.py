@@ -1219,7 +1219,7 @@ reference_markers = {{ reference_markers }}
 
 adata, _annotation_stats, _annotation_ir = EnhancedSingleCellService().annotate_cell_types(
     adata,
-    cluster_key='{{ cluster_key }}',
+    cluster_key={{ cluster_key | repr }},
     reference_markers=reference_markers,
 )
 
@@ -1229,7 +1229,7 @@ adata, _annotation_stats, _annotation_ir = EnhancedSingleCellService().annotate_
 # cell_type_counts, marker_scores and a quality breakdown. Reading it from there
 # raised KeyError and aborted the replay at this stage.
 print(f"Annotated {adata.obs['cell_type'].nunique()} cell types "
-      f"on '{{ cluster_key }}'")
+      + "on '" + str({{ cluster_key | repr }}) + "'")
 
 # Results stored in:
 # - adata.obs['cell_type']: Assigned cell type
