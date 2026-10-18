@@ -243,3 +243,56 @@ def test_annotation_template_is_not_a_stub():
     assert "annotate_cell_types(" in code
     # And it must pass the resolved cluster key through.
     assert "leiden_res1_0" in code
+
+
+def _replay(ir, source):
+    """Execute only generated analysis code on an isolated synthetic object."""
+    import numpy as np
+    import scanpy as sc
+
+    namespace = {"adata": source.copy(), "np": np, "sc": sc}
+    for helper in ir.helper_code or []:
+        exec(helper, namespace)  # nosec B102: trusted IR on synthetic fixtures
+    exec(ir.render(), namespace)  # nosec B102: trusted IR on synthetic fixtures
+    return namespace["adata"]
+
+
+@pytest.mark.parametrize("method", ["log1p", "sctransform_like"])
+@pytest.mark.parametrize("sparse_input", [False, True])
+def test_filter_normalization_replay_matches_live(method, sparse_input):
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    from scipy import sparse
+
+    counts = np.array(
+        [
+            [1, 5, 3, 2],
+            [3, 1, 4, 9],
+            [2, 2, 8, 1],
+            [9, 3, 1, 5],
+            [4, 7, 2, 3],
+            [1, 4, 6, 7],
+        ],
+        dtype=float,
+    )
+    source = ad.AnnData(
+        X=sparse.csr_matrix(counts) if sparse_input else counts,
+        var=pd.DataFrame(index=["MT-ND1", "RPS1", "CD3D", "MS4A1"]),
+    )
+    live, _, ir = PreprocessingService().filter_and_normalize_cells(
+        source,
+        min_genes_per_cell=1,
+        max_genes_per_cell=10,
+        min_cells_per_gene=1,
+        max_mito_percent=100,
+        max_ribo_percent=100,
+        normalization_method=method,
+        target_sum=100,
+    )
+    replay = _replay(ir, source)
+    dense = lambda x: x.toarray() if sparse.issparse(x) else np.asarray(x)
+    np.testing.assert_allclose(dense(replay.X), dense(live.X))
+    np.testing.assert_allclose(dense(replay.raw.X), dense(live.raw.X))
+    pd.testing.assert_frame_equal(replay.obs, live.obs)
+    pd.testing.assert_index_equal(replay.var_names, live.var_names)
