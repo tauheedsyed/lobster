@@ -572,9 +572,13 @@ print(f"Filtered to {adata.n_vars} genes (removed {int(np.sum(~keep))})")
         code_template = """
 # Bulk RNA-seq count normalization
 import numpy as np
+from scipy import sparse
 
-# Preserve raw counts
-adata.layers['counts'] = adata.X.copy()
+# Preserve raw counts in the same dense representation as the live service
+if sparse.issparse(adata.X):
+    adata.layers['counts'] = adata.X.toarray().copy()
+else:
+    adata.layers['counts'] = np.asarray(adata.X).copy()
 
 {% if method == "deseq2" %}
 from pydeseq2.dds import DeseqDataSet
@@ -585,8 +589,11 @@ counts_df = pd.DataFrame(adata.layers['counts'].astype(int),
 metadata = pd.DataFrame({'condition': ['A'] * adata.n_obs}, index=adata.obs_names)
 dds = DeseqDataSet(counts=counts_df, metadata=metadata, design='~1')
 dds.fit_size_factors()
-size_factors = dds.obsm['size_factors']
-adata.X = adata.layers['counts'] / size_factors[:, np.newaxis]
+size_factors = dds.obs['size_factors'].values
+if 'normed_counts' in dds.layers:
+    adata.X = np.asarray(dds.layers['normed_counts'])
+else:
+    adata.X = adata.layers['counts'] / size_factors[:, np.newaxis]
 {% elif method == "vst" %}
 from pydeseq2.dds import DeseqDataSet
 import pandas as pd
@@ -600,11 +607,18 @@ dds.fit_genewise_dispersions()
 dds.fit_dispersion_trend()
 dds.fit_MAP_dispersions()
 dds.vst()
-adata.X = np.asarray(dds.layers['vst_counts'])
+if 'vst_counts' in dds.layers:
+    adata.X = np.asarray(dds.layers['vst_counts'])
+else:
+    size_factors = dds.obs['size_factors'].values
+    X_norm = adata.layers['counts'] / size_factors[:, np.newaxis]
+    adata.X = np.log2(X_norm + 1)
 {% else %}
 # CPM normalization
-library_sizes = adata.layers['counts'].sum(axis=1, keepdims=True)
-adata.X = adata.layers['counts'] / library_sizes * {{ target_sum or 1e6 }}
+X = adata.layers['counts'].astype(np.float64)
+library_sizes = X.sum(axis=1, keepdims=True)
+library_sizes = np.where(library_sizes == 0, 1, library_sizes)
+adata.X = X / library_sizes * {{ target_sum or 1e6 }}
 {% endif %}
 
 # Results:
