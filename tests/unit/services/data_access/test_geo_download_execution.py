@@ -4,6 +4,7 @@ Tests DownloadExecutor methods in isolation via mocked service.
 Part of Phase 4 Plan 03: GEO Service Decomposition.
 """
 
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +19,7 @@ def mock_service():
     service = MagicMock()
     service.data_manager = MagicMock()
     service.data_manager.metadata_store = {}
-    service.cache_dir = Path("/tmp/test_geo_cache")
+    service.cache_dir = Path(tempfile.gettempdir()) / "test_geo_cache"
     service.console = MagicMock()
     service.geo_downloader = MagicMock()
     service.geo_parser = MagicMock()
@@ -155,3 +156,431 @@ class TestGetProcessingPipeline:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0] is mock_func
+
+
+# These fixtures exercise the cached producer, parser, adapter and H5AD writer,
+# not a mocked GEOResult or a mocked DataManager.
+def _cached_processed_matrix(tmp_path, frame, suffix, parser_backend, monkeypatch):
+    import builtins
+
+    from lobster.core.runtime.data_manager import DataManagerV2
+    from lobster.services.data_access.geo_service import GEOService
+
+    if parser_backend == "pandas":
+        original_import = builtins.__import__
+
+        def without_polars(name, *args, **kwargs):
+            if name == "polars":
+                raise ImportError("Exercise the supported pandas parser fallback")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_polars)
+
+    dm = DataManagerV2(workspace_path=tmp_path / "workspace", auto_scan=False)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    geo_id = "GSE999999999"
+    filename = f"processed_matrix{suffix}"
+    frame.to_csv(cache / f"{geo_id}_{filename}", sep="," if ".csv" in suffix else "\t")
+    metadata = {
+        "title": "Offline synthetic expression matrix",
+        "summary": "Single cell RNA sequencing",
+        "samples": {},
+        "platforms": {},
+        "supplementary_file": [f"https://example.invalid/{filename}"],
+    }
+    dm._store_geo_metadata(
+        geo_id=geo_id,
+        metadata=metadata,
+        stored_by="offline test fixture",
+        strategy_config={
+            "processed_matrix_name": "processed_matrix",
+            "processed_matrix_filetype": suffix.lstrip("."),
+            "raw_data_available": False,
+        },
+    )
+    # This URL identifies an already-written cache file. Any actual network use
+    # must fail, rather than silently substituting a mocked download result.
+    service = GEOService(dm, cache_dir=cache)
+
+    def no_download(*args, **kwargs):
+        pytest.fail("The cached matrix test must not download data")
+
+    monkeypatch.setattr(service.geo_downloader, "download_file", no_download)
+    return dm, service, geo_id
+
+
+@pytest.mark.parametrize("parser_backend", ["polars", "pandas"])
+@pytest.mark.parametrize("suffix", [".tsv", ".csv.gz"])
+@pytest.mark.parametrize("genes_in_rows", [True, False])
+@pytest.mark.parametrize(
+    "dimensions,label_style",
+    [
+        ((120, 80), "prefixed"),
+        ((80, 120), "prefixed"),
+        ((80, 80), "prefixed"),
+        ((80, 80), "10x"),
+        ((80, 80), "sample-qualified"),
+        ((80, 80), "mouse-symbols"),
+        ((80, 80), "bc-symbol-collision"),
+    ],
+)
+def test_cached_single_cell_matrix_uses_axis_labels(
+    tmp_path,
+    monkeypatch,
+    parser_backend,
+    suffix,
+    genes_in_rows,
+    dimensions,
+    label_style,
+):
+    """Labels determine orientation even when shape is square or misleading."""
+    import anndata
+    import numpy as np
+    import pandas as pd
+
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    n_genes, n_cells = dimensions
+    genes = ["MT-CO1", "RPS3", "LYZ", "CD3D"] + [
+        f"ENSG{i:011d}" for i in range(n_genes - 4)
+    ]
+    cells = [f"bc_ctrlI_{i:03d}.001" for i in range(n_cells)]
+    if label_style in {"mouse-symbols", "bc-symbol-collision"}:
+        anchors = (
+            ["Actb", "Gapdh", "Cd3d", "Bc1", "mt-Nd1", "mt-Cytb", "mt-Rnr1"]
+            if label_style == "mouse-symbols"
+            else ["ACTB", "GAPDH", "BC200", "Bc1", "MT-CO1"]
+        )
+        genes = anchors + [f"Gene{i}" for i in range(n_genes - len(anchors))]
+    if label_style in {
+        "10x",
+        "sample-qualified",
+        "mouse-symbols",
+        "bc-symbol-collision",
+    }:
+        cells = [
+            format(i, "016b").translate(str.maketrans("01", "AC")) + "-1"
+            for i in range(n_cells)
+        ]
+        if label_style == "sample-qualified":
+            cells = ["donor1_" + cell for cell in cells]
+    values = np.arange(n_cells * n_genes).reshape(n_cells, n_genes) % 97
+    expected = pd.DataFrame(values, index=cells, columns=genes)
+    source = expected.T if genes_in_rows else expected
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, source, suffix, parser_backend, monkeypatch
+    )
+    from lobster.services.data_access.geo.constants import GEOServiceError
+
+    try:
+        response = service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    except GEOServiceError as exc:
+        response = str(exc)
+    assert "Successfully downloaded" in response, response
+    name = f"geo_{geo_id.lower()}_transcriptomics_single_cell"
+    adata = dm.get_modality(name)
+    assert list(adata.obs_names) == cells
+    assert list(adata.var_names) == genes
+    np.testing.assert_array_equal(
+        adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X, values
+    )
+    info = adata.uns.get("transpose_info")
+    assert info is not None, "Every orientation decision needs provenance"
+    # The existing metadata sanitizer serializes scalar booleans as strings.
+    assert info["transpose_applied"] == str(genes_in_rows)
+    assert info["transpose_reason"]
+    assert list(info["original_shape"]) == list(source.shape)
+    assert list(info["final_shape"]) == [n_cells, n_genes]
+    assert info["orientation_basis"] == "axis_labels"
+    assert info["row_axis"] == ("genes" if genes_in_rows else "cells")
+    assert info["column_axis"] == ("cells" if genes_in_rows else "genes")
+    saved = anndata.read_h5ad(dm.data_dir / f"{name}_raw.h5ad")
+    assert list(saved.obs_names) == cells
+    assert list(saved.var_names) == genes
+    assert saved.uns["transpose_info"]["transpose_applied"] == str(genes_in_rows)
+
+
+@pytest.mark.parametrize(
+    "row_labels,column_labels",
+    [
+        ([f"row_{i}" for i in range(80)], [f"column_{i}" for i in range(120)]),
+        (
+            [f"ENSG{i:011d}" for i in range(80)],
+            [f"ENSMUSG{i:011d}" for i in range(120)],
+        ),
+        (
+            [f"bc_ctrlI_{i}.001" for i in range(80)],
+            [f"bc_case_{i}.001" for i in range(120)],
+        ),
+        (
+            [f"ENSG{i:011d}" if i % 2 else f"bc_{i}.001" for i in range(80)],
+            [f"bc_case_{i}.001" for i in range(120)],
+        ),
+        ([f"Cell{i}" for i in range(80)], [f"Sample{i}" for i in range(120)]),
+        ([f"Sample{i}" for i in range(80)], [f"Cell{i}" for i in range(120)]),
+        ([str(i) for i in range(80)], [f"ENSG{i:011d}" for i in range(120)]),
+        ([str(i + 1) for i in range(80)], [f"bc_cell_{i}" for i in range(120)]),
+        (
+            [f"lowercasesymbol{i}" for i in range(80)],
+            [f"bc_cell_{i}" for i in range(120)],
+        ),
+        (
+            [f"donor1_cell_{i:03d}" for i in range(80)],
+            [f"ENSG{i:011d}" for i in range(120)],
+        ),
+        ([f"TOKEN{i}" for i in range(80)], [f"bc_cell_{i}" for i in range(120)]),
+        (
+            [f"ENSG{i:011d}" if i % 2 else "ACGTACGTACGT-1" for i in range(80)],
+            [f"bc_cell_{i}" for i in range(120)],
+        ),
+    ],
+    ids=[
+        "unrecognized",
+        "genes-on-both-axes",
+        "cells-on-both-axes",
+        "conflicting-row-axis",
+        "cell-vs-sample",
+        "sample-vs-cell",
+        "numeric-cell-indices",
+        "numeric-entrez",
+        "arbitrary-lowercase-symbols",
+        "qualified-non-nucleotide-cells",
+        "weak-capitalized-tokens",
+        "gene-barcode-looking-overlap",
+    ],
+)
+def test_cached_ambiguous_single_cell_matrix_refuses_before_loading(
+    tmp_path, monkeypatch, row_labels, column_labels
+):
+    import numpy as np
+    import pandas as pd
+
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    source = pd.DataFrame(
+        np.ones((len(row_labels), len(column_labels))),
+        index=row_labels,
+        columns=column_labels,
+    )
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, source, ".tsv", "polars", monkeypatch
+    )
+    from lobster.services.data_access.geo.constants import GEOServiceError
+
+    with pytest.raises(GEOServiceError, match="[Aa]mbiguous.*orientation"):
+        service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    assert not dm.list_modalities(), "Refused data must not be registered"
+    assert not list((tmp_path / "workspace").rglob("*_raw.h5ad"))
+
+
+def test_cached_bulk_processed_matrix_retains_format_transpose(tmp_path, monkeypatch):
+    """The single-cell resolver must not change existing bulk handling."""
+    import numpy as np
+    import pandas as pd
+
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    genes = [f"gene_{i}" for i in range(120)]
+    samples = [f"sample_{i}" for i in range(8)]
+    source = pd.DataFrame(np.arange(960).reshape(120, 8), index=genes, columns=samples)
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, source, ".tsv", "polars", monkeypatch
+    )
+    response = service.download_dataset(
+        geo_id,
+        adapter="transcriptomics_bulk",
+        manual_strategy_override=PipelineType.MATRIX_FIRST,
+    )
+    assert "Successfully downloaded" in response
+    adata = dm.get_modality(f"geo_{geo_id.lower()}_transcriptomics_bulk")
+    assert list(adata.obs_names) == samples
+    assert list(adata.var_names) == genes
+    np.testing.assert_array_equal(adata.X, source.T.values)
+
+
+def test_cached_h5ad_retains_explicit_axes(tmp_path, monkeypatch):
+    """H5AD format's explicit axes need no generic label inference."""
+    import anndata
+    import numpy as np
+    import pandas as pd
+
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    source = pd.DataFrame(
+        np.arange(9600).reshape(80, 120),
+        index=[f"observation_{i}" for i in range(80)],
+        columns=[f"feature_{i}" for i in range(120)],
+    )
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, source, ".tsv", "polars", monkeypatch
+    )
+    filename = "processed_matrix.h5ad"
+    anndata.AnnData(source).write_h5ad(service.cache_dir / f"{geo_id}_h5_{filename}")
+    entry = dm.metadata_store[geo_id]
+    entry["metadata"]["supplementary_file"] = [f"https://example.invalid/{filename}"]
+    entry["strategy_config"]["processed_matrix_filetype"] = "h5ad"
+    response = service.download_dataset(
+        geo_id,
+        adapter="transcriptomics_single_cell",
+        manual_strategy_override=PipelineType.H5_FIRST,
+    )
+    assert "Successfully downloaded" in response
+    adata = dm.get_modality(f"geo_{geo_id.lower()}_transcriptomics_single_cell")
+    assert list(adata.obs_names) == list(source.index)
+    assert list(adata.var_names) == list(source.columns)
+    np.testing.assert_array_equal(adata.X, source.values)
+
+
+@pytest.mark.parametrize("suffix", [".mtx", ".mtx.gz"])
+@pytest.mark.parametrize(
+    "require_contract", [False, True], ids=["values-only", "contract-recorded"]
+)
+def test_cached_matrix_first_mtx_preserves_parser_orientation(
+    tmp_path, monkeypatch, suffix, require_contract
+):
+    """MTX already becomes cells×genes in the parser, before the executor."""
+    import gzip
+
+    import anndata
+    import numpy as np
+    import pandas as pd
+    from scipy import io, sparse
+
+    from lobster.services.data_access.geo.constants import GEOServiceError
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    values = np.arange(128).reshape(8, 16) % 31  # MTX input genes×cells
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, pd.DataFrame(values), ".tsv", "polars", monkeypatch
+    )
+    filename = f"processed_matrix{suffix}"
+    path = service.cache_dir / f"{geo_id}_{filename}"
+    if suffix.endswith(".gz"):
+        with gzip.open(path, "wb") as handle:
+            io.mmwrite(handle, sparse.coo_matrix(values))
+    else:
+        io.mmwrite(path, sparse.coo_matrix(values))
+    entry = dm.metadata_store[geo_id]
+    entry["metadata"]["supplementary_file"] = [f"https://example.invalid/{filename}"]
+    entry["strategy_config"]["processed_matrix_filetype"] = suffix.lstrip(".")
+    try:
+        response = service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    except GEOServiceError as exc:
+        response = str(exc)
+    assert "Successfully downloaded" in response, response
+    name = f"geo_{geo_id.lower()}_transcriptomics_single_cell"
+    adata = dm.get_modality(name)
+    assert list(adata.obs_names) == [f"cell_{i}" for i in range(16)]
+    assert list(adata.var_names) == [f"gene_{i}" for i in range(8)]
+    np.testing.assert_array_equal(adata.X, values.T)
+    saved = anndata.read_h5ad(dm.data_dir / f"{name}_raw.h5ad")
+    assert list(saved.obs_names) == list(adata.obs_names)
+    assert list(saved.var_names) == list(adata.var_names)
+    np.testing.assert_array_equal(saved.X, values.T)
+    if require_contract:
+        contract = saved.uns.get("matrix_contract")
+        assert contract is not None, "Parser orientation contract must reach saved data"
+        assert contract["source_format"] == "matrix_market"
+        assert contract["orientation"] == "cells_by_genes"
+        assert contract["parser_transpose_applied"] == "True"
+        info = saved.uns["transpose_info"]
+        assert info["orientation_basis"] == "format_contract"
+        assert (
+            info["transpose_applied"] == "False"
+        ), "No executor-level second transpose"
+        assert info["parser_transpose_applied"] == "True"
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {},
+        None,
+        "not-a-contract",
+        {"source_format": "unsupported", "orientation": "unoriented"},
+        {"source_format": "tabular", "orientation": "cells_by_genes"},
+        {
+            "source_format": "matrix_market",
+            "orientation": "unoriented",
+            "parser_transpose_applied": True,
+        },
+        {
+            "source_format": "matrix_market",
+            "orientation": "cells_by_genes",
+            "parser_transpose_applied": False,
+        },
+        {"source_format": "matrix_market", "orientation": "cells_by_genes"},
+        {
+            "source_format": "matrix_market",
+            "orientation": "cells_by_genes",
+            "parser_transpose_applied": "True",
+        },
+    ],
+    ids=[
+        "missing",
+        "null",
+        "non-dict",
+        "unsupported-source",
+        "unsupported-tabular-orientation",
+        "unsupported-mtx-orientation",
+        "mtx-parser-false",
+        "mtx-parser-absent",
+        "mtx-parser-string",
+    ],
+)
+def test_cached_invalid_format_contract_refuses_before_loading(
+    tmp_path, monkeypatch, contract
+):
+    """Fault-inject only the parser→producer contract, keeping the real data path."""
+    import numpy as np
+    import pandas as pd
+
+    from lobster.services.data_access.geo.constants import GEOServiceError
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    source = pd.DataFrame(
+        np.arange(9600).reshape(120, 80),
+        index=[f"ENSG{i:011d}" for i in range(120)],
+        columns=[f"bc_cell_{i}" for i in range(80)],
+    )
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, source, ".tsv", "polars", monkeypatch
+    )
+    real_parse = service.geo_parser.parse_expression_file
+
+    def parse_with_invalid_contract(path):
+        result = real_parse(path)
+        assert (
+            result.is_complete
+        ), "Fault injection must retain a genuinely parsed matrix"
+        result.data.attrs["geo_matrix_contract"] = contract
+        return result
+
+    monkeypatch.setattr(
+        service.geo_parser, "parse_expression_file", parse_with_invalid_contract
+    )
+    with pytest.raises(
+        GEOServiceError, match="[Aa]mbiguous.*orientation.*(?:parser|contract)"
+    ):
+        service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    assert not dm.list_modalities(), "Invalid contract must refuse before registration"
+    assert not list(
+        dm.workspace_path.rglob("*.h5ad")
+    ), "Refusal must not save raw or autosaved modalities"

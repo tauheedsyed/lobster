@@ -16,6 +16,7 @@ Features:
 import csv
 import gzip
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -54,6 +55,141 @@ class InsufficientMemoryError(Exception):
     pass
 
 
+def infer_single_cell_orientation(matrix: pd.DataFrame) -> Dict[str, Any]:
+    """Resolve genuinely unoriented tabular axes without a dimension fallback.
+
+    Symbol-like syntax alone is WEAK evidence: capitalized sample names are not
+    genes. A gene axis needs a stable gene ID or a limited validated symbol
+    anchor, consistent symbol-like labels, and no observation/barcode evidence.
+    The opposite axis needs recognizable cell/barcode labels throughout.
+    Numeric Entrez IDs/cell indices, weak-only symbols and arbitrary custom
+    labels are refused; use an explicitly oriented format such as H5AD instead.
+    """
+    gene_id = re.compile(r"(?:ENS[A-Z]*G\d+(?:\.\d+)?|[NX][MR]_\d+(?:\.\d+)?)$")
+    weak_symbol = re.compile(
+        r"(?:[A-Z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*|mt-[A-Za-z0-9]+)$"
+    )
+    # Limited offline anchors, not an exhaustive symbol validator. ACTB/GAPDH/
+    # MALAT1 are the established QC housekeeping panel; the mitochondrial list
+    # contains the canonical mammalian protein-coding symbols (case-insensitive
+    # for human MT-ND1 / mouse mt-Nd1). Other syntax needs these or gene-ID context.
+    symbol_anchors = {"actb", "gapdh", "malat1"} | {
+        f"mt-{symbol}"
+        for symbol in (
+            "nd1",
+            "nd2",
+            "nd3",
+            "nd4",
+            "nd4l",
+            "nd5",
+            "nd6",
+            "co1",
+            "co2",
+            "co3",
+            "atp6",
+            "atp8",
+            "cyb",
+        )
+    }
+    # bc must have a delimiter: Bc1 and BC200 are gene symbols, not cell proof.
+    cell_prefix = re.compile(
+        r"(?:bc[_ .-]|(?:barcode|cell)(?:[_ .-]|\d))", re.IGNORECASE
+    )
+    nucleotide_barcode = re.compile(
+        r"(?:.*[_:.])?[ACGTN]{8,}(?:[-.]\d+)?$", re.IGNORECASE
+    )
+    observation_like = re.compile(
+        r"(?:sample|donor|subject|patient|observation|obs)(?:[_ .-]|\d)", re.IGNORECASE
+    )
+
+    def classify(labels):
+        evidence = {
+            "strong_genes": 0,
+            "weak_symbol_syntax": 0,
+            "strong_cells": 0,
+            "observation_like": 0,
+            "strong_overlaps": 0,
+            "unrecognized": 0,
+        }
+        for value in labels:
+            label = str(value).strip()
+            missing = label.lower() in {
+                "",
+                "unknown",
+                "nan",
+                "none",
+                "na",
+                "n/a",
+                "null",
+            }
+            strong_gene = not missing and bool(
+                gene_id.fullmatch(label) or label.lower() in symbol_anchors
+            )
+            weak_gene = not missing and bool(weak_symbol.fullmatch(label))
+            strong_cell = not missing and bool(
+                cell_prefix.match(label) or nucleotide_barcode.fullmatch(label)
+            )
+            # A sample qualifier on a genuine nucleotide barcode is not a
+            # conflicting sample axis (donor1_ACGT...-1 remains a cell ID).
+            observation = (
+                not missing
+                and bool(observation_like.match(label))
+                and not bool(nucleotide_barcode.fullmatch(label))
+            )
+            # Check independent evidence; never hide a biological/barcode
+            # overlap by whichever regex happened to be checked first.
+            evidence["strong_genes"] += int(strong_gene)
+            evidence["weak_symbol_syntax"] += int(strong_gene or weak_gene)
+            evidence["strong_cells"] += int(strong_cell)
+            evidence["observation_like"] += int(observation)
+            evidence["strong_overlaps"] += int(strong_gene and strong_cell)
+            evidence["unrecognized"] += int(
+                missing or not (strong_gene or weak_gene or strong_cell or observation)
+            )
+        axis = "ambiguous"
+        if len(labels) and not evidence["strong_overlaps"]:
+            if (
+                evidence["strong_genes"]
+                and evidence["weak_symbol_syntax"] == len(labels)
+                and not evidence["strong_cells"]
+                and not evidence["observation_like"]
+                and not evidence["unrecognized"]
+            ):
+                axis = "genes"
+            elif (
+                evidence["strong_cells"] == len(labels)
+                and not evidence["strong_genes"]
+                and not evidence["observation_like"]
+                and not evidence["unrecognized"]
+            ):
+                axis = "cells"
+        return axis, evidence
+
+    row_axis, row_evidence = classify(matrix.index)
+    column_axis, column_evidence = classify(matrix.columns)
+    if {row_axis, column_axis} != {"genes", "cells"}:
+        raise ValueError(
+            "Ambiguous single-cell matrix orientation: "
+            f"row labels={row_evidence}, column labels={column_evidence}. "
+            "Expected supported gene evidence and recognizable cell/barcode "
+            "labels on opposite axes; weak syntax, numeric identifiers or "
+            "custom labels alone are insufficient. Supply explicitly oriented H5AD."
+        )
+    transpose = row_axis == "genes"
+    return {
+        "transpose_applied": transpose,
+        "transpose_reason": f"Axis labels identify rows as {row_axis} and columns as {column_axis}",
+        "orientation_basis": "axis_labels",
+        "row_axis": row_axis,
+        "column_axis": column_axis,
+        "row_evidence": row_evidence,
+        "column_evidence": column_evidence,
+        "original_shape": list(matrix.shape),
+        "final_shape": list(matrix.shape[::-1] if transpose else matrix.shape),
+        "format_specific": False,
+    }
+
+
 @dataclass
 class ParseResult:
     """Result wrapper for GEO file parsing that carries integrity metadata.
@@ -67,12 +203,27 @@ class ParseResult:
         is_partial: True when the parser stopped early (memory limit, OOM).
         rows_read: Number of rows actually read before stopping.
         truncation_reason: Human-readable explanation when is_partial is True.
+        source_format: Explicit producer format, e.g. tabular or matrix_market.
+        orientation: unoriented tabular axes or parser-guaranteed cells_by_genes.
     """
 
     data: Optional[pd.DataFrame] = None
     is_partial: bool = False
     rows_read: int = 0
     truncation_reason: Optional[str] = None
+    source_format: Optional[str] = None
+    orientation: Optional[str] = None
+
+    def __post_init__(self):
+        # The archive producer returns the DataFrame for compatibility. Carry
+        # the parser's explicit contract on that object so unwrapping a
+        # ParseResult cannot erase a format-required orientation decision.
+        if self.data is not None and self.source_format is not None:
+            self.data.attrs["geo_matrix_contract"] = {
+                "source_format": self.source_format,
+                "orientation": self.orientation,
+                "parser_transpose_applied": self.source_format == "matrix_market",
+            }
 
     @property
     def is_complete(self) -> bool:
@@ -560,6 +711,8 @@ class GEOParser:
                 return ParseResult(
                     data=mtx_df,
                     rows_read=len(mtx_df) if mtx_df is not None else 0,
+                    source_format="matrix_market",
+                    orientation="cells_by_genes",
                 )
 
             # Detect delimiter intelligently using sniffer
@@ -602,7 +755,12 @@ class GEOParser:
 
                 logger.debug(f"Successfully parsed with Polars: {df.shape}")
                 self._log_system_memory()  # Log memory after parsing
-                return ParseResult(data=df, rows_read=len(df))
+                return ParseResult(
+                    data=df,
+                    rows_read=len(df),
+                    source_format="tabular",
+                    orientation="unoriented",
+                )
 
             except ImportError:
                 logger.debug(
@@ -650,7 +808,12 @@ class GEOParser:
 
                     logger.debug(f"Successfully parsed with pandas: {df.shape}")
                     self._log_system_memory()  # Log memory after parsing
-                    return ParseResult(data=df, rows_read=len(df))
+                    return ParseResult(
+                        data=df,
+                        rows_read=len(df),
+                        source_format="tabular",
+                        orientation="unoriented",
+                    )
 
             except MemoryError:
                 logger.error("Memory error with pandas, forcing chunked reading")
@@ -668,6 +831,8 @@ class GEOParser:
                 return ParseResult(
                     data=fallback_df,
                     rows_read=len(fallback_df) if fallback_df is not None else 0,
+                    source_format="tabular",
+                    orientation="unoriented",
                 )
 
         except InsufficientMemoryError:
@@ -812,6 +977,8 @@ class GEOParser:
                     is_partial=truncated,
                     rows_read=total_rows,
                     truncation_reason=truncation_reason,
+                    source_format="tabular",
+                    orientation="unoriented",
                 )
 
             logger.warning("No data was read from the file")
@@ -1396,7 +1563,8 @@ class GEOParser:
                                 for s in obs_data
                             ]
                             break
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("Skipping cell-name key %s: %s", possible_key, exc)
                         continue
 
                 if obs_names is None:
@@ -1419,7 +1587,8 @@ class GEOParser:
                                 for s in var_data
                             ]
                             break
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("Skipping gene-name key %s: %s", possible_key, exc)
                         continue
 
                 if var_names is None:
@@ -1887,6 +2056,7 @@ class GEOParser:
             DataFrame: Preview of the file (first 5 rows x 5 columns)
         """
         import tempfile
+        import urllib.parse
         import urllib.request
         from pathlib import Path
 
@@ -1912,8 +2082,10 @@ class GEOParser:
             # Download file with proper SSL context and certificate verification
             logger.info(f"Downloading file from: {target_url}")
             ssl_context = create_ssl_context()
+            if urllib.parse.urlparse(target_url).scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported download URL scheme: {target_url}")
             try:
-                with urllib.request.urlopen(
+                with urllib.request.urlopen(  # nosec B310 - scheme restricted to http(s) above
                     target_url, context=ssl_context
                 ) as response:
                     with open(local_file, "wb") as out_file:
