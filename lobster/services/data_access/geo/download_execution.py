@@ -28,7 +28,10 @@ from lobster.services.data_access.geo.constants import (
 from lobster.services.data_access.geo.helpers import (
     _is_data_valid,
 )
-from lobster.services.data_access.geo.parser import ParseResult
+from lobster.services.data_access.geo.parser import (
+    ParseResult,
+    infer_single_cell_orientation,
+)
 from lobster.services.data_access.geo.soft_download import pre_download_soft_file
 from lobster.services.data_access.geo.strategy import (
     PipelineType,
@@ -282,6 +285,21 @@ class DownloadExecutor:
                     should_transpose = geo_result.source not in [
                         GEODataSource.TAR_ARCHIVE
                     ]
+
+            if (
+                adapter_name == "transcriptomics_single_cell"
+                and isinstance(geo_result.data, pd.DataFrame)
+                and enhanced_metadata["processing_method"] == "processed_matrix_direct"
+            ):
+                # Generic tabular processed matrices carry no format-guaranteed
+                # orientation. Resolve both label axes before registering/saving
+                # any modality; other producers (10x/MTX/H5AD) keep their contract.
+                enhanced_metadata["transpose_info"] = infer_single_cell_orientation(
+                    geo_result.data
+                )
+                should_transpose = enhanced_metadata["transpose_info"][
+                    "transpose_applied"
+                ]
 
             # DEFENSIVE VALIDATION: Check if data appears to be metadata file, not expression matrix
             if (

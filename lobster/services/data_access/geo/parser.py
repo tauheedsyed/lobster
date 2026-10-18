@@ -16,6 +16,7 @@ Features:
 import csv
 import gzip
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -52,6 +53,69 @@ class InsufficientMemoryError(Exception):
     """Raised when system has insufficient memory for dataset."""
 
     pass
+
+
+def infer_single_cell_orientation(matrix: pd.DataFrame) -> Dict[str, Any]:
+    """Resolve a tabular matrix's axes from labels, never from dimensions.
+
+    Both axes must have positive, consistent evidence: gene identifiers/symbols
+    on one axis and cell/barcode identifiers on the other. Unsupported naming
+    schemes and mixed axes are deliberately refused rather than guessed. This
+    does not transpose data; the adapter applies the returned decision once.
+    """
+    gene_id = re.compile(r"(?:ENS[A-Z]*G\d+(?:\.\d+)?|[NX][MR]_\d+(?:\.\d+)?)$")
+    gene_symbol = re.compile(r"[A-Z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*$")
+    cell_prefix = re.compile(r"(?:bc|barcode|cell)(?:[_ .-]|\d)", re.IGNORECASE)
+    # 10x-style nucleotide barcodes, optionally qualified by a sample prefix.
+    nucleotide_barcode = re.compile(
+        r"(?:.*[_:.])?[ACGTN]{8,}(?:[-.]\d+)?$", re.IGNORECASE
+    )
+
+    def classify(labels):
+        evidence = {"genes": 0, "cells": 0, "unrecognized": 0}
+        for value in labels:
+            label = str(value).strip()
+            if label.lower() in {"", "unknown", "nan", "none", "na", "n/a", "null"}:
+                evidence["unrecognized"] += 1
+            elif cell_prefix.match(label) or nucleotide_barcode.fullmatch(label):
+                evidence["cells"] += 1
+            elif gene_id.fullmatch(label) or gene_symbol.fullmatch(label):
+                evidence["genes"] += 1
+            else:
+                evidence["unrecognized"] += 1
+        # No majority vote: an unrecognized or contradictory label is not proof.
+        axis = next(
+            (
+                kind
+                for kind in ("genes", "cells")
+                if len(labels) and evidence[kind] == len(labels)
+            ),
+            "ambiguous",
+        )
+        return axis, evidence
+
+    row_axis, row_evidence = classify(matrix.index)
+    column_axis, column_evidence = classify(matrix.columns)
+    if {row_axis, column_axis} != {"genes", "cells"}:
+        raise ValueError(
+            "Ambiguous single-cell matrix orientation: "
+            f"row labels={row_evidence}, column labels={column_evidence}. "
+            "Expected a gene axis and a cell/barcode axis; supply an explicitly "
+            "oriented H5AD or a matrix with identifiable labels."
+        )
+    transpose = row_axis == "genes"
+    return {
+        "transpose_applied": transpose,
+        "transpose_reason": f"Axis labels identify rows as {row_axis} and columns as {column_axis}",
+        "orientation_basis": "axis_labels",
+        "row_axis": row_axis,
+        "column_axis": column_axis,
+        "row_evidence": row_evidence,
+        "column_evidence": column_evidence,
+        "original_shape": list(matrix.shape),
+        "final_shape": list(matrix.shape[::-1] if transpose else matrix.shape),
+        "format_specific": False,
+    }
 
 
 @dataclass
