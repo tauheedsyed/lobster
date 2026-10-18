@@ -183,8 +183,8 @@ class PeptideActivityService:
                 if boman < 2.48:
                     score += 0.2
                     reasons.append(f"Boman {boman:.2f} < 2.48")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Skipping Boman index heuristic: %s", exc)
 
         # Rule 4: length
         if 10 <= len(sequence) <= 50:
@@ -198,8 +198,8 @@ class PeptideActivityService:
                 if hm > 0.5:
                     score += 0.1
                     reasons.append(f"HM {hm:.2f} > 0.5")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Skipping hydrophobic moment heuristic: %s", exc)
 
         return {
             "score": min(score, 1.0),
@@ -243,8 +243,8 @@ class PeptideActivityService:
                 if gravy < 0:
                     score += 0.2
                     reasons.append(f"GRAVY {gravy:.2f}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Skipping GRAVY hydrophobicity heuristic: %s", exc)
 
         # Rule 4: length 5-30
         if 5 <= len(sequence) <= 30:
