@@ -137,6 +137,28 @@ class PeptideDigestionService:
 
             all_fragments.extend(fragments)
 
+        code_template = (
+            "from lobster.services.peptidomics.peptide_digestion_service import PeptideDigestionService\n"
+            "adata, _digestion_stats, _digestion_ir = PeptideDigestionService().digest(\n"
+            "    adata, enzyme={{ enzyme | repr }},\n"
+            "    custom_pattern={{ custom_pattern | repr }},\n"
+            "    missed_cleavages={{ missed_cleavages }},\n"
+            "    min_length={{ min_length }}, max_length={{ max_length }},\n"
+            "    sequence_col={{ sequence_col | repr }},\n"
+            ")"
+        )
+        replay_parameters = {
+            "enzyme": enzyme_name,
+            "custom_pattern": custom_pattern,
+            "missed_cleavages": missed_cleavages,
+            "min_length": min_length,
+            "max_length": max_length,
+            "sequence_col": sequence_col,
+        }
+        replay_imports = [
+            "from lobster.services.peptidomics.peptide_digestion_service import PeptideDigestionService"
+        ]
+
         if not all_fragments:
             # Return empty AnnData with proper structure
             empty_obs = pd.DataFrame(
@@ -165,12 +187,9 @@ class PeptideDigestionService:
                 tool_name="simulate_enzymatic_digestion",
                 description=f"{enzyme_name} digest: 0 fragments",
                 library="re",
-                imports=["import re"],
-                code_template="# No fragments produced by {{ enzyme }} digest",
-                parameters={
-                    "enzyme": enzyme_name,
-                    "missed_cleavages": missed_cleavages,
-                },
+                imports=replay_imports,
+                code_template=code_template,
+                parameters=replay_parameters,
                 parameter_schema={
                     "enzyme": ParameterSpec(
                         param_type="str",
@@ -212,18 +231,9 @@ class PeptideDigestionService:
             tool_name="simulate_enzymatic_digestion",
             description=f"{enzyme_name} digest: {len(all_fragments)} fragments from {len(sequences)} sequences",
             library="re",
-            imports=["import re"],
-            code_template=(
-                "import re\n"
-                "fragments = re.split(r'{{ pattern }}', sequence)\n"
-                "# Filter by length: {{ min_length }}-{{ max_length }} aa"
-            ),
-            parameters={
-                "enzyme": enzyme_name,
-                "missed_cleavages": missed_cleavages,
-                "min_length": min_length,
-                "max_length": max_length,
-            },
+            imports=replay_imports,
+            code_template=code_template,
+            parameters=replay_parameters,
             parameter_schema={
                 "enzyme": ParameterSpec(
                     param_type="str",
