@@ -284,7 +284,11 @@ sc.pp.log1p(adata)
 sc.pp.scale(adata, max_value=10)
 {% endif %}
 
-print(f"Normalization complete (target_sum={{ target_sum }}, {{ normalization_method }} transformed)")
+{% if normalization_method == "sctransform_like" %}
+print(f"Normalization complete (target_sum={{ target_sum }}, log1p transformed, scaled)")
+{% else %}
+print(f"Normalization complete (target_sum={{ target_sum }}, log1p transformed)")
+{% endif %}
 """
 
         return AnalysisStep(
