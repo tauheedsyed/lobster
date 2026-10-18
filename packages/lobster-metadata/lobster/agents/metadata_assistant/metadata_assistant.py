@@ -120,6 +120,92 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+_ENRICHMENT_MODES = frozenset({"column_scan", "llm_auto", "manual", "hybrid"})
+
+# Sample fields written by the disease-enrichment phases.
+_DISEASE_FIELDS = (
+    "disease",
+    "disease_original",
+    "disease_source",
+    "disease_confidence",
+    "disease_match_type",
+    "disease_evidence",
+    "enrichment_timestamp",
+)
+
+
+def _plain_value(value: Any) -> Any:
+    """Return a plain-Python version of numpy scalars for IR literals."""
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _disease_enrichment_ir(
+    workspace_key: str,
+    enrichment_mode: str,
+    before: List[Dict[str, Any]],
+    samples: List[Dict[str, Any]],
+    dry_run: bool,
+) -> AnalysisStep:
+    """IR that records, and can re-apply, the disease labels this enrichment wrote.
+
+    The labels come from column re-scans, LLM extraction and manual mappings.
+    LLM output is not deterministic, so the IR records each changed sample's
+    new disease fields rather than re-running the extraction.
+
+    Exported notebooks only carry ``adata``; sample records in the metadata
+    store have no notebook binding. So the step is exported as a record (its
+    cell applies the updates only when ``samples`` is bound) but is not
+    replayable. A dry run changed nothing and is not exported at all.
+    """
+    updates = []
+    for index, (old, sample) in enumerate(zip(before, samples)):
+        changed = {
+            field: _plain_value(sample[field])
+            for field in _DISEASE_FIELDS
+            if field in sample and sample[field] != old.get(field)
+        }
+        if changed:
+            updates.append({"index": index, "fields": changed})
+    return AnalysisStep(
+        operation="lobster.metadata.enrich_samples_with_disease",
+        tool_name="enrich_samples_with_disease",
+        description=(
+            f"Disease enrichment ({enrichment_mode}) of '{workspace_key}': "
+            f"{len(updates)} samples updated"
+        ),
+        library="lobster",
+        code_template=(
+            "# Disease labels written by enrichment of metadata key {{ workspace_key | repr }}\n"
+            "# (mode {{ enrichment_mode | repr }}). LLM extraction is not deterministic,\n"
+            "# so the recorded labels are re-applied rather than re-extracted.\n"
+            "disease_updates = {{ updates | repr }}\n"
+            "if 'samples' in globals():\n"
+            "    for update in disease_updates:\n"
+            "        samples[update['index']].update(update['fields'])\n"
+            "else:\n"
+            "    binding = 'metadata_store[%r][\"samples\"]' % {{ workspace_key | repr }}\n"
+            "    print(f'{len(disease_updates)} recorded disease updates; bind `samples` to {binding} to apply them.')"
+        ),
+        imports=[],
+        parameters={
+            "workspace_key": workspace_key,
+            "enrichment_mode": enrichment_mode,
+            "updates": updates,
+        },
+        parameter_schema={},
+        input_entities=["samples"],
+        output_entities=["samples"],
+        execution_context={"dry_run": dry_run},
+        exportable=not dry_run,
+        replayable=False,
+    )
+
+
 # =========================================================================
 # Helper: Log Suppression for Progress UI
 # =========================================================================
@@ -383,8 +469,9 @@ def metadata_assistant(
             logger.error(f"Unexpected mapping error: {e}", exc_info=True)
             return f"❌ Unexpected error during mapping: {str(e)}"
 
-    map_samples_by_id.metadata = {"categories": ["ANNOTATE"], "provenance": True}
-    map_samples_by_id.tags = ["ANNOTATE"]
+    # Read-only: builds a mapping report and stores nothing, so it is a UTILITY.
+    map_samples_by_id.metadata = {"categories": ["UTILITY"], "provenance": False}
+    map_samples_by_id.tags = ["UTILITY"]
 
     # =========================================================================
     # Tool 2: Read Sample Metadata
@@ -2673,6 +2760,12 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
         Example:
             enrich_samples_with_disease(workspace_key="aggregated_filtered_samples")
         """
+        if enrichment_mode not in _ENRICHMENT_MODES:
+            return (
+                f"❌ Invalid enrichment_mode {enrichment_mode!r}. "
+                f"Use one of: {', '.join(sorted(_ENRICHMENT_MODES))}"
+            )
+
         # Step 1: Load samples from workspace
         if workspace_key not in data_manager.metadata_store:
             return f"❌ Workspace key '{workspace_key}' not found in metadata_store"
@@ -2712,6 +2805,9 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
 
         # Make a copy of samples for dry_run to avoid modifying original
         working_samples = [s.copy() for s in samples] if dry_run else samples
+        disease_before = [
+            {field: s.get(field) for field in _DISEASE_FIELDS} for s in working_samples
+        ]
 
         # Phase 1: Column re-scan (always run unless manual-only mode)
         if enrichment_mode in ["column_scan", "hybrid"]:
@@ -2845,7 +2941,9 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
                 "dry_run": dry_run,
             },
             description=f"Disease enrichment: {total_enriched} samples enriched, {final_coverage:.1f}% coverage",
-            ir=None,
+            ir=_disease_enrichment_ir(
+                workspace_key, enrichment_mode, disease_before, working_samples, dry_run
+            ),
             agent=agent_name,
         )
 

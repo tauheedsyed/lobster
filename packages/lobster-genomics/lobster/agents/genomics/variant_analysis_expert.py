@@ -702,7 +702,7 @@ def variant_analysis_expert(
                     clinvar_info.extend(clin_sig)
 
             if known_ids:
-                lines.append(f"\n### Known Variant IDs")
+                lines.append("\n### Known Variant IDs")
                 lines.append(f"- {', '.join(known_ids[:10])}")
 
             if gnomad_info:
@@ -741,8 +741,8 @@ def variant_analysis_expert(
             logger.error(f"Error in variant lookup: {e}")
             return f"Error looking up variant: {str(e)}"
 
-    lookup_variant.metadata = {"categories": ["ANNOTATE"], "provenance": True}
-    lookup_variant.tags = ["ANNOTATE"]
+    lookup_variant.metadata = {"categories": ["UTILITY"], "provenance": False}
+    lookup_variant.tags = ["UTILITY"]
 
     # =========================================================================
     # RELOCATED TOOLS (from parent via factories)

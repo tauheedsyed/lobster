@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from rich import box
 from rich.console import Console
@@ -30,8 +31,18 @@ from rich.prompt import Confirm, Prompt
 from rich.style import Style
 from rich.table import Table
 
+from lobster.core.provenance.analysis_ir import AnalysisStep
+
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+def _is_missing(value: Any) -> bool:
+    """True for None, NaN of any float type and pd.NA; False for anything else."""
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):  # list-like values are not missing scalars
+        return False
 
 
 @dataclass
@@ -96,8 +107,29 @@ class ManualAnnotationService:
             AnnotationState: Initial state of annotation session
         """
         self.adata = adata
+        clusters = self._build_cluster_info(adata, cluster_key, color_key)
 
-        # Extract cluster information
+        # Initialize state
+        self.state = AnnotationState(
+            clusters=clusters,
+            cell_type_mapping={},
+            debris_clusters=set(),
+            annotation_history=[],
+        )
+
+        self.cluster_colors = {
+            cluster_id: info.color for cluster_id, info in clusters.items()
+        }
+
+        return self.state
+
+    @staticmethod
+    def _build_cluster_info(
+        adata: sc.AnnData,
+        cluster_key: str = "leiden",
+        color_key: Optional[str] = None,
+    ) -> Dict[str, ClusterInfo]:
+        """Summarize each cluster (size, colour, mean QC metrics) without side effects."""
         clusters = {}
         unique_clusters = adata.obs[cluster_key].unique()
 
@@ -144,19 +176,7 @@ class ManualAnnotationService:
                 qc_scores=qc_scores,
             )
 
-        # Initialize state
-        self.state = AnnotationState(
-            clusters=clusters,
-            cell_type_mapping={},
-            debris_clusters=set(),
-            annotation_history=[],
-        )
-
-        self.cluster_colors = {
-            cluster_id: info.color for cluster_id, info in clusters.items()
-        }
-
-        return self.state
+        return clusters
 
     def rich_annotation_interface(self) -> Dict[str, str]:
         """
@@ -901,25 +921,29 @@ The colors in this terminal [bold]exactly match[/bold] your UMAP plot colors for
         min_genes: int = 200,
         max_mt_percent: float = 50,
         min_umi: int = 500,
+        cluster_key: str = "leiden",
     ) -> List[str]:
         """
         Suggest potential debris clusters based on QC metrics.
+
+        Stateless: the clusters are always summarized from ``adata`` and
+        ``cluster_key``. It neither reads nor changes an interactive session.
 
         Args:
             adata: AnnData object
             min_genes: Minimum genes per cell threshold
             max_mt_percent: Maximum mitochondrial percentage
             min_umi: Minimum UMI count threshold
+            cluster_key: Column in adata.obs holding cluster assignments
 
         Returns:
             List of cluster IDs suggested as debris
         """
-        if not self.state:
-            self.initialize_annotation_session(adata)
+        clusters = self._build_cluster_info(adata, cluster_key)
 
         suggested_debris = []
 
-        for cluster_id, info in self.state.clusters.items():
+        for cluster_id, info in clusters.items():
             is_debris = False
 
             # Check QC metrics
@@ -987,3 +1011,230 @@ The colors in this terminal [bold]exactly match[/bold] your UMAP plot colors for
         }
 
         return validation_results
+
+    # =========================================================================
+    # Stateless annotation operations with provenance IR.
+    #
+    # Each returns (annotated_adata, stats, AnalysisStep). The IR code template
+    # performs the same pandas operations on a notebook's ``adata``, so an
+    # exported notebook reproduces the annotation exactly. These methods never
+    # read or change the interactive session state.
+    # =========================================================================
+
+    def apply_cluster_mapping(
+        self,
+        adata: sc.AnnData,
+        cluster_key: str,
+        mapping: Dict[str, str],
+        target_column: str = "cell_type_manual",
+        fill_value: str = "Unassigned",
+        tool_name: str = "manually_annotate_clusters",
+        description: Optional[str] = None,
+    ) -> Tuple[sc.AnnData, Dict[str, Any], AnalysisStep]:
+        """Write ``mapping[cluster]`` into ``adata.obs[target_column]``.
+
+        Clusters missing from ``mapping`` get ``fill_value``.
+        """
+        if cluster_key not in adata.obs.columns:
+            raise KeyError(f"Cluster column '{cluster_key}' not found in adata.obs")
+
+        # Missing labels (JSON null, NaN, pd.NA) stay unmapped and get ``fill_value``.
+        mapping = {str(k): str(v) for k, v in mapping.items() if not _is_missing(v)}
+        adata_copy = adata.copy()
+        adata_copy.obs[target_column] = (
+            adata_copy.obs[cluster_key].astype(str).map(mapping).fillna(fill_value)
+        )
+
+        stats = {
+            "n_clusters_mapped": len(mapping),
+            "n_cell_types": len(set(mapping.values())),
+            "target_column": target_column,
+            "n_cells_unassigned": int(
+                (adata_copy.obs[target_column] == fill_value).sum()
+            ),
+        }
+        ir = AnalysisStep(
+            operation="pandas.cluster_to_label_mapping",
+            tool_name=tool_name,
+            description=description
+            or f"Map {len(mapping)} clusters of '{cluster_key}' to '{target_column}'",
+            library="pandas",
+            code_template=(
+                "cluster_mapping = {{ mapping | repr }}\n"
+                "adata.obs[{{ target_column | repr }}] = (\n"
+                "    adata.obs[{{ cluster_key | repr }}]\n"
+                "    .astype(str)\n"
+                "    .map(cluster_mapping)\n"
+                "    .fillna({{ fill_value | repr }})\n"
+                ")"
+            ),
+            imports=[],
+            parameters={
+                "cluster_key": cluster_key,
+                "mapping": mapping,
+                "target_column": target_column,
+                "fill_value": fill_value,
+            },
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=["adata"],
+        )
+        return adata_copy, stats, ir
+
+    def collapse_clusters(
+        self,
+        adata: sc.AnnData,
+        cluster_key: str,
+        cluster_list: List[str],
+        cell_type_name: str,
+        target_column: str = "cell_type_manual",
+    ) -> Tuple[sc.AnnData, Dict[str, Any], AnalysisStep]:
+        """Label every cell of ``cluster_list`` as ``cell_type_name``."""
+        if cluster_key not in adata.obs.columns:
+            raise KeyError(f"Cluster column '{cluster_key}' not found in adata.obs")
+
+        clusters = [str(c) for c in cluster_list]
+        adata_copy = adata.copy()
+        if target_column not in adata_copy.obs:
+            adata_copy.obs[target_column] = "Unassigned"
+        mask = adata_copy.obs[cluster_key].astype(str).isin(clusters)
+        adata_copy.obs.loc[mask, target_column] = cell_type_name
+
+        stats = {
+            "n_clusters_collapsed": len(clusters),
+            "n_cells_collapsed": int(mask.sum()),
+            "cell_type_name": cell_type_name,
+        }
+        ir = AnalysisStep(
+            operation="pandas.collapse_clusters",
+            tool_name="collapse_clusters_to_celltype",
+            description=f"Collapse clusters {clusters} into '{cell_type_name}'",
+            library="pandas",
+            code_template=(
+                "if {{ target_column | repr }} not in adata.obs:\n"
+                "    adata.obs[{{ target_column | repr }}] = 'Unassigned'\n"
+                "collapse_mask = adata.obs[{{ cluster_key | repr }}].astype(str).isin("
+                "{{ cluster_list | repr }})\n"
+                "adata.obs.loc[collapse_mask, {{ target_column | repr }}] = "
+                "{{ cell_type_name | repr }}"
+            ),
+            imports=[],
+            parameters={
+                "cluster_key": cluster_key,
+                "cluster_list": clusters,
+                "cell_type_name": cell_type_name,
+                "target_column": target_column,
+            },
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=["adata"],
+        )
+        return adata_copy, stats, ir
+
+    def mark_debris_clusters(
+        self,
+        adata: sc.AnnData,
+        cluster_key: str,
+        debris_clusters: List[str],
+        remove_debris: bool = False,
+        target_column: str = "cell_type_manual",
+    ) -> Tuple[sc.AnnData, Dict[str, Any], AnalysisStep]:
+        """Flag cells of ``debris_clusters`` as debris, optionally removing them."""
+        if cluster_key not in adata.obs.columns:
+            raise KeyError(f"Cluster column '{cluster_key}' not found in adata.obs")
+
+        clusters = [str(c) for c in debris_clusters]
+        adata_copy = adata.copy()
+        if target_column not in adata_copy.obs:
+            adata_copy.obs[target_column] = "Unassigned"
+        debris_mask = adata_copy.obs[cluster_key].astype(str).isin(clusters)
+        adata_copy.obs.loc[debris_mask, target_column] = "Debris"
+        adata_copy.obs["is_debris"] = debris_mask.to_numpy()
+        n_debris = int(debris_mask.sum())
+        if remove_debris:
+            adata_copy = adata_copy[~debris_mask.to_numpy()].copy()
+
+        stats = {
+            "n_debris_clusters": len(clusters),
+            "n_debris_cells": n_debris,
+            "removed": remove_debris,
+            "n_cells_remaining": int(adata_copy.n_obs),
+        }
+        ir = AnalysisStep(
+            operation="pandas.mark_debris_clusters",
+            tool_name="mark_clusters_as_debris",
+            description=(
+                f"{'Remove' if remove_debris else 'Flag'} debris clusters {clusters}"
+            ),
+            library="pandas",
+            code_template=(
+                "if {{ target_column | repr }} not in adata.obs:\n"
+                "    adata.obs[{{ target_column | repr }}] = 'Unassigned'\n"
+                "debris_mask = adata.obs[{{ cluster_key | repr }}].astype(str).isin("
+                "{{ debris_clusters | repr }})\n"
+                "adata.obs.loc[debris_mask, {{ target_column | repr }}] = 'Debris'\n"
+                "adata.obs['is_debris'] = debris_mask.to_numpy()\n"
+                "{% if remove_debris %}"
+                "adata = adata[~debris_mask.to_numpy()].copy()\n"
+                "{% endif %}"
+            ),
+            imports=[],
+            parameters={
+                "cluster_key": cluster_key,
+                "debris_clusters": clusters,
+                "remove_debris": remove_debris,
+                "target_column": target_column,
+            },
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=["adata"],
+        )
+        return adata_copy, stats, ir
+
+    @staticmethod
+    def create_debris_suggestion_ir(
+        cluster_key: str,
+        min_genes: int,
+        max_mt_percent: float,
+        min_umi: int,
+        suggested: List[str],
+    ) -> AnalysisStep:
+        """IR for a read-only debris suggestion.
+
+        Not replayable: it changes no data. It is exported so the notebook shows
+        which clusters the QC heuristics flagged and with which thresholds.
+        """
+        return AnalysisStep(
+            operation="lobster.suggest_debris_clusters",
+            tool_name="suggest_debris_clusters",
+            description=(
+                f"Suggest debris clusters in '{cluster_key}' "
+                f"(min_genes={min_genes}, max_mt%={max_mt_percent}, min_umi={min_umi})"
+            ),
+            library="lobster",
+            code_template=(
+                "from lobster.services.metadata.manual_annotation_service import (\n"
+                "    ManualAnnotationService,\n"
+                ")\n\n"
+                "suggested_debris = ManualAnnotationService().suggest_debris_clusters(\n"
+                "    adata,\n"
+                "    min_genes={{ min_genes | repr }},\n"
+                "    max_mt_percent={{ max_mt_percent | repr }},\n"
+                "    min_umi={{ min_umi | repr }},\n"
+                "    cluster_key={{ cluster_key | repr }},\n"
+                ")\n"
+                "print('Suggested debris clusters:', suggested_debris)"
+            ),
+            imports=[],
+            parameters={
+                "cluster_key": cluster_key,
+                "min_genes": min_genes,
+                "max_mt_percent": max_mt_percent,
+                "min_umi": min_umi,
+            },
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=[],
+            execution_context={"suggested_debris_clusters": list(suggested)},
+            replayable=False,
+        )

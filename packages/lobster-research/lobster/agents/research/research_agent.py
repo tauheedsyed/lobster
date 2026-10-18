@@ -1065,8 +1065,8 @@ def research_agent(
             logger.error(f"Error extracting metadata: {e}")
             return f"Error extracting metadata for {identifier}: {str(e)}"
 
-    get_dataset_metadata.metadata = {"categories": ["QUALITY"], "provenance": True}
-    get_dataset_metadata.tags = ["QUALITY"]
+    get_dataset_metadata.metadata = {"categories": ["UTILITY"], "provenance": False}
+    get_dataset_metadata.tags = ["UTILITY"]
 
     @tool
     def validate_dataset_metadata(
@@ -1353,8 +1353,8 @@ def research_agent(
             logger.error(f"Error in metadata validation: {e}")
             return f"Error validating dataset metadata: {str(e)}"
 
-    validate_dataset_metadata.metadata = {"categories": ["QUALITY"], "provenance": True}
-    validate_dataset_metadata.tags = ["QUALITY"]
+    validate_dataset_metadata.metadata = {"categories": ["UTILITY"], "provenance": False}
+    validate_dataset_metadata.tags = ["UTILITY"]
 
     @tool
     def prepare_dataset_download(accession: str, priority: int = 5) -> str:
@@ -2276,8 +2276,8 @@ Could not extract content for: {identifier}
         )
         return outcome.response_markdown
 
-    process_publication_entry.metadata = {"categories": ["PREPROCESS"], "provenance": True}
-    process_publication_entry.tags = ["PREPROCESS"]
+    process_publication_entry.metadata = {"categories": ["UTILITY"], "provenance": False}
+    process_publication_entry.tags = ["UTILITY"]
 
     @tool
     def process_publication_queue(
@@ -2403,8 +2403,8 @@ Could not extract content for: {identifier}
             )
             return result
 
-    process_publication_queue.metadata = {"categories": ["PREPROCESS"], "provenance": True}
-    process_publication_queue.tags = ["PREPROCESS"]
+    process_publication_queue.metadata = {"categories": ["UTILITY"], "provenance": False}
+    process_publication_queue.tags = ["UTILITY"]
 
     # ============================================================
     # Phase 4 TOOLS: Workspace Management (shared tools from workspace_tool.py)

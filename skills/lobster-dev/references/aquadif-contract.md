@@ -326,7 +326,34 @@ data_manager.log_tool_usage("tool_name", params, stats, ir=ir)
 # INCORRECT: Provenance missing (contract tests will fail)
 result, stats, ir = service.analyze(adata)
 data_manager.log_tool_usage("tool_name", params, stats)  # ir parameter missing!
+
+# INCORRECT: Hollow provenance (contract tests will fail)
+data_manager.log_tool_usage("tool_name", params, stats, ir=None)  # records nothing
 ```
+
+`ir=None` is not a bridge. It names the keyword but records nothing, so an
+exported notebook silently loses the step. The IR's `code_template` must
+reproduce what the tool did on a notebook's `adata`; test that with
+`lobster.testing.provenance_replay` (run the tool, `replay_ir` its IR on a copy
+of the input, compare).
+
+Choose by what the tool does:
+
+| The tool... | Category | IR |
+|---|---|---|
+| changes a modality (stores or mutates AnnData) | provenance-required | real IR, `replayable=True` (default) |
+| changes metadata-store records (sample tables outside AnnData) | provenance-required | real IR recording the change, `replayable=False`: notebooks only carry `adata`, so the cell is a record |
+| only checks or plots, but its service also writes into `adata` (e.g. QC metrics) | its category | real IR, `replayable=True`, or replay loses those columns |
+| only checks or plots data that is loaded | its category (e.g. QUALITY, ANALYZE) | real IR with `replayable=False`: exported so the notebook shows the check or redraws the figure, skipped when replaying results |
+| queries external services, manages queues, writes reports | UTILITY | none (`provenance: False`) |
+
+Non-deterministic steps (LLM extraction, live database lookups, unseeded
+randomness) must record their outcome, or the seed, in the IR so replay gives
+the same result.
+
+Exported notebooks carry a single `adata` from cell to cell. A tool that works
+on a derived modality (for example the `_train` split) must make its IR select
+that data itself, or the replay silently runs on the wrong samples.
 
 ### For non-provenance tools (UTILITY, DELEGATE):
 
@@ -379,7 +406,7 @@ Your agent MUST pass these tests. They are implemented in Phase 2 (`lobster/test
 2. **Category validity** — All categories come from the AQUADIF 10-category set (no typos, no custom categories)
 3. **Category cap** — Maximum 3 categories per tool
 4. **Provenance compliance** — `provenance` boolean matches the primary category's requirement
-5. **Provenance call validation** — Tools with `provenance: True` contain a `log_tool_usage()` call with `ir=` parameter (AST-based inspection)
+5. **Provenance call validation** — Tools with `provenance: True` contain a `log_tool_usage()` call passing a real `ir=` (AST-based inspection of the tool's implementation; the coroutine for async tools). A literal `ir=None` fails, and so does tool source that cannot be read or parsed. `lobster validate-plugin` reports a plugin that only passes `ir=None` as a warning for one release, then as a failure
 6. **Minimum viable parent** — Parent agents must have at least one IMPORT + one QUALITY + one ANALYZE or DELEGATE tool. If your agent's DELEGATE tools are injected at runtime (via `delegation_tools` parameter from `graph.py`), set `is_parent_agent = False` in the contract test to skip this check — the test cannot see runtime-injected tools.
 7. **No closure scoping drift** — For multi-category tools, ensure metadata is assigned to the correct closure variable
 8. **Metadata uniqueness** — Each tool instance has its own metadata dict (not shared references)
@@ -577,7 +604,7 @@ The `AquadifMonitor` service (`lobster/core/aquadif_monitor.py`) tracks AQUADIF 
 
 **What it tracks:**
 - **Category distribution** — per-session count of tool invocations by category (`get_category_distribution()`)
-- **Provenance status** — per-tool status: `real_ir` (genuine AnalysisStep), `hollow_ir` (ir=None bridge), `missing` (no provenance call observed) (`get_provenance_status()`)
+- **Provenance status** — per-tool status: `real_ir` (genuine AnalysisStep), `hollow_ir` (ir=None: rejected by the contract tests, still observed at runtime for plugins that have not migrated), `missing` (no provenance call observed) (`get_provenance_status()`)
 - **CODE_EXEC log** — bounded circular buffer (100 entries) of custom code executions with agent attribution (`get_code_exec_log()`)
 - **Session summary** — structured dict consumable by Omics-OS Cloud SSE enrichment (`get_session_summary()`)
 

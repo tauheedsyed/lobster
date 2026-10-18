@@ -306,7 +306,10 @@ def annotation_expert(
             "cloud deployment. Use manually_annotate_clusters for direct cluster annotation."
         )
 
-    manually_annotate_clusters_interactive.metadata = {"categories": ["UTILITY"], "provenance": False}
+    manually_annotate_clusters_interactive.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     manually_annotate_clusters_interactive.tags = ["UTILITY"]
 
     @tool
@@ -348,18 +351,14 @@ def annotation_expert(
                 )
 
             # Apply annotations directly
-            adata_copy = adata.copy()
-            cell_type_mapping = {}
-
-            for cluster_id, cell_type in annotations.items():
-                cell_type_mapping[str(cluster_id)] = cell_type
-
-            # Create cell type column
-            adata_copy.obs["cell_type_manual"] = (
-                adata_copy.obs[cluster_key]
-                .astype(str)
-                .map(cell_type_mapping)
-                .fillna("Unassigned")
+            adata_copy, _, ir = manual_annotation_service.apply_cluster_mapping(
+                adata,
+                cluster_key=cluster_key,
+                mapping=annotations,
+                target_column="cell_type_manual",
+                fill_value="Unassigned",
+                tool_name="manually_annotate_clusters",
+                description=f"Manual annotation of {len(annotations)} clusters",
             )
 
             # Save as new modality
@@ -385,6 +384,7 @@ def annotation_expert(
                     "annotations": annotations,
                 },
                 description=f"Direct manual annotation of {len(annotations)} clusters",
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -413,7 +413,10 @@ def annotation_expert(
             logger.error(f"Error in manual annotation: {e}")
             return f"Error applying manual annotations: {str(e)}"
 
-    manually_annotate_clusters.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    manually_annotate_clusters.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     manually_annotate_clusters.tags = ["ANNOTATE"]
 
     @tool
@@ -456,22 +459,15 @@ def annotation_expert(
                 return f"Invalid cluster IDs: {invalid_clusters}. Available: {sorted(unique_clusters)}"
 
             # Create collapsed annotation
-            adata_copy = adata.copy()
-
-            # Create or update manual cell type column
-            if "cell_type_manual" not in adata_copy.obs:
-                adata_copy.obs["cell_type_manual"] = "Unassigned"
-
-            # Apply collapse
-            for cluster_id in cluster_list:
-                mask = adata_copy.obs[cluster_key].astype(str) == str(cluster_id)
-                adata_copy.obs.loc[mask, "cell_type_manual"] = cell_type_name
-
-            # Calculate statistics
-            total_cells_collapsed = sum(
-                (adata_copy.obs[cluster_key].astype(str) == str(c)).sum()
-                for c in cluster_list
+            adata_copy, collapse_stats, ir = (
+                manual_annotation_service.collapse_clusters(
+                    adata,
+                    cluster_key=cluster_key,
+                    cluster_list=cluster_list,
+                    cell_type_name=cell_type_name,
+                )
             )
+            total_cells_collapsed = collapse_stats["n_cells_collapsed"]
 
             # Save as new modality
             collapsed_modality_name = f"{modality_name}_collapsed"
@@ -497,6 +493,7 @@ def annotation_expert(
                     "cluster_key": cluster_key,
                 },
                 description=f"Collapsed {len(cluster_list)} clusters into '{cell_type_name}'",
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -520,7 +517,10 @@ def annotation_expert(
             logger.error(f"Error collapsing clusters: {e}")
             return f"Error collapsing clusters: {str(e)}"
 
-    collapse_clusters_to_celltype.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    collapse_clusters_to_celltype.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     collapse_clusters_to_celltype.tags = ["ANNOTATE"]
 
     @tool
@@ -571,28 +571,16 @@ def annotation_expert(
             if invalid_clusters:
                 return f"Invalid cluster IDs: {invalid_clusters}. Available: {sorted(unique_clusters)}"
 
-            adata_copy = adata.copy()
-
-            # Mark debris clusters
-            if "cell_type_manual" not in adata_copy.obs:
-                adata_copy.obs["cell_type_manual"] = "Unassigned"
-
-            debris_mask = (
-                adata_copy.obs[cluster_key]
-                .astype(str)
-                .isin([str(c) for c in debris_clusters])
+            # Mark (and optionally remove) debris clusters
+            adata_copy, debris_stats, ir = (
+                manual_annotation_service.mark_debris_clusters(
+                    adata,
+                    cluster_key=cluster_key,
+                    debris_clusters=debris_clusters,
+                    remove_debris=remove_debris,
+                )
             )
-            adata_copy.obs.loc[debris_mask, "cell_type_manual"] = "Debris"
-
-            # Add debris flag
-            adata_copy.obs["is_debris"] = False
-            adata_copy.obs.loc[debris_mask, "is_debris"] = True
-
-            # Optionally remove debris
-            if remove_debris:
-                adata_copy = adata_copy[~debris_mask].copy()
-
-            total_debris_cells = debris_mask.sum()
+            total_debris_cells = debris_stats["n_debris_cells"]
 
             # Save as new modality
             debris_modality_name = f"{modality_name}_debris_marked"
@@ -621,6 +609,7 @@ def annotation_expert(
                     "cluster_key": cluster_key,
                 },
                 description=f"Marked {len(debris_clusters)} clusters as debris ({total_debris_cells} cells)",
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -697,6 +686,28 @@ def annotation_expert(
                 min_genes=min_genes,
                 max_mt_percent=max_mt_percent,
                 min_umi=min_umi,
+                cluster_key=cluster_key,
+            )
+
+            # Record the check: read-only, so the IR is exported but not replayed
+            data_manager.log_tool_usage(
+                tool_name="suggest_debris_clusters",
+                parameters={
+                    "modality_name": modality_name,
+                    "min_genes": min_genes,
+                    "max_mt_percent": max_mt_percent,
+                    "min_umi": min_umi,
+                    "cluster_key": cluster_key,
+                },
+                description=f"Suggested {len(suggested_debris)} debris clusters",
+                ir=manual_annotation_service.create_debris_suggestion_ir(
+                    cluster_key=cluster_key,
+                    min_genes=min_genes,
+                    max_mt_percent=max_mt_percent,
+                    min_umi=min_umi,
+                    suggested=suggested_debris,
+                ),
+                agent=agent_name,
             )
 
             if not suggested_debris:
@@ -822,7 +833,10 @@ def annotation_expert(
             logger.error(f"Error reviewing annotations: {e}")
             return f"Error reviewing annotation assignments: {str(e)}"
 
-    review_annotation_assignments.metadata = {"categories": ["UTILITY"], "provenance": False}
+    review_annotation_assignments.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     review_annotation_assignments.tags = ["UTILITY"]
 
     @tool
@@ -876,13 +890,19 @@ def annotation_expert(
                     f"No template suggestions generated for tissue type '{tissue_type}'"
                 )
 
-            # Apply suggestions to data
-            adata_copy = adata.copy()
-            adata_copy.obs["cell_type_template"] = (
-                adata_copy.obs[cluster_key]
-                .astype(str)
-                .map(cluster_suggestions)
-                .fillna("Unknown")
+            # Apply suggestions to data. The IR records the resolved
+            # cluster -> cell type mapping, so replay reproduces this result.
+            adata_copy, _, ir = manual_annotation_service.apply_cluster_mapping(
+                adata,
+                cluster_key=cluster_key,
+                mapping=cluster_suggestions,
+                target_column="cell_type_template",
+                fill_value="Unknown",
+                tool_name="apply_annotation_template",
+                description=(
+                    f"Apply {tissue_type} annotation template "
+                    f"(expression_threshold={expression_threshold})"
+                ),
             )
 
             # Save as new modality
@@ -909,6 +929,7 @@ def annotation_expert(
                     "expression_threshold": expression_threshold,
                 },
                 description=f"Applied {tissue_type} template: {len(cluster_suggestions)} clusters annotated",
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -954,7 +975,10 @@ def annotation_expert(
             logger.error(f"Error applying annotation template: {e}")
             return f"Error applying annotation template: {str(e)}"
 
-    apply_annotation_template.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    apply_annotation_template.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     apply_annotation_template.tags = ["ANNOTATE"]
 
     @tool
@@ -1081,7 +1105,10 @@ Use this mapping to apply consistent annotations to similar datasets."""
             logger.error(f"Error exporting annotation mapping: {e}")
             return f"Error exporting annotation mapping: {str(e)}"
 
-    export_annotation_mapping.metadata = {"categories": ["UTILITY"], "provenance": False}
+    export_annotation_mapping.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     export_annotation_mapping.tags = ["UTILITY"]
 
     @tool
@@ -1144,8 +1171,6 @@ Use this mapping to apply consistent annotations to similar datasets."""
                 return response
 
             # Apply mapping
-            adata_copy = adata.copy()
-
             if (
                 "cluster_to_celltype" in mapping_data
                 and "cluster_column" in mapping_data
@@ -1153,12 +1178,15 @@ Use this mapping to apply consistent annotations to similar datasets."""
                 cluster_col = mapping_data["cluster_column"]
                 cluster_mapping = mapping_data["cluster_to_celltype"]
 
-                if cluster_col in adata_copy.obs.columns:
-                    adata_copy.obs["cell_type_imported"] = (
-                        adata_copy.obs[cluster_col]
-                        .astype(str)
-                        .map(cluster_mapping)
-                        .fillna("Unassigned")
+                if cluster_col in adata.obs.columns:
+                    adata_copy, _, ir = manual_annotation_service.apply_cluster_mapping(
+                        adata,
+                        cluster_key=cluster_col,
+                        mapping=cluster_mapping,
+                        target_column="cell_type_imported",
+                        fill_value="Unassigned",
+                        tool_name="import_annotation_mapping",
+                        description=f"Apply annotation mapping imported from {mapping_file}",
                     )
                 else:
                     return f"Cluster column '{cluster_col}' from mapping not found in modality."
@@ -1188,6 +1216,7 @@ Use this mapping to apply consistent annotations to similar datasets."""
                     "preview_only": preview_only,
                 },
                 description=f"Imported annotation mapping from {mapping_file}",
+                ir=ir,
                 agent=agent_name,
             )
 
@@ -1222,7 +1251,10 @@ Use this mapping to apply consistent annotations to similar datasets."""
             logger.error(f"Error importing annotation mapping: {e}")
             return f"Error importing annotation mapping: {str(e)}"
 
-    import_annotation_mapping.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    import_annotation_mapping.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     import_annotation_mapping.tags = ["ANNOTATE"]
 
     # -------------------------
@@ -1328,7 +1360,7 @@ Use this mapping to apply consistent annotations to similar datasets."""
                     "sc.tl.score_genes(\n"
                     "    adata,\n"
                     "    gene_list={{ gene_list }},\n"
-                    '    score_name="{{ score_name }}",\n'
+                    '    score_name={% if score_name.isidentifier() %}"{{ score_name }}"{% else %}{{ score_name | repr }}{% endif %},\n'
                     "    ctrl_size={{ ctrl_size }},\n"
                     "    use_raw={{ use_raw }},\n"
                     ")"
@@ -1730,7 +1762,10 @@ Use this mapping to apply consistent annotations to similar datasets."""
             logger.error(f"Unexpected error in semantic cell type annotation: {e}")
             return f"Unexpected error in semantic annotation: {str(e)}"
 
-    annotate_cell_types_semantic.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    annotate_cell_types_semantic.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     annotate_cell_types_semantic.tags = ["ANNOTATE"]
 
     # -------------------------

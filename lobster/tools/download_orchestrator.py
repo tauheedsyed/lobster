@@ -42,12 +42,15 @@ Thread Safety:
 """
 
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.interfaces.download_service import IDownloadService
 from lobster.core.schemas.download_queue import DownloadStatus
 from lobster.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from lobster.core.provenance.analysis_ir import AnalysisStep
 
 logger = get_logger(__name__)
 
@@ -257,8 +260,14 @@ class DownloadOrchestrator:
         return sorted(self._services.keys())
 
     def execute_download(
-        self, entry_id: str, strategy_override: Optional[Dict[str, Any]] = None
-    ) -> Tuple[str, Dict[str, Any]]:
+        self,
+        entry_id: str,
+        strategy_override: Optional[Dict[str, Any]] = None,
+        return_ir: bool = False,
+    ) -> Union[
+        Tuple[str, Dict[str, Any]],
+        Tuple[str, Dict[str, Any], Optional["AnalysisStep"]],
+    ]:
         """
         Execute download from queue entry with automatic service routing.
 
@@ -274,11 +283,15 @@ class DownloadOrchestrator:
             entry_id: Queue entry identifier
             strategy_override: Optional dict to override default download strategy.
                 Must match the parameter schema of the target service.
+            return_ir: When True, do not log provenance here; return the
+                service's AnalysisStep as a third element so the calling tool
+                can log the download once, under its own name.
 
         Returns:
             Tuple containing:
                 - modality_name: Name of stored modality in DataManagerV2
                 - stats: Download statistics dict (keys vary by service)
+                - ir: Provenance AnalysisStep (only when ``return_ir`` is True)
 
         Raises:
             ValueError: If entry_id invalid, entry status is not PENDING/FAILED,
@@ -320,7 +333,7 @@ class DownloadOrchestrator:
         )
         if claimed is None:
             logger.info(f"Entry '{entry_id}' already being processed by another worker")
-            return "", {}
+            return ("", {}, None) if return_ir else ("", {})
 
         logger.info(f"Updated queue entry '{entry_id}' status to IN_PROGRESS")
 
@@ -363,29 +376,43 @@ class DownloadOrchestrator:
                 f"({adata.n_obs} obs × {adata.n_vars} vars)"
             )
 
-            # Step 7: Log provenance
-            self.data_manager.log_tool_usage(
-                "download_orchestrator.execute_download",
-                {
-                    "entry_id": entry_id,
-                    "database": entry.database,
-                    "dataset_id": entry.dataset_id,
-                    "strategy_override": strategy_override or {},
-                    "service": service.__class__.__name__,
-                },
-                stats,
-                ir=ir,
-            )
-            logger.info("Provenance logged for download operation")
+            def log_download_provenance() -> None:
+                self.data_manager.log_tool_usage(
+                    "download_orchestrator.execute_download",
+                    {
+                        "entry_id": entry_id,
+                        "database": entry.database,
+                        "dataset_id": entry.dataset_id,
+                        "strategy_override": strategy_override or {},
+                        "service": service.__class__.__name__,
+                    },
+                    stats,
+                    ir=ir,
+                )
+                logger.info("Provenance logged for download operation")
+
+            # Step 7: Log provenance (unless the caller logs it with the IR)
+            if not return_ir:
+                log_download_provenance()
 
             # Step 8: Update queue status to COMPLETED
-            self.data_manager.download_queue.update_status(
-                entry_id, DownloadStatus.COMPLETED, modality_name=modality_name
-            )
+            try:
+                self.data_manager.download_queue.update_status(
+                    entry_id, DownloadStatus.COMPLETED, modality_name=modality_name
+                )
+            except Exception:
+                # The modality is already stored. If the caller was to log it,
+                # it never receives the IR now, so record provenance here
+                # rather than leave stored data without any.
+                if return_ir:
+                    log_download_provenance()
+                raise
             logger.info(
                 f"Download completed successfully for entry '{entry_id}' → '{modality_name}'"
             )
 
+            if return_ir:
+                return modality_name, stats, ir
             return modality_name, stats
 
         except Exception as e:

@@ -165,8 +165,11 @@ class NotebookExporter:
         # Add parameters cell (Papermill-tagged)
         notebook.cells.append(self._create_parameters_cell(irs))
 
-        # Add data loading cell unless a download activity provides its own load
-        if not self._has_download_activity(exportable_pairs):
+        # Initialize ML bindings once per run, on mutually exclusive input paths.
+        # Self-loading roots supply their own load but still need a run boundary.
+        if self._has_download_activity(exportable_pairs):
+            notebook.cells.append(self._create_ml_run_reset_cell())
+        else:
             notebook.cells.append(self._create_data_loading_cell())
 
         # Convert exportable (activity, IR) pairs to code cells
@@ -185,7 +188,7 @@ class NotebookExporter:
             notebook.cells.append(code_cell)
 
         # Add data saving cell
-        notebook.cells.append(self._create_data_saving_cell())
+        notebook.cells.append(self._create_data_saving_cell(irs))
 
         # Add provenance summary cell (explains what's in notebook vs provenance)
         notebook.cells.append(
@@ -391,7 +394,15 @@ class NotebookExporter:
             "pride.download.download_dataset",
             "metabolights.download.download_dataset",
         }
-        return any(ir.operation in download_ops for _, ir in exportable_pairs)
+        if any(ir.operation in download_ops for _, ir in exportable_pairs):
+            return True
+        # Steps that build adata from a file themselves replace the generic
+        # load only when they come first; a later one must not remove the
+        # input load that the earlier cells depend on.
+        self_loading_ops = {"peptidomics.import_sequences"}
+        return bool(exportable_pairs) and (
+            exportable_pairs[0][1].operation in self_loading_ops
+        )
 
     def _create_header_cell(
         self, name: str, description: str, n_irs: int
@@ -671,6 +682,16 @@ random_seed = 42              # Random seed for reproducibility
 
         return cell
 
+    def _create_ml_run_reset_cell(self) -> NotebookNode:
+        """Reset the ML-only named-input stopgap at the initial input boundary."""
+        return new_code_cell(
+            "# Reset ML notebook bindings for this run's initial input\n"
+            "lobster_modalities = {}\n"
+            "lobster_registered = {}\n"
+            "lobster_epoch = 0\n"
+            "globals().pop('lobster_last_output', None)\n"
+        )
+
     def _create_data_loading_cell(self) -> NotebookNode:
         """
         Create cell for loading input data using IR if available.
@@ -678,6 +699,10 @@ random_seed = 42              # Random seed for reproducibility
         Returns:
             Code cell with data loading code
         """
+        # Only the initial input is a run boundary. Individual analysis cells
+        # and later in-run imports must retain their ambiguity protection.
+        ml_reset = "\n" + self._create_ml_run_reset_cell().source
+
         # Try to find data loading IR from provenance
         for activity in self.provenance.activities:
             tool_name = activity.get("type", "")
@@ -691,7 +716,7 @@ random_seed = 42              # Random seed for reproducibility
                             ir = AnalysisStep.from_dict(ir_obj)
                         code = ir.render()
                         logger.debug("Using IR for data loading cell")
-                        return new_code_cell(code)
+                        return new_code_cell(code + ml_reset)
                     except Exception as e:
                         logger.warning(f"Failed to use IR for data loading: {e}")
 
@@ -703,19 +728,45 @@ import anndata as ad
 adata = ad.read_h5ad(input_data)
 print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
 """
-        return new_code_cell(code)
+        return new_code_cell(code + ml_reset)
 
-    def _create_data_saving_cell(self) -> NotebookNode:
+    def _create_data_saving_cell(
+        self, emitted_irs: Optional[List[AnalysisStep]] = None
+    ) -> NotebookNode:
         """
         Create cell for saving output data using IR if available.
 
         Returns:
             Code cell with data saving code
         """
+        # create_ml_splits explicitly writes its split objects. Its save_dataset
+        # records precede the split activity at runtime; rendering their generic
+        # `adata` saver here would overwrite the last split with the parent (or
+        # with a later analysis output). Only selected, saving split IRs qualify.
+        split_saves = set()
+        for emitted_ir in emitted_irs or []:
+            if (
+                emitted_ir.tool_name == "create_ml_splits"
+                and emitted_ir.parameters.get("save_result") is True
+            ):
+                parent = emitted_ir.parameters["modality_name"]
+                names = [f"{parent}_train", f"{parent}_test"]
+                if emitted_ir.parameters["validation_size"] > 0:
+                    names.append(f"{parent}_validation")
+                split_saves.update((name, f"{name}.h5ad") for name in names)
+
         # Try to find data saving IR from provenance
         for activity in reversed(self.provenance.activities):  # Check most recent first
             tool_name = activity.get("type", "")
             if tool_name == "save_dataset":
+                saved = activity.get("parameters", {})
+                if (
+                    saved.get("name"),
+                    Path(saved.get("path") or "").name,
+                ) in split_saves:
+                    # All requested split artifacts already exist. Save final
+                    # adata only under the honest generic `_processed` filename.
+                    break
                 ir_obj = activity.get("ir")
                 if ir_obj:
                     try:

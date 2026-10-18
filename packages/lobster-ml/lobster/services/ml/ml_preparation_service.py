@@ -27,6 +27,46 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Exported notebooks pass one ``adata`` from cell to cell, but ML steps work on
+# named modalities (a dataset, its splits, their features). ML IR cells keep
+# them in ``lobster_modalities``. Each ML cell first checks whether a non-ML
+# cell has rebound ``adata`` since the last ML cell; if so it starts a new
+# epoch, and every name registered in an earlier epoch is refused (it may or
+# may not still mean the same data) until an ML cell registers it again.
+# The exporter's input-load cell resets this stopgap once per notebook run.
+# Only the first input can bind an unregistered name to loaded ``adata``;
+# later inputs must already have been produced/registered by this run.
+ML_NOTEBOOK_BINDINGS = (
+    "lobster_modalities = globals().setdefault('lobster_modalities', {})\n"
+    "lobster_registered = globals().setdefault('lobster_registered', {})\n"
+    "lobster_epoch = globals().get('lobster_epoch', 0)\n"
+    "if 'lobster_last_output' in globals() and lobster_last_output is not adata:\n"
+    "    lobster_epoch += 1  # a non-ML cell rebound adata\n"
+    "def lobster_register(name, value):\n"
+    "    lobster_modalities[name] = value\n"
+    "    lobster_registered[name] = lobster_epoch\n"
+    "def lobster_lookup(name):\n"
+    "    known = lobster_modalities.get(name)\n"
+    "    if known is None or known is adata:\n"
+    "        return known\n"
+    "    if lobster_registered.get(name, -1) < lobster_epoch:\n"
+    "        raise ValueError(\n"
+    "            f'Ambiguous input {name!r}: a non-ML step changed adata after this '\n"
+    "            'modality was registered, so replay cannot tell which data it used.'\n"
+    "        )\n"
+    "    return known\n"
+    "def lobster_input(name):\n"
+    "    known = lobster_lookup(name)\n"
+    "    if known is None and lobster_modalities:\n"
+    "        raise ValueError(\n"
+    "            f'Unregistered ML input {name!r}: this notebook did not load or '\n"
+    "            'produce that modality; refusing to reuse the current adata.'\n"
+    "        )\n"
+    "    value = adata if known is None else known\n"
+    "    lobster_register(name, value)\n"
+    "    return value\n"
+)
+
 
 class MLPreparationService:
     """
@@ -897,6 +937,227 @@ print(f"Recommendations: {recommendations}")
                 "timestamp": datetime.now().isoformat(),
             },
         )
+
+    # =========================================================================
+    # PUBLIC API: Agent feature preparation (selection, zero handling, scaling)
+    # =========================================================================
+
+    def select_ml_features(
+        self,
+        adata: "AnnData",
+        modality_name: str,
+        feature_selection: str = "highly_variable",
+        n_features: int = 2000,
+        scale: bool = True,
+        handle_zeros: str = "keep",
+        split_binding: Optional[Dict[str, str]] = None,
+    ) -> Tuple["AnnData", Dict[str, Any], AnalysisStep]:
+        """
+        Select, clean and scale features for ML, as the ML expert's
+        ``prepare_ml_features`` tool does.
+
+        Args:
+            adata: AnnData object to process (not modified)
+            modality_name: Name of the source modality (recorded in uns)
+            feature_selection: "highly_variable", "pca", "all" or "marker_genes"
+            n_features: Number of features to select
+            scale: Z-score each feature (scanpy ``pp.scale``)
+            handle_zeros: "keep", "remove" (drop features >=90% zeros) or
+                "impute" (replace zeros with the feature's non-zero mean)
+            split_binding: For a split made by create_ml_splits, its tag
+                ({"modality", "split", "split_id"}). Only affects the IR: the
+                notebook passes one ``adata`` along, so the IR takes this exact
+                split from the notebook's ``lobster_modalities`` and refuses
+                to run if it is not there.
+
+        Returns:
+            Tuple of (ml_ready_adata, stats, AnalysisStep). The IR calls this
+            method again, so a notebook reproduces the same feature matrix.
+        """
+        import anndata
+
+        adata_ml = adata.copy()
+
+        if feature_selection == "highly_variable":
+            try:
+                import scanpy as sc
+
+                if "highly_variable" not in adata_ml.var.columns:
+                    sc.pp.highly_variable_genes(adata_ml, n_top_genes=n_features)
+                adata_ml = adata_ml[:, adata_ml.var.highly_variable]
+            except ImportError:
+                variances = np.var(adata_ml.X, axis=0)
+                if hasattr(variances, "A1"):
+                    variances = variances.A1
+                top_var_indices = np.argsort(variances)[-n_features:]
+                adata_ml = adata_ml[:, top_var_indices]
+
+        elif feature_selection == "pca":
+            try:
+                import scanpy as sc
+
+                if "X_pca" not in adata_ml.obsm:
+                    sc.pp.pca(adata_ml, n_comps=min(n_features, adata_ml.shape[1] - 1))
+                pca_data = adata_ml.obsm["X_pca"][:, :n_features]
+                adata_ml = anndata.AnnData(
+                    X=pca_data,
+                    obs=adata_ml.obs.copy(),
+                    var=pd.DataFrame(
+                        index=[f"PC{i + 1}" for i in range(pca_data.shape[1])]
+                    ),
+                )
+            except ImportError:
+                logger.warning(
+                    "Scanpy not available, using variance-based selection instead of PCA"
+                )
+                variances = np.var(adata_ml.X, axis=0)
+                if hasattr(variances, "A1"):
+                    variances = variances.A1
+                top_var_indices = np.argsort(variances)[-n_features:]
+                adata_ml = adata_ml[:, top_var_indices]
+
+        elif feature_selection == "marker_genes":
+            if "rank_genes_groups" in adata_ml.uns:
+                marker_genes = []
+                groups_key = adata_ml.uns["rank_genes_groups"]["params"]["groupby"]
+                for group in adata_ml.obs[groups_key].unique():
+                    genes = adata_ml.uns["rank_genes_groups"]["names"][group][
+                        : n_features // 10
+                    ]
+                    marker_genes.extend(genes)
+                # Sorted so the selected features do not depend on set ordering.
+                marker_genes = sorted(set(marker_genes))[:n_features]
+                available_markers = [g for g in marker_genes if g in adata_ml.var_names]
+                if available_markers:
+                    adata_ml = adata_ml[:, available_markers]
+                else:
+                    logger.warning("No marker genes found, using highly variable genes")
+            else:
+                logger.warning("No marker genes found, using highly variable genes")
+
+        if handle_zeros == "remove":
+            from scipy.sparse import issparse
+
+            if hasattr(adata_ml.X, "nnz"):
+                X_csc = adata_ml.X.tocsc() if issparse(adata_ml.X) else adata_ml.X
+                non_zeros_per_col = np.diff(X_csc.indptr)
+                zero_prop = 1.0 - (non_zeros_per_col / adata_ml.shape[0])
+            else:
+                zero_prop = np.mean(adata_ml.X == 0, axis=0)
+                if hasattr(zero_prop, "A1"):
+                    zero_prop = zero_prop.A1
+            adata_ml = adata_ml[:, zero_prop < 0.9]
+
+        elif handle_zeros == "impute":
+            X_dense = (
+                adata_ml.X.toarray() if hasattr(adata_ml.X, "toarray") else adata_ml.X.copy()
+            )
+            for j in range(X_dense.shape[1]):
+                col = X_dense[:, j]
+                if np.any(col == 0):
+                    non_zero_mean = np.mean(col[col != 0]) if np.any(col != 0) else 0
+                    col[col == 0] = non_zero_mean
+                    X_dense[:, j] = col
+            adata_ml.X = X_dense
+
+        if scale:
+            try:
+                import scanpy as sc
+
+                sc.pp.scale(adata_ml, zero_center=True)
+            except ImportError:
+                X_dense = (
+                    adata_ml.X.toarray()
+                    if hasattr(adata_ml.X, "toarray")
+                    else adata_ml.X.copy()
+                )
+                X_dense = (X_dense - np.mean(X_dense, axis=0)) / (
+                    np.std(X_dense, axis=0) + 1e-8
+                )
+                adata_ml.X = X_dense
+
+        if adata_ml.is_view:  # feature subsetting returns a view
+            adata_ml = adata_ml.copy()
+        # Derived features are not the split they came from: drop the
+        # inherited split tag so it cannot vouch for them later.
+        adata_ml.uns.pop("ml_split_source", None)
+        adata_ml.uns["ml_preprocessing"] = {
+            "source_modality": modality_name,
+            "feature_selection": feature_selection,
+            "n_features_selected": adata_ml.shape[1],
+            "scaled": scale,
+            "zero_handling": handle_zeros,
+            "original_shape": list(adata.shape),  # a tuple cannot be written to h5ad
+        }
+
+        stats = {
+            "source_modality": modality_name,
+            "original_shape": adata.shape,
+            "processed_shape": adata_ml.shape,
+            "n_features_selected": int(adata_ml.shape[1]),
+        }
+
+        params = {
+            "modality_name": modality_name,
+            "feature_selection": feature_selection,
+            "n_features": n_features,
+            "scale": scale,
+            "handle_zeros": handle_zeros,
+        }
+        registry = ML_NOTEBOOK_BINDINGS
+        split_prelude = "adata = lobster_input({{ modality_name | repr }})\n"
+        if split_binding:
+            split_prelude = (
+                "# This step ran on one split from create_ml_splits. Take exactly\n"
+                "# that split, so replay never prepares features on other samples.\n"
+                "split_view = lobster_lookup({{ split_modality | repr }})\n"
+                "split_tag = adata.uns.get('ml_split_source', {})\n"
+                "if split_view is None and not lobster_modalities and split_tag.get('modality') == {{ split_modality | repr }}:\n"
+                "    split_view = adata  # the split itself was loaded as input\n"
+                "if split_view is None or (\n"
+                "    split_view.uns.get('ml_split_source', {}).get('split_id')\n"
+                "    != {{ split_id | repr }}\n"
+                "):\n"
+                "    raise ValueError(\n"
+                "        'Feature preparation needs split ' + {{ split_modality | repr }}\n"
+                "        + ' from its create_ml_splits step, which this notebook did not produce.'\n"
+                "    )\n"
+                "lobster_register({{ split_modality | repr }}, split_view)\n"
+                "adata = split_view\n"
+            )
+        ir_parameters = {
+            **params,
+            "split_modality": split_binding["modality"] if split_binding else None,
+            "split_id": split_binding["split_id"] if split_binding else None,
+            "output_modality": f"{modality_name}_ml_features",
+        }
+        ir = AnalysisStep(
+            operation="lobster.ml.select_ml_features",
+            tool_name="prepare_ml_features",
+            description=(
+                f"Prepare ML features ({feature_selection}, n={n_features}, "
+                f"scale={scale}, zeros={handle_zeros})"
+            ),
+            library="lobster",
+            code_template=(
+                "from lobster.services.ml.ml_preparation_service import MLPreparationService\n"
+                "\n"
+                + registry
+                + split_prelude
+                + "adata, ml_feature_stats, _ = MLPreparationService().select_ml_features(\n"
+                "    adata,\n"
+                + "".join(f"    {k}={{{{ {k} | repr }}}},\n" for k in params)
+                + ")\n"
+                + "lobster_register({{ output_modality | repr }}, adata)\n"
+                + "lobster_last_output = adata"
+            ),
+            imports=[],
+            parameters=ir_parameters,
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=["adata"],
+        )
+        return adata_ml, stats, ir
 
     def _create_feature_prep_ir(
         self,
