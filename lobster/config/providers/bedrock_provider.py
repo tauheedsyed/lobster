@@ -20,7 +20,7 @@ Example:
 
 import logging
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 from lobster.config.providers.base_provider import ILLMProvider, ModelInfo
 
@@ -349,7 +349,7 @@ class BedrockProvider(ILLMProvider):
         self,
         model_id: str,
         temperature: float = 1.0,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -358,7 +358,8 @@ class BedrockProvider(ILLMProvider):
         Args:
             model_id: Bedrock model ID (e.g., "anthropic.claude-sonnet-4-20250514-v1:0")
             temperature: Sampling temperature (0.0-2.0, default: 1.0)
-            max_tokens: Maximum tokens in response (default: 4096)
+            max_tokens: Maximum tokens in response. Default None sends no limit,
+                so Bedrock applies the model's own maximum.
             **kwargs: Additional parameters:
                 - region_name: AWS region (default: us-east-1)
                 - aws_access_key_id: Override AWS access key

@@ -68,7 +68,8 @@ class LLMFactory:
         Args:
             model_config: Configuration dictionary with model parameters
                 - temperature: float (default: 1.0)
-                - max_tokens: int (default: 4096)
+                - max_tokens: int (optional; when absent the provider applies
+                  its own default, and Bedrock sends no limit)
                 - model_id: str (optional, can be overridden)
             agent_name: Optional agent name for logging and per-agent config
             provider_override: Explicit provider name from CLI flag
@@ -150,7 +151,15 @@ class LLMFactory:
 
         # Extract parameters
         temperature = model_config.get("temperature", 1.0)
-        max_tokens = model_config.get("max_tokens", 4096)
+        model_params: Dict[str, Any] = {
+            "model_id": model_id,
+            "temperature": temperature,
+        }
+        # Forward an output-token limit only when the config sets one. Otherwise each
+        # provider applies its own default; Bedrock sends no limit, so the model's
+        # maximum applies (a factory-wide default would cap every Bedrock request).
+        if "max_tokens" in model_config:
+            model_params["max_tokens"] = model_config["max_tokens"]
 
         # Extract additional model request fields (thinking config, etc.)
         additional_fields = model_config.get("additional_model_request_fields", {})
@@ -160,9 +169,7 @@ class LLMFactory:
         # - Bedrock: thinking config via additional_model_request_fields
         # - Anthropic: extended thinking via additional_model_request_fields
         return provider.create_chat_model(
-            model_id=model_id,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **model_params,
             **additional_fields,  # Pass thinking config and other provider-specific params
         )
 

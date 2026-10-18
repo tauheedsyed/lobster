@@ -117,9 +117,10 @@ class OmicsOSProvider(ILLMProvider):
         self,
         model_id: str,
         temperature: float = 1.0,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
+        # max_tokens=None sends no output limit: Bedrock applies the model maximum.
         from lobster.config.credentials import get_api_key, get_endpoint
         from lobster.config.providers.bedrock_builder import build_bedrock_converse
         from lobster.config.providers.gateway_bedrock_client import (
