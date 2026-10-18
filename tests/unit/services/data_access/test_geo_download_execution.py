@@ -501,3 +501,85 @@ def test_cached_matrix_first_mtx_preserves_parser_orientation(
             info["transpose_applied"] == "False"
         ), "No executor-level second transpose"
         assert info["parser_transpose_applied"] == "True"
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {},
+        None,
+        "not-a-contract",
+        {"source_format": "unsupported", "orientation": "unoriented"},
+        {"source_format": "tabular", "orientation": "cells_by_genes"},
+        {
+            "source_format": "matrix_market",
+            "orientation": "unoriented",
+            "parser_transpose_applied": True,
+        },
+        {
+            "source_format": "matrix_market",
+            "orientation": "cells_by_genes",
+            "parser_transpose_applied": False,
+        },
+        {"source_format": "matrix_market", "orientation": "cells_by_genes"},
+        {
+            "source_format": "matrix_market",
+            "orientation": "cells_by_genes",
+            "parser_transpose_applied": "True",
+        },
+    ],
+    ids=[
+        "missing",
+        "null",
+        "non-dict",
+        "unsupported-source",
+        "unsupported-tabular-orientation",
+        "unsupported-mtx-orientation",
+        "mtx-parser-false",
+        "mtx-parser-absent",
+        "mtx-parser-string",
+    ],
+)
+def test_cached_invalid_format_contract_refuses_before_loading(
+    tmp_path, monkeypatch, contract
+):
+    """Fault-inject only the parser→producer contract, keeping the real data path."""
+    import numpy as np
+    import pandas as pd
+
+    from lobster.services.data_access.geo.constants import GEOServiceError
+    from lobster.services.data_access.geo.strategy import PipelineType
+
+    source = pd.DataFrame(
+        np.arange(9600).reshape(120, 80),
+        index=[f"ENSG{i:011d}" for i in range(120)],
+        columns=[f"bc_cell_{i}" for i in range(80)],
+    )
+    dm, service, geo_id = _cached_processed_matrix(
+        tmp_path, source, ".tsv", "polars", monkeypatch
+    )
+    real_parse = service.geo_parser.parse_expression_file
+
+    def parse_with_invalid_contract(path):
+        result = real_parse(path)
+        assert (
+            result.is_complete
+        ), "Fault injection must retain a genuinely parsed matrix"
+        result.data.attrs["geo_matrix_contract"] = contract
+        return result
+
+    monkeypatch.setattr(
+        service.geo_parser, "parse_expression_file", parse_with_invalid_contract
+    )
+    with pytest.raises(
+        GEOServiceError, match="[Aa]mbiguous.*orientation.*(?:parser|contract)"
+    ):
+        service.download_dataset(
+            geo_id,
+            adapter="transcriptomics_single_cell",
+            manual_strategy_override=PipelineType.MATRIX_FIRST,
+        )
+    assert not dm.list_modalities(), "Invalid contract must refuse before registration"
+    assert not list(
+        dm.workspace_path.rglob("*.h5ad")
+    ), "Refusal must not save raw or autosaved modalities"
