@@ -10,7 +10,7 @@ def build_bedrock_converse(
     *,
     model_id: str,
     temperature: float = 1.0,
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = None,
     client: Any = None,
     bedrock_client: Any = None,
     region_name: Optional[str] = None,
@@ -26,6 +26,10 @@ def build_bedrock_converse(
     - Gateway path: pass `client` (runtime) + `bedrock_client` (control stub)
     - Direct AWS path: pass AWS credentials + region
 
+    ``max_tokens`` is an optional output-token limit. When it is ``None`` (the
+    default) no limit is sent and Bedrock applies the model's own maximum; an
+    explicit value is forwarded unchanged.
+
     Returns:
         ChatBedrockConverse instance with full tool calling support
     """
@@ -34,8 +38,13 @@ def build_bedrock_converse(
     params: dict[str, Any] = {
         "model_id": model_id,
         "temperature": temperature,
-        "max_tokens": max_tokens,
     }
+
+    # Send an output-token limit only when the caller asks for one. Without it
+    # Bedrock applies the model's own maximum, whereas a built-in default would
+    # silently cap every call (and sit below extended-thinking budgets).
+    if max_tokens is not None:
+        params["max_tokens"] = max_tokens
 
     # Gateway path: inject pre-built clients
     if client is not None:
