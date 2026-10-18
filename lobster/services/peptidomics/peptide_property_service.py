@@ -183,11 +183,15 @@ class PeptidePropertyService:
             tool_name="calculate_peptide_properties",
             description=f"Computed {len(all_props)} physicochemical properties for {n_seqs} peptides",
             library="peptides",
-            imports=["from peptides import Peptide"],
+            imports=[
+                "from lobster.services.peptidomics.peptide_property_service import PeptidePropertyService"
+            ],
             code_template=(
-                "from peptides import Peptide\n"
-                "props = [Peptide(seq).molecular_weight() for seq in adata.obs['{{ sequence_col }}']]\n"
-                "adata.obs['peptide_molecular_weight'] = props"
+                "from lobster.services.peptidomics.peptide_property_service import PeptidePropertyService\n"
+                "adata, _property_stats, _property_ir = PeptidePropertyService().calculate_properties(\n"
+                "    adata, sequence_col={{ sequence_col | repr }},\n"
+                "    properties={{ properties | repr }},\n"
+                ")"
             ),
             parameters={
                 "sequence_col": sequence_col,

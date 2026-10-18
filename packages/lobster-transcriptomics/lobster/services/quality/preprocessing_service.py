@@ -280,8 +280,15 @@ print(f"After filtering: {adata.n_obs} cells × {adata.n_vars} genes")
 adata.raw = adata.copy()
 sc.pp.normalize_total(adata, target_sum={{ target_sum }})
 sc.pp.log1p(adata)
+{% if normalization_method == "sctransform_like" %}
+sc.pp.scale(adata, max_value=10)
+{% endif %}
 
+{% if normalization_method == "sctransform_like" %}
+print(f"Normalization complete (target_sum={{ target_sum }}, log1p transformed, scaled)")
+{% else %}
 print(f"Normalization complete (target_sum={{ target_sum }}, log1p transformed)")
+{% endif %}
 """
 
         return AnalysisStep(

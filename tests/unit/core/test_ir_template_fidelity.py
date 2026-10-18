@@ -243,3 +243,135 @@ def test_annotation_template_is_not_a_stub():
     assert "annotate_cell_types(" in code
     # And it must pass the resolved cluster key through.
     assert "leiden_res1_0" in code
+
+
+def _replay(ir, source):
+    """Execute only generated analysis code on an isolated synthetic object."""
+    import numpy as np
+    import scanpy as sc
+
+    namespace = {"adata": source.copy(), "np": np, "sc": sc}
+    for helper in ir.helper_code or []:
+        exec(helper, namespace)  # nosec B102: trusted IR on synthetic fixtures
+    exec(ir.render(), namespace)  # nosec B102: trusted IR on synthetic fixtures
+    return namespace["adata"]
+
+
+@pytest.mark.parametrize("method", ["log1p", "sctransform_like"])
+@pytest.mark.parametrize("sparse_input", [False, True])
+def test_filter_normalization_replay_matches_live(method, sparse_input):
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    from scipy import sparse
+
+    counts = np.array(
+        [
+            [1, 5, 3, 2],
+            [3, 1, 4, 9],
+            [2, 2, 8, 1],
+            [9, 3, 1, 5],
+            [4, 7, 2, 3],
+            [1, 4, 6, 7],
+        ],
+        dtype=float,
+    )
+    source = ad.AnnData(
+        X=sparse.csr_matrix(counts) if sparse_input else counts,
+        var=pd.DataFrame(index=["MT-ND1", "RPS1", "CD3D", "MS4A1"]),
+    )
+    live, _, ir = PreprocessingService().filter_and_normalize_cells(
+        source,
+        min_genes_per_cell=1,
+        max_genes_per_cell=10,
+        min_cells_per_gene=1,
+        max_mito_percent=100,
+        max_ribo_percent=100,
+        normalization_method=method,
+        target_sum=100,
+    )
+    replay = _replay(ir, source)
+    dense = lambda x: x.toarray() if sparse.issparse(x) else np.asarray(x)
+    np.testing.assert_allclose(dense(replay.X), dense(live.X))
+    np.testing.assert_allclose(dense(replay.raw.X), dense(live.raw.X))
+    pd.testing.assert_frame_equal(replay.obs, live.obs)
+    pd.testing.assert_index_equal(replay.var_names, live.var_names)
+
+
+@pytest.mark.parametrize("sparse_input", [False, True])
+@pytest.mark.parametrize(
+    "branch", ["cpm", "deseq2_layer", "deseq2_fallback", "vst_layer", "vst_fallback"]
+)
+def test_bulk_normalization_replay_matches_live(branch, sparse_input, monkeypatch):
+    """Force both supported pyDESeq2 layer layouts, not just the default one."""
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    import pydeseq2.dds
+    from scipy import sparse
+
+    from lobster.services.analysis.bulk_preprocessing_service import (
+        BulkPreprocessingService,
+    )
+
+    class Dataset:
+        def __init__(self, counts, metadata, design):
+            assert design == "~1"
+            self.obs = pd.DataFrame(
+                {"size_factors": [2.0, 4.0, 1.0]}, index=counts.index
+            )
+            self.layers = {}
+            if branch.endswith("_layer"):
+                # Distinct from counts / size_factors: ensure the layer wins.
+                self.layers["normed_counts"] = counts.to_numpy() + 10.0
+                self.layers["vst_counts"] = counts.to_numpy() + 20.0
+
+        def fit_size_factors(self):
+            pass
+
+        def fit_genewise_dispersions(self):
+            pass
+
+        def fit_dispersion_trend(self):
+            pass
+
+        def fit_MAP_dispersions(self):
+            pass
+
+        def vst(self):
+            pass
+
+    monkeypatch.setattr(pydeseq2.dds, "DeseqDataSet", Dataset)
+    counts = np.array([[2.5, 4, 8], [8, 4.5, 12], [0, 0, 0]])
+    source = ad.AnnData(X=sparse.csr_matrix(counts) if sparse_input else counts)
+    method = branch.split("_")[0]
+    live, _, ir = BulkPreprocessingService().normalize_counts(
+        source, method=method, target_sum=100
+    )
+    replay = _replay(ir, source)
+    np.testing.assert_allclose(replay.X, live.X)
+    np.testing.assert_array_equal(replay.layers["counts"], live.layers["counts"])
+    pd.testing.assert_frame_equal(replay.obs, live.obs)
+    pd.testing.assert_frame_equal(replay.var, live.var)
+
+
+@pytest.mark.parametrize("method", ["deseq2", "vst"])
+def test_bulk_normalization_real_pydeseq2_replay(method, monkeypatch):
+    import anndata as ad
+    import numpy as np
+    import pydeseq2.dds
+
+    from lobster.services.analysis.bulk_preprocessing_service import (
+        BulkPreprocessingService,
+    )
+
+    dataset = pydeseq2.dds.DeseqDataSet
+    monkeypatch.setattr(
+        pydeseq2.dds, "DeseqDataSet", lambda **kwargs: dataset(**kwargs, n_cpus=1)
+    )
+    counts = np.random.default_rng(41).negative_binomial(5, 0.25, size=(8, 30)) + 1
+    source = ad.AnnData(X=counts.astype(float))
+    live, _, ir = BulkPreprocessingService().normalize_counts(source, method=method)
+    replay = _replay(ir, source)
+    np.testing.assert_allclose(replay.X, live.X)
+    np.testing.assert_array_equal(replay.layers["counts"], live.layers["counts"])

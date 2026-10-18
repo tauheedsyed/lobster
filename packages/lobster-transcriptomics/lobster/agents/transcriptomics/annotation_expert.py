@@ -306,7 +306,10 @@ def annotation_expert(
             "cloud deployment. Use manually_annotate_clusters for direct cluster annotation."
         )
 
-    manually_annotate_clusters_interactive.metadata = {"categories": ["UTILITY"], "provenance": False}
+    manually_annotate_clusters_interactive.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     manually_annotate_clusters_interactive.tags = ["UTILITY"]
 
     @tool
@@ -410,7 +413,10 @@ def annotation_expert(
             logger.error(f"Error in manual annotation: {e}")
             return f"Error applying manual annotations: {str(e)}"
 
-    manually_annotate_clusters.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    manually_annotate_clusters.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     manually_annotate_clusters.tags = ["ANNOTATE"]
 
     @tool
@@ -453,11 +459,13 @@ def annotation_expert(
                 return f"Invalid cluster IDs: {invalid_clusters}. Available: {sorted(unique_clusters)}"
 
             # Create collapsed annotation
-            adata_copy, collapse_stats, ir = manual_annotation_service.collapse_clusters(
-                adata,
-                cluster_key=cluster_key,
-                cluster_list=cluster_list,
-                cell_type_name=cell_type_name,
+            adata_copy, collapse_stats, ir = (
+                manual_annotation_service.collapse_clusters(
+                    adata,
+                    cluster_key=cluster_key,
+                    cluster_list=cluster_list,
+                    cell_type_name=cell_type_name,
+                )
             )
             total_cells_collapsed = collapse_stats["n_cells_collapsed"]
 
@@ -509,7 +517,10 @@ def annotation_expert(
             logger.error(f"Error collapsing clusters: {e}")
             return f"Error collapsing clusters: {str(e)}"
 
-    collapse_clusters_to_celltype.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    collapse_clusters_to_celltype.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     collapse_clusters_to_celltype.tags = ["ANNOTATE"]
 
     @tool
@@ -561,11 +572,13 @@ def annotation_expert(
                 return f"Invalid cluster IDs: {invalid_clusters}. Available: {sorted(unique_clusters)}"
 
             # Mark (and optionally remove) debris clusters
-            adata_copy, debris_stats, ir = manual_annotation_service.mark_debris_clusters(
-                adata,
-                cluster_key=cluster_key,
-                debris_clusters=debris_clusters,
-                remove_debris=remove_debris,
+            adata_copy, debris_stats, ir = (
+                manual_annotation_service.mark_debris_clusters(
+                    adata,
+                    cluster_key=cluster_key,
+                    debris_clusters=debris_clusters,
+                    remove_debris=remove_debris,
+                )
             )
             total_debris_cells = debris_stats["n_debris_cells"]
 
@@ -820,7 +833,10 @@ def annotation_expert(
             logger.error(f"Error reviewing annotations: {e}")
             return f"Error reviewing annotation assignments: {str(e)}"
 
-    review_annotation_assignments.metadata = {"categories": ["UTILITY"], "provenance": False}
+    review_annotation_assignments.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     review_annotation_assignments.tags = ["UTILITY"]
 
     @tool
@@ -959,7 +975,10 @@ def annotation_expert(
             logger.error(f"Error applying annotation template: {e}")
             return f"Error applying annotation template: {str(e)}"
 
-    apply_annotation_template.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    apply_annotation_template.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     apply_annotation_template.tags = ["ANNOTATE"]
 
     @tool
@@ -1086,7 +1105,10 @@ Use this mapping to apply consistent annotations to similar datasets."""
             logger.error(f"Error exporting annotation mapping: {e}")
             return f"Error exporting annotation mapping: {str(e)}"
 
-    export_annotation_mapping.metadata = {"categories": ["UTILITY"], "provenance": False}
+    export_annotation_mapping.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     export_annotation_mapping.tags = ["UTILITY"]
 
     @tool
@@ -1229,7 +1251,10 @@ Use this mapping to apply consistent annotations to similar datasets."""
             logger.error(f"Error importing annotation mapping: {e}")
             return f"Error importing annotation mapping: {str(e)}"
 
-    import_annotation_mapping.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    import_annotation_mapping.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     import_annotation_mapping.tags = ["ANNOTATE"]
 
     # -------------------------
@@ -1335,7 +1360,7 @@ Use this mapping to apply consistent annotations to similar datasets."""
                     "sc.tl.score_genes(\n"
                     "    adata,\n"
                     "    gene_list={{ gene_list }},\n"
-                    '    score_name="{{ score_name }}",\n'
+                    '    score_name={% if score_name.isidentifier() %}"{{ score_name }}"{% else %}{{ score_name | repr }}{% endif %},\n'
                     "    ctrl_size={{ ctrl_size }},\n"
                     "    use_raw={{ use_raw }},\n"
                     ")"
@@ -1737,7 +1762,10 @@ Use this mapping to apply consistent annotations to similar datasets."""
             logger.error(f"Unexpected error in semantic cell type annotation: {e}")
             return f"Unexpected error in semantic annotation: {str(e)}"
 
-    annotate_cell_types_semantic.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    annotate_cell_types_semantic.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     annotate_cell_types_semantic.tags = ["ANNOTATE"]
 
     # -------------------------
