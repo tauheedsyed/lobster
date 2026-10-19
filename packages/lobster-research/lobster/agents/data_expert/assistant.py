@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.utils.json_extractor import extract_json_from_text
 from lobster.utils.llm_response_utils import extract_text_from_llm_response
 from lobster.utils.logger import get_logger
@@ -481,6 +481,7 @@ Return only a valid JSON object conforming to the ModalityDetectionResult schema
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"Failed to detect modality using LLM for {geo_id}: {e}",
                 exc_info=True,
@@ -578,6 +579,7 @@ Return only a valid JSON object that conforms to the StrategyConfig schema."""
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"Failed to extract strategy config using LLM for {geo_id}: {e}"
             )

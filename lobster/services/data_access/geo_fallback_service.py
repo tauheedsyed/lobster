@@ -19,10 +19,11 @@ except ImportError:
 
 # Import helper modules for fallback functionality
 
-from lobster.services.data_access.geo.soft_download import pre_download_soft_file
+from lobster.core.exceptions import reraise_inference_refusal
 
 # Import the main service classes and enums
-from lobster.services.data_access.geo_service import GEODataSource, GEOResult
+from lobster.services.data_access.geo.constants import GEODataSource, GEOResult
+from lobster.services.data_access.geo.soft_download import pre_download_soft_file
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -275,16 +276,19 @@ class GEOFallbackService:
                     )
 
             except Exception as e:
+                reraise_inference_refusal(e)
                 logger.warning(f"GEOparse failed for {clean_gsm_id}: {e}")
 
             # Fallback to helper downloader
             try:
                 return self.download_sample_with_helpers(clean_gsm_id)
             except Exception as e:
+                reraise_inference_refusal(e)
                 logger.error(f"Helper download failed for {clean_gsm_id}: {e}")
                 return f"Failed to download sample {clean_gsm_id}: {str(e)}"
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error downloading single-cell sample {gsm_id}: {e}")
             return f"Error downloading single-cell sample {gsm_id}: {str(e)}"
 
@@ -355,6 +359,7 @@ class GEOFallbackService:
                 return f"Failed to download bulk dataset {clean_geo_id}: {result.error_message}"
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error downloading bulk dataset {geo_id}: {e}")
             return f"Error downloading bulk dataset {geo_id}: {str(e)}"
 
@@ -440,6 +445,7 @@ class GEOFallbackService:
 📈 Ready for single-cell analysis!"""
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error processing TAR files for {geo_id}: {e}")
             return f"Error processing TAR files for {geo_id}: {str(e)}"
 
@@ -456,6 +462,7 @@ class GEOFallbackService:
             return f"Helper-based sample download for {gsm_id} not yet implemented. Please use GEOparse method."
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error downloading sample with helpers {gsm_id}: {e}")
             return f"Error downloading sample with helpers {gsm_id}: {str(e)}"
 

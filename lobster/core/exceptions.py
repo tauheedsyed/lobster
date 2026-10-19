@@ -35,6 +35,29 @@ class InferenceRefused(Exception):
         super().__init__(f"Inference refused ({category}).")
 
 
+def reraise_inference_refusal(error: BaseException) -> None:
+    """Preserve a refusal hidden by a wrapper or executor exception group.
+
+    Scientific recovery handlers must call this before logging an exception or
+    returning a fallback. Inspect only typed exception links, never their text.
+    """
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, InferenceRefused):
+            raise current from None
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+
+
 class LobsterCoreError(Exception):
     """Base exception for all Lobster core errors."""
 

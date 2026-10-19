@@ -36,7 +36,7 @@ from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.config.supervisor_config import SupervisorConfig
 from lobster.core.data_manager_v2 import DataManagerV2
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.tools.custom_code_tool import create_execute_custom_code_tool
 from lobster.tools.todo_tools import create_todo_tools
 from lobster.tools.workspace_tool import (
@@ -436,6 +436,31 @@ def _resolve_worker_agents(
     return worker_agents, filtered_out_agents, child_agent_names
 
 
+def _require_factory_parameters(
+    factory: Any, required_parameters: Tuple[str, ...]
+) -> None:
+    """Reject factories that cannot explicitly accept required runtime bindings.
+
+    A catch-all ``**kwargs`` is not a capability declaration: it may silently
+    discard a supplied binding. Validate before executing an installed plugin.
+    """
+    if inspect.iscoroutinefunction(factory):
+        raise InferenceRefused("context")
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        raise InferenceRefused("context") from None
+    supported_kinds = {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
+    if any(
+        name not in parameters or parameters[name].kind not in supported_kinds
+        for name in required_parameters
+    ):
+        raise InferenceRefused("context")
+
+
 def _create_agents_single_pass(
     worker_agents: Dict,
     created_agents: Dict[str, Any],
@@ -537,6 +562,7 @@ def _create_agents_single_pass(
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"Skipping agent '{agent_name}': factory execution failed: {e}"
             )

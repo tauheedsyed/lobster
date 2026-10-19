@@ -11,7 +11,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.services.interaction.component_schemas import (
     COMPONENT_SCHEMAS,
     ComponentSelection,
@@ -149,7 +149,8 @@ def _llm_select_component(
 
     except InferenceRefused:
         raise
-    except Exception:
+    except Exception as error:
+        reraise_inference_refusal(error)
         logger.debug(
             "LLM component selection failed, falling back to text_input",
             exc_info=True,

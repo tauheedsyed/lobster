@@ -50,6 +50,7 @@ from lobster.agents.data_expert.state import DataExpertState
 # Core Lobster imports
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.exceptions import reraise_inference_refusal
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.runtime.workspace import WORKSPACE_FOLDER_NAME
 from lobster.core.schemas.download_queue import DownloadStatus, ValidationStatus
@@ -330,9 +331,7 @@ Dataset: {entry.dataset_id}
 
                 if not modality_name:
                     # Another worker claimed the entry first; nothing was stored.
-                    return (
-                        f"Entry '{entry_id}' is currently being downloaded by another agent"
-                    )
+                    return f"Entry '{entry_id}' is currently being downloaded by another agent"
 
                 # Provenance: logged as soon as the modality is stored.
                 data_manager.log_tool_usage(
@@ -444,6 +443,7 @@ You can now analyze this dataset using the appropriate analysis tools.
                 return response
 
             except Exception as download_error:
+                reraise_inference_refusal(download_error)
                 logger.error(
                     f"Download failed for {entry.dataset_id}: {download_error}"
                 )
@@ -474,6 +474,7 @@ You can now analyze this dataset using the appropriate analysis tools.
                 return response
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error in execute_download_from_queue: {e}")
             return f"Error processing queue entry '{entry_id}': {str(e)}"
 
@@ -1195,11 +1196,19 @@ To save, run again with save_to_file=True"""
 
     # Create filesystem tools for file-level operations (DeepAgent-inspired)
     fs_workspace = _resolve_filesystem_root(data_manager, workspace_path)
-    filesystem_tools = create_filesystem_tools(workspace_path=fs_workspace) if fs_workspace else []
+    filesystem_tools = (
+        create_filesystem_tools(workspace_path=fs_workspace) if fs_workspace else []
+    )
 
     # Create interactive plot tools for general-purpose visualization
-    plot_workspace = fs_workspace or (Path(data_manager.workspace_path) if getattr(data_manager, "workspace_path", None) else None)
-    plot_tools = create_plot_tools(data_manager, plot_workspace) if plot_workspace else []
+    plot_workspace = fs_workspace or (
+        Path(data_manager.workspace_path)
+        if getattr(data_manager, "workspace_path", None)
+        else None
+    )
+    plot_tools = (
+        create_plot_tools(data_manager, plot_workspace) if plot_workspace else []
+    )
 
     base_tools = [
         # CORE (3 tools)

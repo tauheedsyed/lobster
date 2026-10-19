@@ -346,3 +346,65 @@ def test_cached_helper_model_still_passes_native_hook_in_thread(native_model):
     assert caught.value is refusal
     assert len(probe.hooks) == 2
     assert len(probe.sent) == 1
+
+
+def test_legacy_bulk_entry_preserves_native_refusal(native_model, tmp_path):
+    from types import SimpleNamespace
+
+    from lobster.services.data_access.geo_fallback_service import GEOFallbackService
+
+    model, probe, _ = native_model
+    refusal = InferenceRefused("policy")
+    probe.error = refusal
+    service = SimpleNamespace(
+        data_manager=SimpleNamespace(metadata_store={}),
+        cache_dir=tmp_path,
+        console=None,
+        geo_downloader=None,
+        geo_parser=None,
+        fetch_metadata_only=lambda _: model.invoke("hello"),
+    )
+    with pytest.raises(InferenceRefused) as caught:
+        GEOFallbackService(service).download_bulk_dataset("GSE1")
+    assert caught.value is refusal
+    assert len(probe.hooks) == 1
+    assert probe.sent == []
+
+
+def test_legacy_sample_entry_does_not_retry_native_refusal(
+    native_model, monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from lobster.agents.data_expert.assistant import DataExpertAssistant
+    from lobster.services.data_access import geo_fallback_service
+    from lobster.services.data_access.geo.concatenation import SampleConcatenator
+
+    model, probe, _ = native_model
+    refusal = InferenceRefused("budget")
+    probe.error = refusal
+    monkeypatch.setattr(DataExpertAssistant, "llm", property(lambda self: model))
+    gsm = SimpleNamespace(metadata={}, table=pd.DataFrame([[1, 2]]))
+    monkeypatch.setattr(
+        geo_fallback_service, "pre_download_soft_file", lambda *a, **k: None
+    )
+    monkeypatch.setattr(geo_fallback_service.GEOparse, "get_GEO", lambda **k: gsm)
+    service = SimpleNamespace(
+        data_manager=SimpleNamespace(metadata_store={}, workspace_path=tmp_path),
+        cache_dir=tmp_path,
+        console=None,
+        geo_downloader=None,
+        geo_parser=None,
+    )
+    service._store_single_sample_as_modality = SampleConcatenator(
+        service
+    )._store_single_sample_as_modality
+    with pytest.raises(InferenceRefused) as caught:
+        geo_fallback_service.GEOFallbackService(service).download_single_cell_sample(
+            "GSM1"
+        )
+    assert caught.value is refusal
+    assert len(probe.hooks) == 1
+    assert probe.sent == []

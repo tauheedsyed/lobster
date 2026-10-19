@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.utils.logger import get_logger
 
 # Graceful fallback: Import premium DiseaseOntologyService if available
@@ -547,6 +547,7 @@ def extract_disease_with_llm(
     except InferenceRefused:
         raise
     except Exception as e:
+        reraise_inference_refusal(e)
         logger.error(f"LLM extraction failed: {e}")
         return {
             "disease": "unknown",

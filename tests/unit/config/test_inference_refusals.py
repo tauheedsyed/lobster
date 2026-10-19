@@ -248,3 +248,108 @@ def test_data_helper_uses_owning_workspace(monkeypatch, tmp_path):
     assert helper.llm is model
     assert helper.llm is model
     assert requests == [("data_expert_assistant", tmp_path)]
+
+
+@pytest.mark.parametrize("kind", ("cause", "context", "group", "nested_group"))
+def test_wrapped_refusals_survive_helper_recovery(kind):
+    from lobster.agents.data_expert.assistant import DataExpertAssistant
+
+    refusal = InferenceRefused("accounting")
+    wrapped = RuntimeError("Synthetic SDK wrapper")
+    if kind == "cause":
+        wrapped.__cause__ = refusal
+    elif kind == "context":
+        wrapped.__context__ = refusal
+    elif kind == "group":
+        wrapped = ExceptionGroup("Executor errors", [wrapped, refusal])
+    else:
+        wrapped = ExceptionGroup(
+            "Outer executor", [ExceptionGroup("Inner executor", [refusal])]
+        )
+    model, _ = refusing_model(wrapped)
+    helper = DataExpertAssistant()
+    helper._llm = model
+    with pytest.raises(InferenceRefused) as caught:
+        helper.extract_strategy_config({}, "GSE1")
+    assert caught.value is refusal
+    assert caught.value.__suppress_context__ is True
+
+
+def test_refusal_link_cycles_are_safe():
+    from lobster.core.exceptions import reraise_inference_refusal
+
+    ordinary = RuntimeError("Scientific error")
+    ordinary.__cause__ = ordinary
+    assert reraise_inference_refusal(ordinary) is None
+
+
+@pytest.mark.parametrize("streaming", (False, True))
+@pytest.mark.parametrize("wrapped", (False, True))
+def test_client_refusal_remains_typed(streaming, wrapped):
+    from lobster.core.client import AgentClient
+
+    refusal = InferenceRefused("budget")
+    error = RuntimeError("Synthetic wrapper") if wrapped else refusal
+    if wrapped:
+        error.__cause__ = refusal
+    model, runtime = refusing_model(error)
+
+    def stream(*args, **kwargs):
+        model.invoke("hello")
+        return iter(())
+
+    client = AgentClient.__new__(AgentClient)
+    client.graph = SimpleNamespace(stream=stream)
+    with pytest.raises(InferenceRefused) as caught:
+        if streaming:
+            list(client._stream_query({}, {}))
+        else:
+            client._run_query({}, {})
+    assert caught.value is refusal
+    assert runtime.calls == 1
+
+
+def test_explicit_factory_keyword_capability_is_accepted():
+    from lobster.agents.graph import _require_factory_parameters
+
+    def factory(*, runtime, builder):
+        raise AssertionError("Validation must not execute the factory")
+
+    assert _require_factory_parameters(factory, ("runtime", "builder")) is None
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("missing", "catch_all", "positional_only", "variadic", "uninspectable", "async"),
+)
+def test_unsupported_factory_capability_refuses_before_execution(kind):
+    from operator import attrgetter
+
+    from lobster.agents.graph import _require_factory_parameters
+
+    def missing(runtime):
+        raise AssertionError("Validation must not execute the factory")
+
+    def catch_all(**kwargs):
+        raise AssertionError("Validation must not execute the factory")
+
+    def positional_only(runtime, builder, /):
+        raise AssertionError("Validation must not execute the factory")
+
+    def variadic(*runtime, builder):
+        raise AssertionError("Validation must not execute the factory")
+
+    async def async_factory(*, runtime, builder):
+        raise AssertionError("Validation must not execute the factory")
+
+    factories = {
+        "missing": missing,
+        "catch_all": catch_all,
+        "positional_only": positional_only,
+        "variadic": variadic,
+        "uninspectable": attrgetter("builder"),
+        "async": async_factory,
+    }
+    with pytest.raises(InferenceRefused) as caught:
+        _require_factory_parameters(factories[kind], ("runtime", "builder"))
+    assert caught.value.category == "context"

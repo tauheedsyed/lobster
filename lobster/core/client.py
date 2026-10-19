@@ -87,6 +87,7 @@ from lobster.core.archive_utils import (
 # Import component registry (lazy - don't trigger load_components at import time)
 from lobster.core.component_registry import component_registry
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import reraise_inference_refusal
 
 # Extraction cache manager loaded lazily to avoid triggering all agent imports at startup
 _ExtractionCacheManager = None
@@ -551,6 +552,7 @@ class AgentClient(BaseClient):
             return response_data
 
         except Exception as e:
+            reraise_inference_refusal(e)
             # Enhanced error information for better debugging
             return {
                 "success": False,
@@ -872,6 +874,7 @@ class AgentClient(BaseClient):
             }
 
         except Exception as e:
+            reraise_inference_refusal(e)
             is_rate_limit = (
                 "RateLimitError" in type(e).__name__ or "rate limit" in str(e).lower()
             )

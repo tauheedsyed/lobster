@@ -38,7 +38,7 @@ from lobster.config.settings import get_settings
 
 # Premium feature - graceful fallback if unavailable
 from lobster.core.component_registry import component_registry
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.schemas.download_queue import (
     DownloadStatus,
@@ -878,6 +878,7 @@ def research_agent(
                         )
                         return formatted
                     except Exception as e:
+                        reraise_inference_refusal(e)
                         logger.error(f"Error fetching GEO metadata: {e}")
                         return f"Error fetching GEO metadata for {identifier}: {str(e)}"
                 elif database.lower() == "pride":
@@ -1063,6 +1064,7 @@ def research_agent(
                 return formatted
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error extracting metadata: {e}")
             return f"Error extracting metadata for {identifier}: {str(e)}"
 
@@ -1149,6 +1151,7 @@ def research_agent(
                         queue_entries = [result.queue_entry]
 
                     except Exception as e:
+                        reraise_inference_refusal(e)
                         logger.error(
                             f"Failed to add cached dataset {identifier} to download queue: {e}"
                         )
@@ -1320,6 +1323,7 @@ def research_agent(
                                 report += f"2. Hand off to data_expert with entry_id: `{entry_id}`\n"
 
                             except Exception as e:
+                                reraise_inference_refusal(e)
                                 logger.error(
                                     f"Failed to add {identifier} to download queue: {e}"
                                 )
@@ -1477,6 +1481,7 @@ def research_agent(
             return "\n".join(report_parts)
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Failed to prepare download for {accession}: {e}")
             return f"Error preparing download for '{accession}': {str(e)}"
 
@@ -2099,6 +2104,7 @@ Could not extract content for: {identifier}
             return entry_id
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Failed to create queue entry for {identifier}: {e}")
             raise ValueError(f"Could not fetch metadata for {identifier}: {e}")
 
