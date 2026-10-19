@@ -204,20 +204,26 @@ AUTO_APPLY_CONFIDENCE = 1.0
 # Fields written by the enrichment itself. They are never scanned as input, so a
 # re-run (or a re-imported export) cannot promote its own output, e.g. turn a
 # non-applied ``disease_candidate`` into an applied disease.
-DERIVED_DISEASE_FIELDS = frozenset(
-    {
-        "disease",
-        "disease_original",
-        "disease_source",
-        "disease_confidence",
-        "disease_match_type",
-        "disease_evidence",
-        "disease_candidate",
-        "disease_candidate_confidence",
-        "disease_candidate_source",
-        "enrichment_timestamp",
-    }
+DISEASE_ENRICHMENT_FIELDS = (
+    "disease",
+    "disease_original",
+    "disease_source",
+    "disease_confidence",
+    "disease_match_type",
+    "disease_evidence",
+    "disease_candidate",
+    "disease_candidate_confidence",
+    "disease_candidate_source",
+    "enrichment_timestamp",
 )
+DERIVED_DISEASE_FIELDS = frozenset(DISEASE_ENRICHMENT_FIELDS)
+
+
+def _is_derived_field(name: Any) -> bool:
+    """True for fields written by the enrichment (case-insensitive)."""
+    folded = str(name).casefold()
+    return folded in DERIVED_DISEASE_FIELDS or folded.startswith("disease_candidate")
+
 
 
 def phase1_column_rescan(samples: List[Dict]) -> tuple:
@@ -244,7 +250,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
 
             # Check ALL columns (not just standard ones)
             for col_name, col_value in list(sample.items()):
-                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
+                if not col_value or _is_derived_field(col_name):
                     continue
 
                 col_str = str(col_value)
@@ -321,6 +327,10 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 "healthy volunteer",
                 "healthy donor",
                 "healthy subject",
+                "healthy controls",
+                "healthy volunteers",
+                "healthy donors",
+                "healthy subjects",
                 "non_ibd",
                 "non-ibd",
                 "non ibd",
@@ -377,7 +387,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
 
             # Check ALL columns (not just standard ones)
             for col_name, col_value in list(sample.items()):
-                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
+                if not col_value or _is_derived_field(col_name):
                     continue
 
                 full_text = " ".join(str(col_value).lower().split())
