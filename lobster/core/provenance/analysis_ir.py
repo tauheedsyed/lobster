@@ -626,6 +626,161 @@ print(f"Loaded data: {{adata.n_obs}} cells × {{adata.n_vars}} genes")
     )
 
 
+def _is_plain_literal(value: Any) -> bool:
+    """True if ``value`` is built only from exact str/int/float/bool/None/list/dict.
+
+    Exact types only (subclasses such as NumPy scalars or ``str`` subclasses are
+    rejected), and dict keys must be ``str``. For such values ``_python_literal``
+    yields source that evaluates back to an equal value.
+    """
+    value_type = type(value)
+    if value is None or value_type in (str, int, float, bool):
+        return True
+    if value_type is list:
+        return all(_is_plain_literal(item) for item in value)
+    if value_type is dict:
+        return all(
+            type(key) is str and _is_plain_literal(item) for key, item in value.items()
+        )
+    return False
+
+
+def create_adapter_loading_ir(
+    adapter_name: str,
+    adapter_kwargs: Optional[Dict[str, Any]] = None,
+    input_param_name: str = "input_data",
+    description: str = "Load input data through its modality adapter",
+    file_format: Optional[str] = None,
+) -> AnalysisStep:
+    """
+    Create IR for loading a file through a named modality adapter.
+
+    Adapters change the data on load (metadata, QC columns, preprocessing), so
+    a plain ``read_h5ad`` would start the notebook from a different object than
+    the session. The rendered code calls
+    ``lobster.core.adapters.factory.load_with_adapter``, the same constructor
+    the data manager registers its adapters with.
+
+    The adapter name and keyword arguments are passed as template parameters
+    and rendered with the ``repr`` filter as Python literals. Only plain
+    str/int/float/bool/None/list/dict values are accepted; if any keyword
+    argument is something else, the IR refuses to reproduce the load and its
+    code raises instead of silently loading a different object.
+
+    Args:
+        adapter_name: Registered adapter name (e.g. "transcriptomics_single_cell")
+        adapter_kwargs: Keyword arguments the session passed to ``from_source``
+        input_param_name: Name of the Papermill parameter holding the file path
+        description: Human-readable description of the loading operation
+        file_format: File extension of the loaded file, if known
+
+    Returns:
+        AnalysisStep with the adapter loading code template
+    """
+    if type(adapter_name) is not str:
+        raise TypeError("adapter_name must be a str")
+    if not input_param_name.isidentifier():
+        raise ValueError(f"Invalid input parameter name: {input_param_name!r}")
+
+    adapter_kwargs = dict(adapter_kwargs or {})
+    unrenderable = sorted(
+        str(key)
+        for key, value in adapter_kwargs.items()
+        if type(key) is not str or not _is_plain_literal(value)
+    )
+
+    parameter_schema = {
+        input_param_name: ParameterSpec(
+            param_type="str",
+            papermill_injectable=True,
+            default_value="dataset.h5ad",
+            required=True,
+            validation_rule=(
+                f"{input_param_name}.endswith('.h5ad')"
+                if file_format == "h5ad"
+                else None
+            ),
+            description="Path to input data file",
+        ),
+        "adapter": ParameterSpec(
+            param_type="str",
+            papermill_injectable=False,
+            default_value=adapter_name,
+            required=True,
+            description="Adapter the session loaded the file with",
+        ),
+    }
+    parameters: Dict[str, Any] = {
+        input_param_name: "dataset.h5ad",
+        "adapter": adapter_name,
+    }
+
+    if unrenderable:
+        parameters["unrenderable_kwargs"] = unrenderable
+        code_template = (
+            "# Load input data\n"
+            "# The session loaded this file through the {{ adapter | repr }} adapter\n"
+            "# with arguments that cannot be written as Python literals, so the\n"
+            "# load cannot be reproduced here.\n"
+            "raise NotImplementedError(\n"
+            '    "Input load through adapter {!r} not reproducible: arguments {!r} "\n'
+            '    "are not plain Python literals".format(\n'
+            "        {{ adapter | repr }}, {{ unrenderable_kwargs | repr }}\n"
+            "    )\n"
+            ")\n"
+        )
+    else:
+        parameters["adapter_kwargs"] = adapter_kwargs
+        parameter_schema["adapter_kwargs"] = ParameterSpec(
+            param_type="Dict[str, Any]",
+            papermill_injectable=False,
+            default_value=adapter_kwargs,
+            required=False,
+            description="Keyword arguments the session passed to the adapter",
+        )
+        # input_param_name is a variable reference (validated identifier), not
+        # Jinja2 substitution: it is the Papermill-injected path parameter.
+        code_template = (
+            "# Load input data through the adapter the session used, so the\n"
+            "# notebook starts from the same object (adapters add metadata and\n"
+            "# QC columns on load).\n"
+            "from lobster.core.adapters.factory import load_with_adapter\n"
+            "\n"
+            "adata = load_with_adapter(\n"
+            "    {{ adapter | repr }},\n"
+            f"    {input_param_name},\n"
+            "{% if adapter_kwargs %}"
+            "    **{{ adapter_kwargs | repr }},\n"
+            "{% endif %}"
+            ")\n"
+            'print(f"Loaded data: {adata.n_obs} observations × {adata.n_vars} variables")\n'
+        )
+
+    return AnalysisStep(
+        operation="lobster.core.adapters.factory.load_with_adapter",
+        tool_name="load_dataset",
+        description=description,
+        library="lobster",
+        code_template=code_template,
+        imports=[
+            "import anndata as ad",
+            "from lobster.core.adapters.factory import load_with_adapter",
+        ],
+        parameters=parameters,
+        parameter_schema=parameter_schema,
+        input_entities=["file"],
+        output_entities=["adata"],
+        execution_context={
+            "operation_type": "data_io",
+            "io_direction": "input",
+            "file_format": file_format,
+            "adapter": adapter_name,
+        },
+        validates_on_export=False,  # Data loading doesn't require validation
+        requires_validation=False,
+    )
+
+
 def create_data_saving_ir(
     output_prefix_param: str = "output_prefix",
     filename_suffix: str = "processed",

@@ -24,12 +24,16 @@ from unittest.mock import Mock
 import pandas as pd
 
 from lobster.core.adapters.base import BaseAdapter
+from lobster.core.adapters.factory import create_default_adapters
 from lobster.core.plot_manager import PlotManager
 from lobster.core.provenance.analysis_ir import (
+    create_adapter_loading_ir,
     create_data_loading_ir,
     create_data_saving_ir,
 )
 
+# Adapter classes stay importable from this module for existing callers;
+# default adapters are constructed by lobster.core.adapters.factory.
 # Import TranscriptomicsAdapter conditionally (has optional scanpy dependency)
 try:
     from lobster.core.adapters.transcriptomics_adapter import TranscriptomicsAdapter
@@ -662,75 +666,15 @@ class DataManagerV2:
             self.register_backend("mudata", MuDataBackend(base_path=self.data_dir))
 
     def _register_default_adapters(self) -> None:
-        """Register default modality adapters."""
-        # Phase 1: Discover adapters from entry points
-        try:
-            from lobster.core.component_registry import component_registry
+        """Register default modality adapters.
 
-            for name, adapter_factory in component_registry.list_adapters().items():
-                try:
-                    adapter = adapter_factory()
-                    self.register_adapter(name, adapter)
-                    logger.debug(f"Registered adapter '{name}' from entry point")
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to load adapter '{name}' from entry point: {e}"
-                    )
-        except Exception as e:
-            logger.debug(f"Entry point adapter discovery skipped: {e}")
-
-        # Phase 2: Hardcoded fallbacks (only register if not already discovered)
-
-        # Transcriptomics adapters
-        if "transcriptomics_single_cell" not in self.adapters:
-            self.register_adapter(
-                "transcriptomics_single_cell",
-                TranscriptomicsAdapter(
-                    data_type="single_cell", strict_validation=False
-                ),
-            )
-
-        if "transcriptomics_bulk" not in self.adapters:
-            self.register_adapter(
-                "transcriptomics_bulk",
-                TranscriptomicsAdapter(data_type="bulk", strict_validation=False),
-            )
-
-        # Proteomics adapters (only if available)
-        if PROTEOMICS_AVAILABLE:
-            if "proteomics_ms" not in self.adapters:
-                self.register_adapter(
-                    "proteomics_ms",
-                    ProteomicsAdapter(
-                        data_type="mass_spectrometry", strict_validation=False
-                    ),
-                )
-
-            if "proteomics_affinity" not in self.adapters:
-                self.register_adapter(
-                    "proteomics_affinity",
-                    ProteomicsAdapter(data_type="affinity", strict_validation=False),
-                )
-
-        # Genomics adapters (PREMIUM tier - optional)
-        try:
-            from lobster.core.adapters.genomics.plink_adapter import PLINKAdapter
-            from lobster.core.adapters.genomics.vcf_adapter import VCFAdapter
-
-            if "genomics_wgs" not in self.adapters:
-                self.register_adapter(
-                    "genomics_wgs", VCFAdapter(strict_validation=False)
-                )
-            if "genomics_snp_array" not in self.adapters:
-                self.register_adapter(
-                    "genomics_snp_array", PLINKAdapter(strict_validation=False)
-                )
-
-            _GENOMICS_AVAILABLE = True
-            logger.debug("Genomics adapters registered")
-        except ImportError:
-            _GENOMICS_AVAILABLE = False
-            logger.debug("Genomics adapters not available")
+        Construction is shared with exported notebooks (see
+        ``lobster.core.adapters.factory``): entry-point adapters first, then the
+        built-in fallbacks, so a notebook builds the same adapter as the session.
+        """
+        for name, adapter in create_default_adapters().items():
+            if name not in self.adapters:
+                self.register_adapter(name, adapter)
 
     def _resolve_adapter_for_file(self, file_path: Path):
         """Resolve the best adapter for a file based on extension.
@@ -1104,10 +1048,22 @@ class DataManagerV2:
             source_path = (
                 str(source) if not _is_anndata_instance(source) else "AnnData object"
             )
-            loading_ir = create_data_loading_ir(
-                input_param_name="input_data",
-                description=f"Load {name} data from {source_path}",
-            )
+            if isinstance(source, (str, Path)):
+                # A file load goes through the adapter, which changes the data
+                # on load; replay it through the same shared adapter factory.
+                suffix = Path(source).suffix.lower().lstrip(".")
+                loading_ir = create_adapter_loading_ir(
+                    adapter_name=adapter,
+                    adapter_kwargs=kwargs,
+                    input_param_name="input_data",
+                    description=f"Load {name} data from {source_path} using the {adapter} adapter",
+                    file_format=suffix or None,
+                )
+            else:
+                loading_ir = create_data_loading_ir(
+                    input_param_name="input_data",
+                    description=f"Load {name} data from {source_path}",
+                )
 
             # Log data loading operation with IR
             self.log_tool_usage(
