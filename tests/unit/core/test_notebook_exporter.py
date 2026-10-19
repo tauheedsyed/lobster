@@ -257,9 +257,9 @@ class TestNotebookExporter:
                 assert nb.cells[0].cell_type == "markdown"
                 assert "test_notebook" in nb.cells[0].source
 
-                # Second cell should be integrity manifest (markdown)
+                # Second cell should be the export record (markdown)
                 assert nb.cells[1].cell_type == "markdown"
-                assert "Data Integrity Manifest" in nb.cells[1].source
+                assert "Export record (hashes)" in nb.cells[1].source
                 assert "sha256" in nb.cells[1].source
 
                 # Third cell should be imports (code)
@@ -294,6 +294,37 @@ class TestNotebookExporter:
 
         # Should include all activities
         assert len(filtered) == 4  # All activities
+
+    def test_export_record_does_not_overclaim(self, provenance_tracker, data_manager):
+        """The export record must state its limits and claim no compliance or proof.
+
+        The provenance hash covers only the session ID and counts, and nothing
+        checks the hashes when the notebook runs, so the cell must not present
+        them as tamper evidence, verification or regulatory compliance.
+        """
+        exporter = NotebookExporter(provenance_tracker, data_manager)
+        source = exporter._create_integrity_manifest_cell().source
+        lowered = source.lower()
+
+        for phrase in (
+            "alcoa",
+            "cfr",
+            "part 11",
+            "gxp",
+            "tamper-evident",
+            "proof that",
+            "invalidating",
+            "integrity manifest",
+        ):
+            assert phrase not in lowered, phrase
+
+        assert "Nothing in this notebook checks these hashes" in source
+        assert "activity and entity counts only" in source
+        assert "not tamper evidence and not proof of regulatory compliance" in source
+        assert "does not show that running this notebook reproduces" in source
+        # JSON keys stay stable so existing hash-checking scripts keep working.
+        assert '"data_integrity_manifest"' in source
+        assert '"provenance"' in source
 
     def test_create_header_cell(self, provenance_tracker, data_manager):
         """Test header cell creation."""

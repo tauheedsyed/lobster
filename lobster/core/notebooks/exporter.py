@@ -150,7 +150,7 @@ class NotebookExporter:
             self._create_header_cell(name, description, exportable_count)
         )
 
-        # Add data integrity manifest (cryptographic hashes for compliance)
+        # Add the export record (hashes taken at export time; not verified at run time)
         notebook.cells.append(self._create_integrity_manifest_cell())
 
         # Collect and add imports from all exportable IRs
@@ -454,16 +454,17 @@ complete code generation instructions for reproducibility.
 
     def _create_integrity_manifest_cell(self) -> NotebookNode:
         """
-        Create data integrity manifest cell with cryptographic hashes.
+        Create the export-record cell: hashes and versions taken at export time.
 
-        This cell provides ALCOA+ compliant data integrity verification by
-        recording SHA-256 hashes of all inputs, provenance, and system state.
-        Critical for 21 CFR Part 11 and GxP compliance.
+        The record is informational. Nothing in the notebook checks it when the
+        notebook runs, the provenance hash covers only the session ID and the
+        activity/entity counts, and the record is not tamper evidence or proof
+        of regulatory compliance. The wording must say so.
 
         Returns:
-            Markdown cell with integrity manifest
+            Markdown cell with the export record
         """
-        manifest = {
+        record = {
             "data_integrity_manifest": {
                 "generated_at": datetime.now().isoformat(),
                 "provenance": self._get_provenance_hash(),
@@ -472,20 +473,23 @@ complete code generation instructions for reproducibility.
             }
         }
 
-        content = f"""## 🔒 Data Integrity Manifest
+        content = f"""## Export record (hashes)
 
-**Purpose**: Cryptographic verification of data integrity (ALCOA+ compliance)
+Recorded when this notebook was exported, for your own checks.
 
 ```json
-{json.dumps(manifest, indent=2)}
+{json.dumps(record, indent=2)}
 ```
 
-**Verification**: The hashes above provide tamper-evident proof that:
-- This analysis used the exact input data listed
-- The provenance record matches this session
-- The system version is documented and reproducible
+**What is recorded**
+- `input_files`: SHA-256 of each modality's `.h5ad` file in the workspace at export time (`file_not_found` if the file was missing).
+- `provenance.sha256`: SHA-256 of the session ID and the activity and entity counts only. It does not cover the content of the provenance record.
+- `system`: Lobster and Python versions, the platform, and the short Git commit of the directory the export ran in (if any), as plain text.
 
-⚠️ **Critical**: Any modification to input data will result in hash mismatch, invalidating the analysis.
+**Limits**
+- Nothing in this notebook checks these hashes when it runs, so changed input files are not detected automatically. Compare the hashes yourself if you need to.
+- This record is not tamper evidence and not proof of regulatory compliance.
+- It does not show that running this notebook reproduces the original session.
 
 ---
 """
