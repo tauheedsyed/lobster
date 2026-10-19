@@ -406,3 +406,67 @@ def test_positive_flag_with_negative_siblings_is_the_disease(path, metadata_extr
         metadata_extractor(frame)
         disease = frame.loc[0, "disease"]
     assert disease == "cd"
+
+
+# --- Re-running the rescan must not promote its own candidates ----------------
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+def test_column_rescan_run_twice_does_not_promote_candidate(
+    premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR008", "tissue": "colorectal tissue"}]
+    enrichment_config.phase1_column_rescan(samples)
+    assert samples[0]["disease_candidate"] == "crc" and "disease" not in samples[0]
+    first = dict(samples[0])
+
+    enriched, _ = enrichment_config.phase1_column_rescan(samples)
+
+    assert enriched == 0
+    assert "disease" not in samples[0]
+    assert samples[0] == first  # idempotent: no field changed or was added
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "disease_candidate",
+        "disease_original",
+        "disease_source",
+        "disease_match_type",
+        "disease_evidence",
+    ],
+)
+def test_column_rescan_ignores_its_own_output_fields(
+    field, premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR009", field: "crc"}]
+    enriched, _ = enrichment_config.phase1_column_rescan(samples)
+    assert enriched == 0
+    assert "disease" not in samples[0]
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+def test_exported_and_reimported_candidate_is_not_promoted(
+    premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR010", "tissue": "colorectal tissue"}]
+    enrichment_config.phase1_column_rescan(samples)
+    assert samples[0]["disease_candidate"] == "crc"
+
+    exported, _ = harmonize_disease_field(samples)
+    reimported = [
+        {k: v for k, v in row.items() if not (isinstance(v, float) and np.isnan(v))}
+        for row in exported
+    ]
+    for row in reimported:
+        row.pop("disease", None)  # the export left disease unresolved
+    enriched, _ = enrichment_config.phase1_column_rescan(reimported)
+
+    assert enriched == 0
+    assert not reimported[0].get("disease")
+    assert reimported[0]["disease_candidate"] == "crc"

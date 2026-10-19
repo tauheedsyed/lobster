@@ -201,6 +201,24 @@ Return ONLY valid JSON, no additional text or formatting.
 # Only a whole-value (confidence 1.0) match is written as a sample's disease.
 AUTO_APPLY_CONFIDENCE = 1.0
 
+# Fields written by the enrichment itself. They are never scanned as input, so a
+# re-run (or a re-imported export) cannot promote its own output, e.g. turn a
+# non-applied ``disease_candidate`` into an applied disease.
+DERIVED_DISEASE_FIELDS = frozenset(
+    {
+        "disease",
+        "disease_original",
+        "disease_source",
+        "disease_confidence",
+        "disease_match_type",
+        "disease_evidence",
+        "disease_candidate",
+        "disease_candidate_confidence",
+        "disease_candidate_source",
+        "enrichment_timestamp",
+    }
+)
+
 
 def phase1_column_rescan(samples: List[Dict]) -> tuple:
     """
@@ -226,7 +244,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
 
             # Check ALL columns (not just standard ones)
             for col_name, col_value in list(sample.items()):
-                if not col_value:
+                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
                     continue
 
                 col_str = str(col_value)
@@ -359,7 +377,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
 
             # Check ALL columns (not just standard ones)
             for col_name, col_value in list(sample.items()):
-                if not col_value:
+                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
                     continue
 
                 full_text = " ".join(str(col_value).lower().split())
