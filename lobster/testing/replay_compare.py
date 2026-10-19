@@ -6,7 +6,7 @@ session, and what the replayed notebook produced) and returns one
 
 Supported values: ``AnnData`` (slots ``X``, ``layers``, ``obs``, ``var``,
 ``obsm``, ``obsp``, ``varm``, ``varp``, ``uns``, ``raw`` with ``X``/``var``/
-``varm``); pandas ``DataFrame``/``Series``/``Index`` with NumPy, categorical,
+``varm``); pandas ``DataFrame``, ``Series`` and ``Index`` with NumPy, categorical,
 nullable (masked) or string dtypes; plain NumPy arrays and scalars; SciPy
 sparse matrices; mappings, lists and tuples; Python scalars; and output files
 (:func:`output_files`). Anything else, including NumPy array subclasses such
@@ -24,17 +24,25 @@ Rules that keep a wrong result from passing:
 * floats use the policy's predeclared tolerance (exact by default) at native
   precision; NaN must sit at the same positions and infinities must be
   identical; complex values compare their real and imaginary parts separately;
+* axis labels, index and column names and category labels are identities and
+  always compare exactly, whatever tolerance the values have;
+* keys and column labels must be addressable by a policy path: a label
+  containing ``/``, ``[`` or ``]``, or two labels with the same text form, is
+  reported as not compared rather than risk a rule applying to the wrong one;
 * a required path missing from the reference is NOT_COMPARED, and missing from
   the output is a MISMATCH;
 * agreement that no value exists (``None``, an absent ``raw``, an empty slot)
   is structural, not evidence: a comparison made only of that is never a
   MATCH;
-* output files: CSV/TSV are compared cell by cell as text (no type inference,
-  so ``001`` is not ``1`` and ``NA`` is not ``NULL``); JSON must be strict
+* output files: CSV/TSV are parsed strictly (a broken quote is an error) and
+  compared cell by cell as text (no type inference, so ``001`` is not ``1``
+  and ``NA`` is not ``NULL``; quoting and line endings do not matter); JSON
+  must be strict
   (duplicate keys and NaN/Infinity tokens are refused; numbers decode to IEEE
   doubles); H5AD is loaded with anndata; anything else is compared byte for
-  byte. A symbolic link is never followed, and an output root that is a link
-  is refused.
+  byte. :func:`output_files` refuses a path that reaches the output root
+  through a symbolic link below the caller's trusted anchor, and never
+  follows a link inside the root.
 
 What this module cannot do:
 
@@ -85,23 +93,49 @@ class OutputFile:
     path: Path
 
 
-def output_files(directory: Path) -> Dict[str, Any]:
+def output_files(directory: Path, *, anchor: Path) -> Dict[str, Any]:
     """Nested mapping of every file below ``directory`` to an OutputFile.
 
     Directories become mappings, so ``files/split/train.csv`` addresses
-    ``<directory>/split/train.csv``. A symbolic link below the root is kept as
-    an entry (and later reported as not compared) rather than followed. The
-    root itself must be a real directory, not a link.
+    ``<directory>/split/train.csv``.
+
+    ``anchor`` is a directory the caller trusts (for example the run's
+    staging root). It may itself sit behind system links such as macOS
+    ``/tmp``. ``directory`` must lie inside it, and no path component from the
+    anchor down to ``directory`` may be a symbolic link. Below the root, a
+    link is kept as an entry (and later reported as not compared) rather
+    than followed. Compare OutputFile objects only from this function.
     """
     directory = Path(directory)
-    if directory.is_symlink():
-        raise ValueError(f"output root is a symbolic link: {directory}")
+    _check_no_links_below(Path(anchor), directory)
+    return _walk_files(directory)
+
+
+def _check_no_links_below(anchor: Path, directory: Path) -> None:
+    anchor = anchor.absolute()
+    directory = directory.absolute()
+    if not anchor.is_dir():
+        raise ValueError(f"anchor is not a directory: {anchor}")
+    try:
+        parts = directory.relative_to(anchor).parts
+    except ValueError:
+        raise ValueError(f"{directory} is not inside the anchor {anchor}") from None
+    if any(part in ("..", ".") for part in parts):
+        raise ValueError(f"output path is not normalized: {directory}")
+    current = anchor
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"output path goes through a symbolic link: {current}")
     if not directory.is_dir():
         raise ValueError(f"output root is not a directory: {directory}")
+
+
+def _walk_files(directory: Path) -> Dict[str, Any]:
     tree: Dict[str, Any] = {}
     for entry in sorted(directory.iterdir()):
         if entry.is_dir() and not entry.is_symlink():
-            tree[entry.name] = output_files(entry)
+            tree[entry.name] = _walk_files(entry)
         else:
             tree[entry.name] = OutputFile(entry)
     return tree
@@ -236,6 +270,8 @@ def _kind(value: Any) -> str:
         return "dataframe"
     if _is(value, "pandas", "Series"):
         return "series"
+    if _is(value, "pandas", "Index"):
+        return "index"
     if _issparse(value):
         return "sparse"
     if np is not None:
@@ -276,6 +312,14 @@ class _Walk:
         self.diffs: List[str] = []
         self.diff_count = 0
         self.not_compared: List[str] = []
+        # Axis labels, names and category labels are identities: they compare
+        # exactly whatever tolerance the surrounding values have.
+        self.exact_depth = 0
+
+    def tolerance(self, path: str) -> Tuple[float, float]:
+        if self.exact_depth:
+            return (0.0, 0.0)
+        return self.policy.tolerance_for(path)
 
     # -- findings ---------------------------------------------------------
 
@@ -355,7 +399,7 @@ class _Walk:
     def _float(self, expected, actual, path):
         self.compared += 1
         if not self._close(expected, actual, path):
-            rtol, atol = self.policy.tolerance_for(path)
+            rtol, atol = self.tolerance(path)
             self.diff(
                 path,
                 f"expected {expected!r}, got {actual!r} (rtol={rtol}, atol={atol})",
@@ -372,7 +416,7 @@ class _Walk:
 
     def _close(self, e: float, a: float, path: str) -> bool:
         """Python floats are IEEE doubles, so this loses no precision."""
-        rtol, atol = self.policy.tolerance_for(path)
+        rtol, atol = self.tolerance(path)
         if math.isnan(e) or math.isnan(a):
             return math.isnan(e) and math.isnan(a)
         if math.isinf(e) or math.isinf(a):
@@ -391,7 +435,7 @@ class _Walk:
     def _mapping(self, expected, actual, path):
         keys = []
         for side in (expected, actual):
-            bad = [k for k in side if not isinstance(k, str) or "/" in k or k == ""]
+            bad = [k for k in side if not _addressable(k)]
             if bad:
                 self.skip(path, f"keys that cannot be addressed: {bad[:5]!r}")
                 return
@@ -465,7 +509,7 @@ class _Walk:
             self.skip(path, f"unsupported dtype {expected.dtype}")
 
     def _float_array(self, np, expected, actual, path):
-        rtol, atol = self.policy.tolerance_for(path)
+        rtol, atol = self.tolerance(path)
         nan_e, nan_a = np.isnan(expected), np.isnan(actual)
         if (nan_e != nan_a).any():
             self.diff(path, f"NaN positions differ (first at {_first(nan_e != nan_a)})")
@@ -548,6 +592,13 @@ class _Walk:
             if side.has_duplicates:
                 self.skip(path, "duplicate column labels")
                 return
+            # Policy paths name columns by text, so every label must have its
+            # own unambiguous text form.
+            texts = [str(c) for c in side]
+            bad = [c for c in side if not _addressable(str(c))]
+            if bad or len(set(texts)) != len(texts):
+                self.skip(path, f"column labels that cannot be addressed: {bad[:5]!r}")
+                return
         want = [c for c in e_cols if not self.excluded(f"{path}/{c}")]
         got = [c for c in a_cols if not self.excluded(f"{path}/{c}")]
         # Labels compare with their types: 1, 1.0 and True are different.
@@ -573,23 +624,38 @@ class _Walk:
         self._column(expected, actual, path)
 
     def _axis_metadata(self, expected, actual, path) -> bool:
-        """Type, names and dtype of an Index; False if it cannot be compared."""
+        """Type, names, dtype and categories of an Index; False if incomparable."""
         if type(expected) is not type(actual):
             self.diff(path, f"type differs: {_type_name(expected)}")
             return False
         if _is(expected, "pandas", "MultiIndex"):
             self.skip(path, "MultiIndex is not supported")
             return False
-        if list(expected.names) != list(actual.names):
+        if _typed(expected.names) != _typed(actual.names):
             self.diff(path, f"names differ: {list(expected.names)!r}")
         if expected.dtype != actual.dtype or str(expected.dtype) != str(actual.dtype):
             self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
             return False
+        if _is(expected, "pandas", "CategoricalIndex"):
+            self.exact_depth += 1
+            try:
+                self._categories(expected.dtype, actual.dtype, path)
+            finally:
+                self.exact_depth -= 1
         return True
 
+    def _categories(self, expected, actual, path):
+        if expected.ordered != actual.ordered:
+            self.diff(path, "categorical 'ordered' flag differs")
+        self._index(expected.categories, actual.categories, f"{path}[categories]")
+
     def _index(self, expected, actual, path):
-        if self._axis_metadata(expected, actual, path):
-            self._extension_values(expected, actual, path)
+        self.exact_depth += 1
+        try:
+            if self._axis_metadata(expected, actual, path):
+                self._extension_values(expected, actual, path, categories=False)
+        finally:
+            self.exact_depth -= 1
 
     def _column(self, expected, actual, path):
         if expected.dtype != actual.dtype or str(expected.dtype) != str(actual.dtype):
@@ -597,7 +663,7 @@ class _Walk:
             return
         self._extension_values(expected, actual, path)
 
-    def _extension_values(self, owner_e, owner_a, path):
+    def _extension_values(self, owner_e, owner_a, path, categories=True):
         """Compare two Series/Index values of equal dtype without losing metadata."""
         np = sys.modules["numpy"]
         pd = sys.modules["pandas"]
@@ -608,11 +674,8 @@ class _Walk:
             return
         masked = _masked_dtype_class()
         if isinstance(dtype, pd.CategoricalDtype):
-            if dtype.ordered != actual.dtype.ordered:
-                self.diff(path, "categorical 'ordered' flag differs")
-            self._index(
-                dtype.categories, actual.dtype.categories, f"{path}[categories]"
-            )
+            if categories:  # an Index has compared them with its metadata
+                self._categories(dtype, actual.dtype, path)
             self._array_values(
                 np.asarray(expected.codes), np.asarray(actual.codes), f"{path}[codes]"
             )
@@ -686,7 +749,8 @@ def _read_delimited(path: Path, delimiter: str) -> List[List[str]]:
     """Rows of cell text, with no type inference or missing-value guessing."""
     try:
         with open(path, newline="", encoding="utf-8") as handle:
-            return [list(row) for row in csv.reader(handle, delimiter=delimiter)]
+            reader = csv.reader(handle, delimiter=delimiter, strict=True)
+            return [list(row) for row in reader]
     except (UnicodeDecodeError, csv.Error) as error:
         raise ValueError(str(error)) from error
 
@@ -704,6 +768,21 @@ def _read_json(path: Path) -> Any:
         return strict_json_loads(path.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, ContractError) as error:
         raise ValueError(str(error)) from error
+
+
+def _addressable(key: Any) -> bool:
+    """A key a policy path can name without colliding with element notation."""
+    return (
+        isinstance(key, str)
+        and key != ""
+        and not any(ch in key for ch in "/[]")
+        and key.strip() == key
+        and key not in (".", "..")
+    )
+
+
+def _typed(names: Any) -> List[Tuple[type, Any]]:
+    return [(type(name), name) for name in names]
 
 
 def _first(mask: Any) -> Any:

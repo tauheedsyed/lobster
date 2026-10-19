@@ -552,8 +552,8 @@ FILE_POLICY = ComparisonPolicy(required=("files",))
 
 def _files_verdict(expected_dir, actual_dir, policy=FILE_POLICY):
     results = compare(
-        {"files": output_files(expected_dir)},
-        {"files": output_files(actual_dir)},
+        {"files": output_files(expected_dir, anchor=expected_dir.parent)},
+        {"files": output_files(actual_dir, anchor=actual_dir.parent)},
         policy,
     )
     return results[0], aggregate_verdict(results)
@@ -1233,7 +1233,35 @@ def test_symlinked_output_root_is_refused(tmp_path):
     reference = _write_outputs(tmp_path / "ref")
     os.symlink(reference, tmp_path / "out")
     with pytest.raises(ValueError, match="symbolic link"):
-        output_files(tmp_path / "out")
+        output_files(tmp_path / "out", anchor=tmp_path)
+
+
+def test_output_path_through_a_linked_ancestor_is_refused(tmp_path):
+    reference = _write_outputs(tmp_path / "oracle")
+    (reference / "nested").mkdir()
+    (reference / "nested" / "result.bin").write_bytes(b"1")
+    os.symlink(reference, tmp_path / "out")
+    with pytest.raises(ValueError, match="symbolic link"):
+        output_files(tmp_path / "out" / "nested", anchor=tmp_path)
+
+
+def test_output_path_outside_the_anchor_is_refused(tmp_path):
+    (tmp_path / "anchor").mkdir()
+    outside = _write_outputs(tmp_path / "elsewhere")
+    with pytest.raises(ValueError, match="not inside"):
+        output_files(outside, anchor=tmp_path / "anchor")
+    with pytest.raises(ValueError, match="not inside|normalized"):
+        output_files(
+            tmp_path / "anchor" / ".." / "elsewhere", anchor=tmp_path / "anchor"
+        )
+
+
+def test_a_trusted_anchor_may_itself_be_reached_through_a_link(tmp_path):
+    (tmp_path / "real").mkdir()
+    _write_outputs(tmp_path / "real" / "out")
+    os.symlink(tmp_path / "real", tmp_path / "alias")
+    tree = output_files(tmp_path / "alias" / "out", anchor=tmp_path / "alias")
+    assert set(tree) == {"train.csv", "summary.json", "model.bin"}
 
 
 def test_symlinked_output_directory_is_not_followed(tmp_path):
@@ -1302,7 +1330,8 @@ def test_semantic_sparse_compares_the_nonzero_pattern_exactly():
         (np.array([1.0], dtype=object), np.array([1.01], dtype=object)),
         ([1.0, 2.0], [1.01, 2.0]),
         ({"v": [1.0]}, {"v": [1.01]}),
-        (pd.Series([1.0], index=[0.5]), pd.Series([1.0], index=[0.51])),
+        (pd.Series([1.0], index=[0.5]), pd.Series([1.01], index=[0.5])),
+        (pd.DataFrame({"v": [1.0]}), pd.DataFrame({"v": [1.01]})),
         (np.array([1 + 1j]), np.array([1.01 + 1j])),
     ],
 )
@@ -1325,3 +1354,89 @@ def test_parent_tolerance_reaches_elements_inside_values(expected, actual):
 def test_constructors_are_as_strict_as_the_json_loaders(build):
     with pytest.raises(ContractError):
         build()
+
+
+# --------------------------------------------------------------------------
+# Review findings (R5)
+# --------------------------------------------------------------------------
+
+LOOSE_X = ComparisonPolicy(required=("x",), tolerances=(Tolerance("x", atol=0.1),))
+
+
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        (pd.Series([1.0], index=[0.5]), pd.Series([1.0], index=[0.51])),
+        (
+            pd.DataFrame({"v": [1.0]}, index=[0.5]),
+            pd.DataFrame({"v": [1.0]}, index=[0.51]),
+        ),
+        (pd.Index([0.5]), pd.Index([0.51])),
+        (
+            pd.Series(pd.Categorical([0.5], categories=[0.5, 1.0])),
+            pd.Series(pd.Categorical([0.51], categories=[0.51, 1.0])),
+        ),
+        (pd.DataFrame({0.5: [1.0]}), pd.DataFrame({0.51: [1.0]})),
+    ],
+)
+def test_axis_labels_stay_exact_under_a_value_tolerance(expected, actual):
+    assert _verdict(expected, actual, LOOSE_X) is Verdict.MISMATCH
+
+
+def test_bracketed_literal_keys_are_not_addressable():
+    policy = ComparisonPolicy(required=("x",), excluded=(Exclusion("x/a", "omit a"),))
+    expected = {"a": None, "a[other]": 1, "keep": 3}
+    actual = {"a": None, "a[other]": 9, "keep": 3}
+    assert _verdict(expected, actual, policy) is Verdict.NOT_COMPARED
+    loose_a = ComparisonPolicy(required=("x",), tolerances=(Tolerance("x/a", atol=1),))
+    assert _verdict({"a": 1.0, "a[0]": 1.0}, {"a": 1.0, "a[0]": 1.1}, loose_a) is (
+        Verdict.NOT_COMPARED
+    )
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [["a[x]", "b"], ["a/b"], [1, "1"], [" a"]],
+)
+def test_column_labels_that_cannot_be_addressed_are_not_compared(columns):
+    frame = pd.DataFrame([[0] * len(columns)], columns=columns)
+    assert _verdict(frame, frame.copy()) is Verdict.NOT_COMPARED
+
+
+def test_categorical_columns_compare_category_order():
+    expected = pd.DataFrame(
+        [[1]], columns=pd.CategoricalIndex(["a"], categories=["a", "b", "c"])
+    )
+    moved = pd.DataFrame(
+        [[1]], columns=pd.CategoricalIndex(["a"], categories=["a", "c", "b"])
+    )
+    assert _verdict(expected, expected.copy()) is Verdict.MATCH
+    assert _verdict(expected, moved) is Verdict.MISMATCH
+
+
+@pytest.mark.parametrize("axis", ["index", "columns"])
+def test_axis_name_types_are_exact(axis):
+    expected = pd.DataFrame({"a": [1]})
+    renamed = expected.copy()
+    getattr(expected, axis).name = 1
+    getattr(renamed, axis).name = True
+    assert _verdict(expected, renamed) is Verdict.MISMATCH
+
+
+def test_standalone_index_is_compared():
+    assert _verdict(pd.Index(["a", "b"]), pd.Index(["a", "b"])) is Verdict.MATCH
+    assert _verdict(pd.Index(["a", "b"]), pd.Index(["b", "a"])) is Verdict.MISMATCH
+
+
+def test_csv_with_a_broken_quote_is_unreadable(tmp_path):
+    output_broken = _file_pair(tmp_path / "a", "t.csv", 'x\n"hello"\n', 'x\n"hello')
+    assert output_broken[1] is Verdict.MISMATCH
+    reference_broken = _file_pair(tmp_path / "b", "t.csv", 'x\n"hello', 'x\n"hello"\n')
+    assert reference_broken[1] is Verdict.NOT_COMPARED
+
+
+def test_csv_quoting_and_line_endings_do_not_matter(tmp_path):
+    quoted = _file_pair(tmp_path / "a", "t.csv", 'x\n"hello"\n', "x\nhello\n")
+    assert quoted[1] is Verdict.MATCH
+    crlf = _file_pair(tmp_path / "b", "t.csv", "x\r\n1\r\n", "x\n1\n")
+    assert crlf[1] is Verdict.MATCH
