@@ -23,7 +23,6 @@ members = [
     "lobster-vector",
     "lobster-visualization",
 ]
-constraints = [{ name = "fsspec", specifier = ">=2026.6.0" }]
 
 [[package]]
 name = "accelerate"
@@ -2882,6 +2881,7 @@ dependencies = [
     { name = "anndata" },
     { name = "biopython" },
     { name = "cloudscraper" },
+    { name = "fsspec" },
     { name = "geoparse" },
     { name = "gseapy" },
     { name = "h5py" },
@@ -3187,6 +3187,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.100.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "freezegun", marker = "extra == 'dev'", specifier = ">=1.2.0" },
+    { name = "fsspec", specifier = ">=2026.6.0" },
     { name = "ftputil", marker = "extra == 'dev'", specifier = ">=5.0.4" },
     { name = "geoparse" },
     { name = "gseapy", specifier = ">=1.1.0" },
