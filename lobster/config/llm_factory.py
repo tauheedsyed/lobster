@@ -22,6 +22,13 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    create_bound_model,
+    validate_inference_binding,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +56,8 @@ class LLMFactory:
         provider_override: Optional[str] = None,
         model_override: Optional[str] = None,
         workspace_path: Optional[Path] = None,
+        inference_context: Optional[InferenceContext] = None,
+        model_factory: Optional[BoundModelFactory] = None,
     ) -> Any:
         """
         Create an LLM instance based on configuration.
@@ -80,6 +89,16 @@ class LLMFactory:
             ...     provider_override="anthropic"
             ... )
         """
+        if validate_inference_binding(inference_context, model_factory):
+            return create_bound_model(
+                component=agent_name or "model",
+                inference_context=inference_context,
+                model_factory=model_factory,
+                model_config=model_config,
+                provider_override=provider_override,
+                model_override=model_override,
+            )
+
         from lobster.config.providers import ProviderRegistry, get_provider
         from lobster.core.config_resolver import ConfigResolver, ConfigurationError
 
@@ -205,6 +224,8 @@ def create_llm(
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
     workspace_path: Optional[Path] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ) -> Any:
     """
     Create an LLM instance for a specific agent.
@@ -225,10 +246,17 @@ def create_llm(
     Example:
         >>> llm = create_llm("supervisor", {"temperature": 0.7})
     """
+    binding_kwargs = {}
+    if inference_context is not None or model_factory is not None:
+        binding_kwargs = {
+            "inference_context": inference_context,
+            "model_factory": model_factory,
+        }
     return LLMFactory.create_llm(
         model_config=model_params,
         agent_name=agent_name,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **binding_kwargs,
     )
