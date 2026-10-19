@@ -6,36 +6,56 @@ session, and what the replayed notebook produced) and returns one
 
 Supported values: ``AnnData`` (slots ``X``, ``layers``, ``obs``, ``var``,
 ``obsm``, ``obsp``, ``varm``, ``varp``, ``uns``, ``raw`` with ``X``/``var``/
-``varm``), pandas ``DataFrame``/``Series``, NumPy arrays and scalars, SciPy
-sparse matrices, mappings, lists and tuples, Python scalars, and output files
-(:func:`output_files`; CSV/TSV, JSON and H5AD are parsed, anything else is
-compared byte for byte). Anything else is reported as NOT_COMPARED and never
-converted to text to make it comparable.
+``varm``); pandas ``DataFrame``/``Series``/``Index`` with NumPy, categorical,
+nullable (masked) or string dtypes; plain NumPy arrays and scalars; SciPy
+sparse matrices; mappings, lists and tuples; Python scalars; and output files
+(:func:`output_files`). Anything else, including NumPy array subclasses such
+as masked arrays, pandas ``MultiIndex`` and other extension dtypes, is
+reported as NOT_COMPARED and never converted to text to make it comparable.
 
 Rules that keep a wrong result from passing:
 
 * inventories are exact: keys, columns and files present on one side only are
   a mismatch, and axis order matters (nothing is sorted before comparing);
-* shapes, dtypes, integers, labels, categories and missing values compare
-  exactly; floats use the policy's predeclared tolerance (exact by default),
-  NaN must sit at the same positions and infinities must be identical;
+* types and dtypes compare exactly, scalars included (``np.int32`` is not
+  ``np.int64``, ``np.float64`` is not Python ``float``, datetime units
+  differ), as do integers, labels, categories (inventory, order and the
+  ordered flag), index and column names, and missing-value positions;
+* floats use the policy's predeclared tolerance (exact by default) at native
+  precision; NaN must sit at the same positions and infinities must be
+  identical; complex values compare their real and imaginary parts separately;
 * a required path missing from the reference is NOT_COMPARED, and missing from
   the output is a MISMATCH;
-* an output file that is a symbolic link is not followed.
+* agreement that no value exists (``None``, an absent ``raw``, an empty slot)
+  is structural, not evidence: a comparison made only of that is never a
+  MATCH;
+* output files: CSV/TSV are compared cell by cell as text (no type inference,
+  so ``001`` is not ``1`` and ``NA`` is not ``NULL``); JSON must be strict
+  (duplicate keys and NaN/Infinity tokens are refused; numbers decode to IEEE
+  doubles); H5AD is loaded with anndata; anything else is compared byte for
+  byte. A symbolic link is never followed, and an output root that is a link
+  is refused.
 
-The inputs must already be in comparable form. If the reference comes from
-memory and the output from disk, load both through the same codec first; the
-comparator treats a list and an array, or a float32 and a float64 array, as
-different.
+What this module cannot do:
+
+* It compares the values it is given. If the reference comes from memory and
+  the output from disk, both must go through a codec that is lossless on its
+  own; a codec that loses the same information on both sides produces a false
+  MATCH that no comparator can see.
+* It cannot show that the reference and the output were produced
+  independently (for example that the notebook did not read the reference).
+  The harness that stages and runs the notebook must ensure that.
+* ``SlotResult.compared`` counts comparison operations. The same array stored
+  under two names is counted twice; it is not a count of independent evidence.
 
 Scientific packages are imported lazily, so importing this module is cheap.
 """
 
 from __future__ import annotations
 
+import csv
 import datetime as _dt
 import hashlib
-import json
 import math
 import sys
 from collections.abc import Mapping
@@ -45,10 +65,12 @@ from typing import Any, Dict, List, Tuple
 
 from lobster.testing.replay_contract import (
     ComparisonPolicy,
+    ContractError,
     SlotResult,
     SlotStatus,
     SparsePolicy,
     split_path,
+    strict_json_loads,
 )
 
 MAX_FINDINGS = 20
@@ -67,10 +89,15 @@ def output_files(directory: Path) -> Dict[str, Any]:
     """Nested mapping of every file below ``directory`` to an OutputFile.
 
     Directories become mappings, so ``files/split/train.csv`` addresses
-    ``<directory>/split/train.csv``. Symbolic links are kept as entries (and
-    later reported as not compared) rather than followed.
+    ``<directory>/split/train.csv``. A symbolic link below the root is kept as
+    an entry (and later reported as not compared) rather than followed. The
+    root itself must be a real directory, not a link.
     """
     directory = Path(directory)
+    if directory.is_symlink():
+        raise ValueError(f"output root is a symbolic link: {directory}")
+    if not directory.is_dir():
+        raise ValueError(f"output root is not a directory: {directory}")
     tree: Dict[str, Any] = {}
     for entry in sorted(directory.iterdir()):
         if entry.is_dir() and not entry.is_symlink():
@@ -187,6 +214,16 @@ def _type_name(value: Any) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
+_PYTHON_SCALARS = {
+    bool: "bool",
+    int: "int",
+    float: "float",
+    complex: "complex",
+    str: "str",
+    bytes: "bytes",
+}
+
+
 def _kind(value: Any) -> str:
     np = sys.modules.get("numpy")
     if value is None:
@@ -201,22 +238,15 @@ def _kind(value: Any) -> str:
         return "series"
     if _issparse(value):
         return "sparse"
-    if np is not None and isinstance(value, np.ndarray):
-        return "array"
-    if isinstance(value, bool) or (np is not None and isinstance(value, np.bool_)):
-        return "bool"
-    if isinstance(value, int) or (np is not None and isinstance(value, np.integer)):
-        return "int"
-    if isinstance(value, float) or (np is not None and isinstance(value, np.floating)):
-        return "float"
-    if isinstance(value, complex) or (
-        np is not None and isinstance(value, np.complexfloating)
-    ):
-        return "complex"
-    if isinstance(value, str):
-        return "str"
-    if isinstance(value, bytes):
-        return "bytes"
+    if np is not None:
+        if type(value) is np.ndarray:
+            return "array"
+        if isinstance(value, np.ndarray):
+            return "unknown"  # subclasses (masked arrays, matrix) change semantics
+        if isinstance(value, np.generic):
+            return "npscalar"
+    if type(value) in _PYTHON_SCALARS:
+        return _PYTHON_SCALARS[type(value)]
     if isinstance(value, Mapping):
         return "mapping"
     if type(value) in (list, tuple):
@@ -226,9 +256,12 @@ def _kind(value: Any) -> str:
         return "missing"
     if isinstance(value, (_dt.datetime, _dt.date, _dt.timedelta)):
         return "datetime"
-    if np is not None and isinstance(value, (np.datetime64, np.timedelta64)):
-        return "datetime"
     return "unknown"
+
+
+def _masked_dtype_class():
+    dtypes = sys.modules.get("pandas.core.dtypes.dtypes")
+    return getattr(dtypes, "BaseMaskedDtype", None) if dtypes else None
 
 
 # --------------------------------------------------------------------------
@@ -298,10 +331,9 @@ class _Walk:
     # -- scalars ----------------------------------------------------------
 
     def _none(self, expected, actual, path):
-        self.compared += 1
+        """Both absent: structural agreement, not compared evidence."""
 
     def _missing(self, expected, actual, path):
-        self.compared += 1
         if expected is not actual:
             self.diff(path, f"expected {expected!r}, got {actual!r}")
 
@@ -316,49 +348,43 @@ class _Walk:
         self.compared += 1
         if type(expected) is not type(actual):
             self.diff(path, f"type differs: {_type_name(expected)}")
-            return
-        np = sys.modules.get("numpy")
-        if np is not None and isinstance(expected, (np.datetime64, np.timedelta64)):
-            if np.isnat(expected) or np.isnat(actual):
-                if not (np.isnat(expected) and np.isnat(actual)):
-                    self.diff(path, f"expected {expected!r}, got {actual!r}")
-                return
-        if expected != actual:
+        elif expected != actual or repr(expected) != repr(actual):
+            # repr also separates equal instants in different time zones.
             self.diff(path, f"expected {expected!r}, got {actual!r}")
 
     def _float(self, expected, actual, path):
-        self._scalar_number(expected, actual, path)
+        self.compared += 1
+        if not self._close(expected, actual, path):
+            rtol, atol = self.policy.tolerance_for(path)
+            self.diff(
+                path,
+                f"expected {expected!r}, got {actual!r} (rtol={rtol}, atol={atol})",
+            )
 
     def _complex(self, expected, actual, path):
-        self._scalar_number(expected, actual, path)
-
-    def _scalar_number(self, expected, actual, path):
         self.compared += 1
-        np = sys.modules.get("numpy")
-        if np is not None and isinstance(expected, np.generic):
-            if isinstance(actual, np.generic) and expected.dtype != actual.dtype:
-                self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
+        for part in ("real", "imag"):
+            if not self._close(
+                getattr(expected, part), getattr(actual, part), f"{path}[{part}]"
+            ):
+                self.diff(path, f"expected {expected!r}, got {actual!r}")
                 return
+
+    def _close(self, e: float, a: float, path: str) -> bool:
+        """Python floats are IEEE doubles, so this loses no precision."""
         rtol, atol = self.policy.tolerance_for(path)
-        is_complex = isinstance(expected, complex) or (
-            np is not None and isinstance(expected, np.complexfloating)
-        )
-        for part in ("real", "imag") if is_complex else (None,):
-            e = getattr(expected, part) if part else expected
-            a = getattr(actual, part) if part else actual
-            e, a = float(e), float(a)
-            if math.isnan(e) or math.isnan(a):
-                ok = math.isnan(e) and math.isnan(a)
-            elif math.isinf(e) or math.isinf(a):
-                ok = e == a
-            else:
-                ok = abs(a - e) <= atol + rtol * abs(e)
-            if not ok:
-                self.diff(
-                    path,
-                    f"expected {expected!r}, got {actual!r} (rtol={rtol}, atol={atol})",
-                )
-                return
+        if math.isnan(e) or math.isnan(a):
+            return math.isnan(e) and math.isnan(a)
+        if math.isinf(e) or math.isinf(a):
+            return e == a
+        return abs(a - e) <= atol + rtol * abs(e)
+
+    def _npscalar(self, expected, actual, path):
+        if expected.dtype != actual.dtype:
+            self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
+            return
+        np = sys.modules["numpy"]
+        self._array_values(np.asarray(expected), np.asarray(actual), path)
 
     # -- containers -------------------------------------------------------
 
@@ -394,9 +420,6 @@ class _Walk:
     # -- arrays -----------------------------------------------------------
 
     def _array(self, expected, actual, path):
-        if type(expected) is not type(actual):
-            self.diff(path, f"type differs: {_type_name(expected)}")
-            return
         if expected.shape != actual.shape:
             self.diff(path, f"shape differs: {expected.shape} vs {actual.shape}")
             return
@@ -406,7 +429,7 @@ class _Walk:
         self._array_values(expected, actual, path)
 
     def _array_values(self, expected, actual, path):
-        """Compare two arrays of equal shape and dtype."""
+        """Compare two plain arrays of equal shape and dtype."""
         np = sys.modules["numpy"]
         kind = expected.dtype.kind
         if kind in "biuUS":
@@ -418,9 +441,15 @@ class _Walk:
                     f"{int(unequal.sum())} of {expected.size} values differ "
                     f"(first at index {_first(unequal)})",
                 )
-        elif kind in "fc":
+        elif kind == "f":
             self.compared += expected.size
             self._float_array(np, expected, actual, path)
+        elif kind == "c":
+            # Real and imaginary parts carry their own missing values and
+            # tolerances; a NaN in one part must not hide the other part.
+            self.compared += expected.size
+            self._float_array(np, expected.real, actual.real, f"{path}[real]")
+            self._float_array(np, expected.imag, actual.imag, f"{path}[imag]")
         elif kind in "mM":
             self.compared += expected.size
             nat_e, nat_a = np.isnat(expected), np.isnat(actual)
@@ -466,7 +495,8 @@ class _Walk:
         if expected.dtype != actual.dtype:
             self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
             return
-        if self.policy.sparse is SparsePolicy.REPRESENTATION:
+        representation = self.policy.sparse is SparsePolicy.REPRESENTATION
+        if representation:
             if type(expected) is not type(actual):
                 self.diff(path, f"sparse type differs: {_type_name(expected)}")
                 return
@@ -476,17 +506,19 @@ class _Walk:
             if fields is None:
                 self.skip(path, f"sparse format {expected.format} not supported")
                 return
-            for name in fields.split():
-                self._structure(getattr(expected, name), getattr(actual, name), path)
-            e_data, a_data = expected.data, actual.data
+            e_store, a_store = expected, actual
         else:
-            e_canon, a_canon = _canonical_csr(expected), _canonical_csr(actual)
-            for name in ("indptr", "indices"):
-                if not self._structure(
-                    getattr(e_canon, name), getattr(a_canon, name), path
-                ):
-                    return
-            e_data, a_data = e_canon.data, a_canon.data
+            # Values only: format and explicit zeros do not matter. The
+            # nonzero pattern is compared exactly, so an exact zero against a
+            # tiny value is a mismatch even inside a float tolerance.
+            fields = "indptr indices"
+            e_store, a_store = _canonical_csr(expected), _canonical_csr(actual)
+        for name in fields.split():
+            if not self._structure(
+                getattr(e_store, name), getattr(a_store, name), path, representation
+            ):
+                return
+        e_data, a_data = e_store.data, a_store.data
         if e_data.shape != a_data.shape:
             self.diff(path, "number of stored values differs")
             return
@@ -495,8 +527,11 @@ class _Walk:
         # Every cell of the matrix was compared, stored or implicit zero.
         self.compared = before + int(expected.shape[0]) * int(expected.shape[1])
 
-    def _structure(self, expected, actual, path) -> bool:
+    def _structure(self, expected, actual, path, check_dtype) -> bool:
         np = sys.modules["numpy"]
+        if check_dtype and expected.dtype != actual.dtype:
+            self.diff(path, f"index dtype differs: {expected.dtype} vs {actual.dtype}")
+            return False
         if expected.shape != actual.shape or not np.array_equal(expected, actual):
             self.diff(path, "positions of stored values differ")
             return False
@@ -505,66 +540,112 @@ class _Walk:
     # -- pandas -----------------------------------------------------------
 
     def _dataframe(self, expected, actual, path):
-        self._index(expected.index, actual.index, f"{path} index")
-        for side in (expected, actual):
-            if side.columns.has_duplicates:
+        self._index(expected.index, actual.index, f"{path}[index]")
+        e_cols, a_cols = expected.columns, actual.columns
+        if not self._axis_metadata(e_cols, a_cols, f"{path}[columns]"):
+            return
+        for side in (e_cols, a_cols):
+            if side.has_duplicates:
                 self.skip(path, "duplicate column labels")
                 return
-        want = [c for c in expected.columns if not self.excluded(f"{path}/{c}")]
-        got = [c for c in actual.columns if not self.excluded(f"{path}/{c}")]
-        if want != got:
+        want = [c for c in e_cols if not self.excluded(f"{path}/{c}")]
+        got = [c for c in a_cols if not self.excluded(f"{path}/{c}")]
+        # Labels compare with their types: 1, 1.0 and True are different.
+        if [(type(c), c) for c in want] != [(type(c), c) for c in got]:
             missing = [c for c in want if c not in got]
             extra = [c for c in got if c not in want]
             detail = (
                 f"missing {missing!r}, unexpected {extra!r}"
                 if missing or extra
-                else "same columns in a different order"
+                else "same labels in a different order or with other types"
             )
             self.diff(path, f"columns differ: {detail}")
+            return
         for column in want:
-            if column in got:
-                self._column(expected[column], actual[column], f"{path}/{column}")
+            self._column(expected[column], actual[column], f"{path}/{column}")
 
     def _series(self, expected, actual, path):
-        self._index(expected.index, actual.index, f"{path} index")
-        if expected.name != actual.name:
+        self._index(expected.index, actual.index, f"{path}[index]")
+        if type(expected.name) is not type(actual.name) or (
+            expected.name != actual.name
+        ):
             self.diff(path, f"name differs: {expected.name!r} vs {actual.name!r}")
         self._column(expected, actual, path)
 
-    def _index(self, expected, actual, path):
+    def _axis_metadata(self, expected, actual, path) -> bool:
+        """Type, names and dtype of an Index; False if it cannot be compared."""
         if type(expected) is not type(actual):
             self.diff(path, f"type differs: {_type_name(expected)}")
-            return
+            return False
+        if _is(expected, "pandas", "MultiIndex"):
+            self.skip(path, "MultiIndex is not supported")
+            return False
         if list(expected.names) != list(actual.names):
             self.diff(path, f"names differ: {list(expected.names)!r}")
-        if str(expected.dtype) != str(actual.dtype):
+        if expected.dtype != actual.dtype or str(expected.dtype) != str(actual.dtype):
             self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
-            return
-        self._values(expected.to_numpy(), actual.to_numpy(), path)
+            return False
+        return True
+
+    def _index(self, expected, actual, path):
+        if self._axis_metadata(expected, actual, path):
+            self._extension_values(expected, actual, path)
 
     def _column(self, expected, actual, path):
-        if str(expected.dtype) != str(actual.dtype):
+        if expected.dtype != actual.dtype or str(expected.dtype) != str(actual.dtype):
             self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
             return
-        if str(expected.dtype) == "category":
-            if expected.cat.ordered != actual.cat.ordered:
+        self._extension_values(expected, actual, path)
+
+    def _extension_values(self, owner_e, owner_a, path):
+        """Compare two Series/Index values of equal dtype without losing metadata."""
+        np = sys.modules["numpy"]
+        pd = sys.modules["pandas"]
+        dtype = owner_e.dtype
+        expected, actual = owner_e.array, owner_a.array
+        if len(expected) != len(actual):
+            self.diff(path, f"length differs: {len(expected)} vs {len(actual)}")
+            return
+        masked = _masked_dtype_class()
+        if isinstance(dtype, pd.CategoricalDtype):
+            if dtype.ordered != actual.dtype.ordered:
                 self.diff(path, "categorical 'ordered' flag differs")
             self._index(
-                expected.cat.categories, actual.cat.categories, f"{path} categories"
+                dtype.categories, actual.dtype.categories, f"{path}[categories]"
             )
-            self._values(
-                expected.cat.codes.to_numpy(), actual.cat.codes.to_numpy(), path
+            self._array_values(
+                np.asarray(expected.codes), np.asarray(actual.codes), f"{path}[codes]"
             )
-            return
-        self._values(expected.to_numpy(), actual.to_numpy(), path)
-
-    def _values(self, expected, actual, path):
-        if expected.shape != actual.shape:
-            self.diff(path, f"length differs: {expected.shape} vs {actual.shape}")
-        elif expected.dtype != actual.dtype:
-            self.diff(path, f"dtype differs: {expected.dtype} vs {actual.dtype}")
+        elif masked is not None and isinstance(dtype, masked):
+            if not self._same_missing(np, expected, actual, path):
+                return
+            zero = dtype.numpy_dtype.type(0)
+            self._array_values(
+                expected.to_numpy(dtype=dtype.numpy_dtype, na_value=zero),
+                actual.to_numpy(dtype=dtype.numpy_dtype, na_value=zero),
+                path,
+            )
+        elif isinstance(dtype, pd.StringDtype):
+            if not self._same_missing(np, expected, actual, path):
+                return
+            keep = ~np.asarray(expected.isna())
+            self._array_values(
+                np.asarray(expected[keep], dtype=object),
+                np.asarray(actual[keep], dtype=object),
+                path,
+            )
+        elif isinstance(dtype, np.dtype):
+            self._array_values(
+                np.asarray(owner_e.to_numpy()), np.asarray(owner_a.to_numpy()), path
+            )
         else:
-            self._array_values(expected, actual, path)
+            self.skip(path, f"unsupported pandas dtype {dtype}")
+
+    def _same_missing(self, np, expected, actual, path) -> bool:
+        if (np.asarray(expected.isna()) != np.asarray(actual.isna())).any():
+            self.diff(path, "missing (NA) positions differ")
+            return False
+        return True
 
     # -- files ------------------------------------------------------------
 
@@ -578,20 +659,19 @@ class _Walk:
         if a_path.suffix.lower() != suffix:
             self.diff(path, f"file type differs: {e_path.name} vs {a_path.name}")
             return
-        if suffix in (".csv", ".tsv"):
-            import pandas as pd
-
-            sep = "\t" if suffix == ".tsv" else ","
-            self.value(pd.read_csv(e_path, sep=sep), pd.read_csv(a_path, sep=sep), path)
-        elif suffix == ".json":
-            loaded = []
-            for side in (e_path, a_path):
-                try:
-                    loaded.append(json.loads(side.read_text(encoding="utf-8")))
-                except ValueError as error:
-                    self.diff(path, f"{side.name} is not valid JSON: {error}")
-                    return
-            self.value(loaded[0], loaded[1], path)
+        readers = {".csv": _read_csv, ".tsv": _read_tsv, ".json": _read_json}
+        if suffix in readers:
+            try:
+                reference = readers[suffix](e_path)
+            except ValueError as error:
+                self.skip(path, f"reference {e_path.name} cannot be read: {error}")
+                return
+            try:
+                output = readers[suffix](a_path)
+            except ValueError as error:
+                self.diff(path, f"output {a_path.name} cannot be read: {error}")
+                return
+            self.value(reference, output, path)
         elif suffix == ".h5ad":
             import anndata
 
@@ -600,6 +680,30 @@ class _Walk:
             self.compared += 1
             if _sha256(e_path) != _sha256(a_path):
                 self.diff(path, "file contents differ")
+
+
+def _read_delimited(path: Path, delimiter: str) -> List[List[str]]:
+    """Rows of cell text, with no type inference or missing-value guessing."""
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            return [list(row) for row in csv.reader(handle, delimiter=delimiter)]
+    except (UnicodeDecodeError, csv.Error) as error:
+        raise ValueError(str(error)) from error
+
+
+def _read_csv(path: Path) -> List[List[str]]:
+    return _read_delimited(path, ",")
+
+
+def _read_tsv(path: Path) -> List[List[str]]:
+    return _read_delimited(path, "\t")
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return strict_json_loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, ContractError) as error:
+        raise ValueError(str(error)) from error
 
 
 def _first(mask: Any) -> Any:

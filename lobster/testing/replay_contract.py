@@ -74,8 +74,9 @@ class RefusalOrigin(str, Enum):
 
 
 class VerificationStatus(str, Enum):
-    NOT_RUN = "not_run"
-    CHECKED = "checked"
+    NOT_RUN = "not_run"  # no outputs were compared
+    INCOMPLETE = "incomplete"  # some outputs compared, not enough for a verdict
+    CHECKED = "checked"  # the comparison reached MATCH or MISMATCH
 
 
 class SparsePolicy(str, Enum):
@@ -110,8 +111,17 @@ def split_path(path: str) -> Tuple[str, ...]:
 
 
 def is_within(path: str, ancestor: str) -> bool:
-    """True if ``path`` equals ``ancestor`` or lies below it (whole segments)."""
-    return path == ancestor or path.startswith(ancestor + "/")
+    """True if ``path`` equals ``ancestor`` or lies below it (whole segments).
+
+    Below means a ``/`` child (``obs/n_genes``) or a bracketed element the
+    comparator reports inside a value (``uns/flavors[0]``, ``X[real]``,
+    ``obs[index]``). Policy paths cannot contain brackets.
+    """
+    return (
+        path == ancestor
+        or path.startswith(ancestor + "/")
+        or path.startswith(ancestor + "[")
+    )
 
 
 def _overlap(a: str, b: str) -> bool:
@@ -183,8 +193,12 @@ class ComparisonPolicy:
     schema_version: int = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != SCHEMA_VERSION:
-            raise ContractError(f"unsupported schema_version: {self.schema_version}")
+        _check_schema_version(self.schema_version)
+        for name in ("required", "excluded", "tolerances"):
+            if not isinstance(getattr(self, name), (tuple, list)):
+                raise ContractError(f"{name} must be a tuple or list")
+        if not all(isinstance(p, str) for p in self.required):
+            raise ContractError("required paths must be strings")
         object.__setattr__(self, "required", tuple(self.required))
         object.__setattr__(self, "excluded", tuple(self.excluded))
         object.__setattr__(self, "tolerances", tuple(self.tolerances))
@@ -273,8 +287,6 @@ class ComparisonPolicy:
                 )
             )
         version = data.get("schema_version", SCHEMA_VERSION)
-        if isinstance(version, bool) or not isinstance(version, int):
-            raise ContractError("schema_version must be an integer")
         return cls(
             required=tuple(required),
             excluded=tuple(excluded),
@@ -317,6 +329,13 @@ class ComparisonPolicy:
         return (best.rtol, best.atol) if best else (0.0, 0.0)
 
 
+def _check_schema_version(version: Any) -> None:
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ContractError("schema_version must be an integer")
+    if version != SCHEMA_VERSION:
+        raise ContractError(f"unsupported schema_version: {version}")
+
+
 def _list(value: Any, what: str) -> list:
     if not isinstance(value, list):
         raise ContractError(f"'{what}' must be a list")
@@ -336,13 +355,30 @@ def _reject_constant(name):
     raise ContractError(f"non-standard JSON number: {name}")
 
 
-def _loads_strict(text: str) -> Any:
-    """json.loads that refuses duplicate keys and NaN/Infinity."""
-    return json.loads(
-        text,
-        object_pairs_hook=_reject_duplicate_keys,
-        parse_constant=_reject_constant,
-    )
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ContractError(f"JSON number out of range: {text}")
+    return value
+
+
+def strict_json_loads(text: str) -> Any:
+    """json.loads that refuses duplicate keys, NaN/Infinity and overflowing numbers.
+
+    Numbers decode to Python int or float (IEEE double).
+    """
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+            parse_float=_finite_float,
+        )
+    except json.JSONDecodeError as error:
+        raise ContractError(f"invalid JSON: {error}") from error
+
+
+_loads_strict = strict_json_loads
 
 
 def canonical_sha256(value: Any) -> str:
@@ -376,6 +412,8 @@ class SlotResult:
         object.__setattr__(self, "status", SlotStatus(self.status))
         object.__setattr__(self, "diffs", tuple(self.diffs))
         object.__setattr__(self, "not_compared", tuple(self.not_compared))
+        _tolerance_value(self.rtol, "rtol", self.path)
+        _tolerance_value(self.atol, "atol", self.path)
         if isinstance(self.compared, bool) or not isinstance(self.compared, int):
             raise ContractError("compared must be an integer")
         if self.compared < 0:
@@ -568,20 +606,30 @@ class ReplayReport:
 
     @property
     def coverage_complete(self) -> bool:
-        """Every required slot was compared and matched (derived, never stored)."""
-        return bool(self.slots) and all(
-            slot.status is SlotStatus.MATCH for slot in self.slots
+        """Every required slot was compared and matched (derived, never stored).
+
+        Without the policy this cannot say the slots are the policy's full
+        scope; use ``validate(policy)`` for that.
+        """
+        return (
+            self.execution is Execution.OK
+            and bool(self.slots)
+            and all(slot.status is SlotStatus.MATCH for slot in self.slots)
         )
 
     def validate(self, policy: Optional[ComparisonPolicy] = None) -> None:
         """Raise ContractError unless the report is internally consistent.
 
         With ``policy``, also require that the slots are exactly the policy's
-        required paths, the exclusions are the policy's, and the report is
-        bound to that policy's digest.
+        required paths with that policy's tolerances, the exclusions are the
+        policy's, and the report is bound to that policy's digest.
+
+        This checks what the report says, not that the comparison happened.
+        A checker accepting a result must load its own approved policy and
+        recompute the comparison and the bindings from the files; a serialized
+        report cannot show which descendant rules produced its slots.
         """
-        if self.schema_version != SCHEMA_VERSION:
-            raise ContractError(f"unsupported schema_version: {self.schema_version}")
+        _check_schema_version(self.schema_version)
         for name in ("backend", "scenario_id"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -622,15 +670,25 @@ class ReplayReport:
 
         self._validate_state()
         self._validate_claim()
-        compared = self.verdict in (Verdict.MATCH, Verdict.MISMATCH)
-        if compared != (self.verification_status is VerificationStatus.CHECKED):
+        if self.verdict in (Verdict.MATCH, Verdict.MISMATCH):
+            expected_status = VerificationStatus.CHECKED
+        elif self.slots:
+            expected_status = VerificationStatus.INCOMPLETE
+        else:
+            expected_status = VerificationStatus.NOT_RUN
+        if self.verification_status is not expected_status:
             raise ContractError(
-                "verification_status is 'checked' exactly when outputs were compared"
+                f"verification_status must be {expected_status.value!r} here"
             )
 
         if policy is not None:
             if set(paths) != set(policy.required) and self.slots:
                 raise ContractError("slots differ from the policy's required paths")
+            for slot in self.slots:
+                if (slot.rtol, slot.atol) != policy.tolerance_for(slot.path):
+                    raise ContractError(
+                        f"slot {slot.path!r} was compared with other tolerances"
+                    )
             if set(self.excluded) != set(policy.excluded) and self.slots:
                 raise ContractError("exclusions differ from the policy's")
             if self.bindings["policy_sha256"] != policy.digest():
@@ -648,11 +706,15 @@ class ReplayReport:
             return
         if run is Execution.NOT_RUN:
             raise ContractError("an admitted run must have executed")
+        if run is not Execution.OK and self.slots:
+            raise ContractError("only a completed execution has compared outputs")
         if run is Execution.REFUSED_AT_RUNTIME:
             if self.refusal is None or self.refusal.origin is not RefusalOrigin.PRODUCT:
                 raise ContractError(
                     "REFUSED_AT_RUNTIME needs a recognized product refusal"
                 )
+            if not (self.refusal.step and self.refusal.step.strip()):
+                raise ContractError("a runtime refusal must name the step or cell")
             return
         if verdict is Verdict.REFUSED:
             raise ContractError("only a refused preflight or product refusal REFUSES")
@@ -668,6 +730,10 @@ class ReplayReport:
             )
 
     def _validate_claim(self) -> None:
+        if self.claim_requested is Claim.EXEC and self.slots:
+            raise ContractError(
+                "a C-EXEC run compares nothing; request the claim being compared"
+            )
         achieved = self.claim_achieved
         if achieved is None:
             return
@@ -778,5 +844,6 @@ __all__ = [
     "canonical_sha256",
     "is_within",
     "split_path",
+    "strict_json_loads",
     "validate_bindings",
 ]

@@ -815,6 +815,12 @@ VALID_STATES = {
         claim_achieved=None,
         verification_status=VerificationStatus.NOT_RUN,
     ),
+    "incomplete comparison": dict(
+        slots=(MATCH_SLOT, SKIPPED_SLOT),
+        verdict=Verdict.NOT_COMPARED,
+        claim_achieved=Claim.EXEC,
+        verification_status=VerificationStatus.INCOMPLETE,
+    ),
     "exec only": dict(
         claim_requested=Claim.EXEC,
         claim_achieved=Claim.EXEC,
@@ -877,7 +883,7 @@ INVALID_STATES = {
     "historical claim without match": dict(
         slots=(MATCH_SLOT, SKIPPED_SLOT),
         verdict=Verdict.NOT_COMPARED,
-        verification_status=VerificationStatus.NOT_RUN,
+        verification_status=VerificationStatus.INCOMPLETE,
     ),
     "claim not requested": dict(claim_requested=Claim.RERUN),
     "exec claim after error": dict(
@@ -905,6 +911,30 @@ INVALID_STATES = {
     ),
     "extra binding": dict(bindings={**BINDINGS, "verdict": "MATCH"}),
     "unknown verdict": dict(verdict="PASS"),
+    "exec claim with a comparison": dict(
+        claim_requested=Claim.EXEC, claim_achieved=Claim.EXEC
+    ),
+    "runtime refusal without a step": dict(
+        execution=Execution.REFUSED_AT_RUNTIME,
+        slots=(),
+        verdict=Verdict.REFUSED,
+        refusal=Refusal("ambiguous input", None, RefusalOrigin.PRODUCT),
+        claim_achieved=None,
+        verification_status=VerificationStatus.NOT_RUN,
+    ),
+    "error with compared slots": dict(
+        execution=Execution.ERROR,
+        verdict=Verdict.NOT_COMPARED,
+        claim_achieved=None,
+        verification_status=VerificationStatus.INCOMPLETE,
+    ),
+    "incomplete marked not run": dict(
+        slots=(MATCH_SLOT, SKIPPED_SLOT),
+        verdict=Verdict.NOT_COMPARED,
+        claim_achieved=None,
+        verification_status=VerificationStatus.NOT_RUN,
+    ),
+    "schema version as bool": dict(schema_version=True),
 }
 
 
@@ -927,7 +957,7 @@ def test_coverage_complete_is_derived():
     assert report().coverage_complete
     partial = report(
         **INVALID_STATES["checked without comparison"]
-        | {"verification_status": VerificationStatus.NOT_RUN}
+        | {"verification_status": VerificationStatus.INCOMPLETE}
     )
     assert not partial.coverage_complete
 
@@ -986,3 +1016,312 @@ def test_contract_and_comparator_import_without_the_scientific_stack():
         timeout=120,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+# --------------------------------------------------------------------------
+# Review findings (R4): false-MATCH paths that must stay closed
+# --------------------------------------------------------------------------
+
+
+def _verdict(expected, actual, policy=None):
+    policy = policy or ComparisonPolicy(required=("x",))
+    return aggregate_verdict(compare({"x": expected}, {"x": actual}, policy))
+
+
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        ([complex(np.nan, 1)], [complex(np.nan, 999)]),
+        ([complex(np.nan, 1)], [complex(1, np.nan)]),
+        ([complex(1, 2)], [complex(1, 2.5)]),
+    ],
+)
+def test_complex_parts_are_compared_separately(expected, actual):
+    assert _verdict(np.array(expected), np.array(actual)) is Verdict.MISMATCH
+    assert _verdict(np.array(expected), np.array(expected)) is Verdict.MATCH
+    as_objects = np.array(expected, dtype=object), np.array(actual, dtype=object)
+    assert _verdict(*as_objects) is Verdict.MISMATCH
+    sparse = sp.csr_matrix(np.array([expected])), sp.csr_matrix(np.array([actual]))
+    assert _verdict(*sparse) is Verdict.MISMATCH
+
+
+def test_masked_arrays_are_not_compared():
+    expected = np.ma.array([1.0], mask=[True])
+    actual = np.ma.array([1.0], mask=[False])
+    assert _verdict(expected, actual) is Verdict.NOT_COMPARED
+    assert _verdict(expected, expected.copy()) is Verdict.NOT_COMPARED
+
+
+def _floating(values, mask):
+    return pd.Series(pd.arrays.FloatingArray(np.array(values), np.array(mask)))
+
+
+def test_nullable_float_mask_is_compared_before_values():
+    unmasked_nan = _floating([np.nan, 1.0], [False, False])
+    masked = _floating([np.nan, 1.0], [True, False])
+    assert _verdict(unmasked_nan, masked) is Verdict.MISMATCH
+    assert _verdict(unmasked_nan, unmasked_nan.copy()) is Verdict.MATCH
+    assert _verdict(masked, masked.copy()) is Verdict.MATCH
+
+
+def test_nullable_missing_positions_are_not_filled_in():
+    # Filling NA with 0 would make these equal; the NA positions differ.
+    expected = pd.Series(pd.array([0, None], dtype="Int64"))
+    moved = pd.Series(pd.array([None, 0], dtype="Int64"))
+    assert _verdict(expected, moved) is Verdict.MISMATCH
+    flags = pd.Series(pd.array([False, None], dtype="boolean"))
+    moved_flags = pd.Series(pd.array([None, False], dtype="boolean"))
+    assert _verdict(flags, moved_flags) is Verdict.MISMATCH
+
+
+def test_nullable_boolean_and_string_missing_positions():
+    flags = pd.Series(pd.array([True, None, False], dtype="boolean"))
+    moved = pd.Series(pd.array([None, True, False], dtype="boolean"))
+    assert _verdict(flags, moved) is Verdict.MISMATCH
+    text = pd.Series(pd.array(["a", None], dtype="string"))
+    assert _verdict(text, text.copy()) is Verdict.MATCH
+    assert _verdict(text, pd.Series(pd.array([None, "a"], dtype="string"))) is (
+        Verdict.MISMATCH
+    )
+
+
+def test_string_dtype_variants_are_different_dtypes():
+    python = pd.Series(pd.array(["a"], dtype=pd.StringDtype("python")))
+    nan_variant = pd.Series(["a"], dtype=pd.StringDtype("python", na_value=np.nan))
+    as_object = pd.Series(["a"], dtype=object)
+    assert _verdict(python, nan_variant) is Verdict.MISMATCH
+    assert _verdict(python, as_object) is Verdict.MISMATCH
+
+
+def _frame_with_index(index):
+    return pd.DataFrame({"v": [1.0]}, index=index)
+
+
+def test_categorical_index_metadata_is_compared():
+    expected = _frame_with_index(pd.CategoricalIndex(["a"], categories=["a", "b"]))
+    reordered = _frame_with_index(
+        pd.CategoricalIndex(["a"], categories=["b", "a", "c"], ordered=True)
+    )
+    ordered = _frame_with_index(
+        pd.CategoricalIndex(["a"], categories=["a", "b"], ordered=True)
+    )
+    assert _verdict(expected, expected.copy()) is Verdict.MATCH
+    assert _verdict(expected, reordered) is Verdict.MISMATCH
+    assert _verdict(expected, ordered) is Verdict.MISMATCH
+
+
+def test_category_order_counts_even_when_codes_and_dtype_agree():
+    # Unordered dtypes compare equal regardless of category order, and the
+    # codes match because only unused categories moved.
+    expected = pd.Series(pd.Categorical(["a"], categories=["a", "b", "c"]))
+    moved = pd.Series(pd.Categorical(["a"], categories=["a", "c", "b"]))
+    assert expected.dtype == moved.dtype
+    assert _verdict(expected, moved) is Verdict.MISMATCH
+
+
+def test_column_axis_metadata_and_label_types_are_compared():
+    expected = pd.DataFrame({"a": [1]})
+    named = expected.copy()
+    named.columns.name = "features"
+    assert _verdict(expected, named) is Verdict.MISMATCH
+    numeric = pd.DataFrame({1: [1]})
+    as_float = pd.DataFrame({1.0: [1]})
+    assert _verdict(numeric, as_float) is Verdict.MISMATCH
+    index_named = expected.copy()
+    index_named.index.name = "cell"
+    assert _verdict(expected, index_named) is Verdict.MISMATCH
+
+
+def test_multiindex_is_not_compared():
+    index = pd.MultiIndex.from_tuples([("a", 1)])
+    frame = _frame_with_index(index)
+    assert _verdict(frame, frame.copy()) is Verdict.NOT_COMPARED
+
+
+def test_series_name_type_is_compared():
+    expected = pd.Series([1.0], name=1)
+    assert _verdict(expected, pd.Series([1.0], name=1.0)) is Verdict.MISMATCH
+
+
+def _file_pair(tmp_path, name, reference, output):
+    for folder, content in (("ref", reference), ("out", output)):
+        (tmp_path / folder).mkdir(parents=True, exist_ok=True)
+        (tmp_path / folder / name).write_text(content)
+    return _files_verdict(tmp_path / "ref", tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "reference,output",
+    [
+        ("id\n001\n", "id\n1\n"),
+        ("id,v\nNA,1\n", "id,v\nNULL,1\n"),
+        ("a,a\n1,2\n", "a,b\n1,2\n"),
+        ("x\n1.0\n", "x\n1\n"),
+        ("x\n\n", "x\nnan\n"),
+    ],
+)
+def test_csv_cells_compare_as_text(tmp_path, reference, output):
+    result, verdict = _file_pair(tmp_path, "t.csv", reference, output)
+    assert verdict is Verdict.MISMATCH, result
+    same = _file_pair(tmp_path / "again", "t.csv", reference, reference)
+    assert same[1] is Verdict.MATCH
+
+
+def test_tsv_cells_compare_as_text(tmp_path):
+    assert _file_pair(tmp_path, "t.tsv", "id\n001\n", "id\n1\n")[1] is (
+        Verdict.MISMATCH
+    )
+
+
+def test_json_files_must_be_strict(tmp_path):
+    output_dup = _file_pair(tmp_path / "a", "s.json", '{"x": 1}', '{"x": 0, "x": 1}')
+    assert output_dup[1] is Verdict.MISMATCH
+    reference_dup = _file_pair(tmp_path / "b", "s.json", '{"x": 0, "x": 1}', '{"x": 1}')
+    assert reference_dup[1] is Verdict.NOT_COMPARED
+    nan_token = _file_pair(tmp_path / "c", "s.json", '{"x": NaN}', '{"x": NaN}')
+    assert nan_token[1] is Verdict.NOT_COMPARED
+
+
+def test_json_int_and_float_are_different(tmp_path):
+    assert _file_pair(tmp_path, "s.json", '{"x": 1}', '{"x": 1.0}')[1] is (
+        Verdict.MISMATCH
+    )
+
+
+def test_strict_policy_rejects_slots_compared_loosely():
+    loose = ComparisonPolicy(required=("x",), tolerances=(Tolerance("x", atol=1.0),))
+    strict = ComparisonPolicy(required=("x",))
+    slots = compare({"x": 1.0}, {"x": 1.5}, loose)
+    assert aggregate_verdict(slots) is Verdict.MATCH
+    claimed = report(
+        slots=slots, bindings={**BINDINGS, "policy_sha256": strict.digest()}
+    )
+    with pytest.raises(ContractError, match="tolerances"):
+        claimed.validate(strict)
+    honest = report(slots=slots, bindings={**BINDINGS, "policy_sha256": loose.digest()})
+    honest.validate(loose)
+
+
+def test_absent_values_alone_are_not_evidence():
+    assert _verdict(None, None) is Verdict.NOT_COMPARED
+    assert _verdict({"a": None}, {"a": None}) is Verdict.NOT_COMPARED
+    assert _verdict(pd.NA, pd.NA) is Verdict.NOT_COMPARED
+    no_raw = anndata.AnnData(X=np.ones((2, 2)))
+    raw_only = ComparisonPolicy(required=("ad/raw",))
+    assert run(no_raw, no_raw.copy(), raw_only)[1] is Verdict.NOT_COMPARED
+
+
+def test_exclusions_that_leave_only_an_absent_raw_are_not_evidence():
+    reference = anndata.AnnData(X=np.ones((2, 2)))
+    policy = ComparisonPolicy(
+        required=("ad",),
+        excluded=tuple(
+            Exclusion(f"ad/{slot}", "not part of this check")
+            for slot in SLOTS
+            if slot != "raw"
+        ),
+    )
+    assert run(reference, reference.copy(), policy)[1] is Verdict.NOT_COMPARED
+
+
+def test_nan_values_inside_a_populated_array_still_count():
+    values = np.array([np.nan, 1.0])
+    assert _verdict(values, values.copy()) is Verdict.MATCH
+
+
+def test_symlinked_output_root_is_refused(tmp_path):
+    reference = _write_outputs(tmp_path / "ref")
+    os.symlink(reference, tmp_path / "out")
+    with pytest.raises(ValueError, match="symbolic link"):
+        output_files(tmp_path / "out")
+
+
+def test_symlinked_output_directory_is_not_followed(tmp_path):
+    reference = _write_outputs(tmp_path / "ref")
+    (reference / "nested").mkdir()
+    (reference / "nested" / "x.bin").write_bytes(b"1")
+    output = _write_outputs(tmp_path / "out")
+    os.symlink(reference / "nested", output / "nested")
+    result, verdict = _files_verdict(reference, output)
+    assert verdict is not Verdict.MATCH, result
+
+
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        (np.int32(1), np.int64(1)),
+        (np.float32(1), 1.0),
+        (np.float64(1), 1.0),
+        (1, 1.0),
+        (np.datetime64("2024-01-01", "D"), np.datetime64("2024-01-01T00:00:00", "s")),
+        (np.array([np.int32(1)], dtype=object), np.array([np.int64(1)], dtype=object)),
+    ],
+)
+def test_scalar_types_and_dtypes_must_match(expected, actual):
+    assert _verdict(expected, actual) is Verdict.MISMATCH
+    assert _verdict(expected, expected) is Verdict.MATCH
+
+
+def test_longdouble_is_compared_at_native_precision():
+    one = np.longdouble(1)
+    nudged = np.nextafter(one, np.longdouble(2))
+    assert _verdict(one, nudged) is Verdict.MISMATCH
+
+
+def test_timezone_is_part_of_a_timestamp():
+    utc = pd.Timestamp("2024-01-01 00:00", tz="UTC")
+    berlin = utc.tz_convert("Europe/Berlin")
+    assert utc == berlin
+    assert _verdict(utc, berlin) is Verdict.MISMATCH
+
+
+def _csr_with_index_dtype(dtype):
+    matrix = sp.csr_matrix(np.array([[0.0, 1.0], [2.0, 0.0]]))
+    matrix.indices = matrix.indices.astype(dtype)
+    matrix.indptr = matrix.indptr.astype(dtype)
+    return matrix
+
+
+def test_representation_mode_compares_index_dtypes():
+    small, large = _csr_with_index_dtype(np.int32), _csr_with_index_dtype(np.int64)
+    assert _sparse_case("representation", small, large) is Verdict.MISMATCH
+    assert _sparse_case("semantic", small, large) is Verdict.MATCH
+
+
+def test_semantic_sparse_compares_the_nonzero_pattern_exactly():
+    exact_zero = sp.csr_matrix(np.array([[0.0, 1.0]]))
+    tiny = sp.csr_matrix(np.array([[1e-15, 1.0]]))
+    policy = ComparisonPolicy(required=("m",), tolerances=(Tolerance("m", atol=1e-3),))
+    results = compare({"m": exact_zero}, {"m": tiny}, policy)
+    assert aggregate_verdict(results) is Verdict.MISMATCH
+
+
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        (np.array([1.0], dtype=object), np.array([1.01], dtype=object)),
+        ([1.0, 2.0], [1.01, 2.0]),
+        ({"v": [1.0]}, {"v": [1.01]}),
+        (pd.Series([1.0], index=[0.5]), pd.Series([1.0], index=[0.51])),
+        (np.array([1 + 1j]), np.array([1.01 + 1j])),
+    ],
+)
+def test_parent_tolerance_reaches_elements_inside_values(expected, actual):
+    loose = ComparisonPolicy(required=("x",), tolerances=(Tolerance("x", atol=0.1),))
+    assert _verdict(expected, actual, loose) is Verdict.MATCH
+    assert _verdict(expected, actual) is Verdict.MISMATCH
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: ComparisonPolicy(required="ad/X"),
+        lambda: ComparisonPolicy(required=("ad/X",), schema_version=True),
+        lambda: ComparisonPolicy(required=(1,)),
+        lambda: SlotResult("x", SlotStatus.MATCH, compared=1, rtol=-1.0),
+        lambda: SlotResult("x", SlotStatus.MATCH, compared=1, atol=float("nan")),
+    ],
+)
+def test_constructors_are_as_strict_as_the_json_loaders(build):
+    with pytest.raises(ContractError):
+        build()
