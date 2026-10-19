@@ -874,7 +874,6 @@ DISEASE_FLAG_MAPPINGS: Dict[str, str] = {
 
 # Values that indicate TRUE for boolean disease flags
 TRUE_VALUES = {"yes", "y", "true", "1", "positive", "affected"}
-FALSE_VALUES = {"no", "n", "false", "0", "negative", "unaffected"}
 AMBIGUOUS_VALUES = {"not applicable", "n/a", "missing", "unknown", "not collected"}
 
 
@@ -1002,8 +1001,6 @@ def harmonize_disease_field(
 
                     active_diseases.append(standardized)
                     original_values.append(f"{flag_col}={flag_value}")
-                elif flag_str in FALSE_VALUES:
-                    pass  # Explicit false, not missing
 
             if active_diseases:
                 return ";".join(sorted(set(active_diseases))), ";".join(original_values)

@@ -90,13 +90,29 @@ class TestDiseaseStandardization:
 
     def test_single_token_overlap_is_not_mapped(self, service):
         """A shared token alone (e.g. "colon") is not enough to pick a category."""
-        metadata = pd.DataFrame({"disease": ["rectal adenocarcinoma", "colon tumor"]})
+        metadata = pd.DataFrame({"disease": ["colon tumor", "rectal lesion"]})
 
         result, stats, ir = service.standardize_disease_terms(metadata, "disease")
 
-        assert result["disease"].tolist() == ["rectal adenocarcinoma", "colon tumor"]
+        assert result["disease"].tolist() == ["colon tumor", "rectal lesion"]
         assert stats["mapping_stats"]["token_matches"] == 0
         assert stats["mapping_stats"]["unmapped"] == 2
+
+    def test_adenocarcinoma_variants_map_to_crc(self, service):
+        """Explicit colorectal adenocarcinoma wording is a CRC variant."""
+        metadata = pd.DataFrame(
+            {
+                "disease": [
+                    "rectal adenocarcinoma",
+                    "colon adenocarcinoma",
+                    "colorectal adenocarcinoma",
+                ]
+            }
+        )
+
+        result, _, _ = service.standardize_disease_terms(metadata, "disease")
+
+        assert result["disease"].tolist() == ["crc", "crc", "crc"]
 
     def test_lung_cancer_not_mapped_to_crc(self, service):
         """Regression test: lung cancer should NOT map to CRC after generic term removal."""
@@ -196,7 +212,6 @@ class TestDiseaseStandardization:
                     "healthy control",  # ✓ Should map to healthy
                     "healthy volunteer",  # ✓ Should map to healthy
                     "healthy donor",  # ✓ Should map to healthy
-                    "normal control",  # ✓ Should map to healthy (compound term)
                     "non-diseased",  # ✓ Should map to healthy
                     "disease-free",  # ✓ Should map to healthy
                 ]
@@ -208,6 +223,14 @@ class TestDiseaseStandardization:
         # All should map to "healthy"
         assert all(d == "healthy" for d in result["disease"])
         assert stats["mapping_stats"]["unmapped"] == 0
+
+    def test_normal_control_is_not_healthy(self, service):
+        """The words normal and control alone never establish health."""
+        metadata = pd.DataFrame({"disease": ["normal control", "normal", "control"]})
+
+        result, _, _ = service.standardize_disease_terms(metadata, "disease")
+
+        assert "healthy" not in result["disease"].tolist()
 
     def test_unmapped_terms(self, service):
         """Test handling of unmapped terms."""

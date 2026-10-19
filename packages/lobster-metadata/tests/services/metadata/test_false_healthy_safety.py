@@ -235,6 +235,18 @@ TRAPS = [
     ("ductal", None),
     ("crc=0", None),
     ("CRC: no", None),
+    ("healthy control: no", None),
+    ("healthy_volunteer: false", None),
+    ("healthy: unknown", None),
+    ("adjacent healthy tissue", None),
+    ("disease-free survival", None),
+    ("disease-free survival 24 months", None),
+    ("crc_status=0", None),
+    ("crc_flag: 0", None),
+    ("negative crc", None),
+    ("crc (negative)", None),
+    ("normal control", None),
+    ("normal", None),
     ("crc - negative", None),
     ("no crohn's disease", None),
     ("not healthy", None),
@@ -298,14 +310,44 @@ def test_partial_keyword_hit_is_not_full_confidence(ontology):
 
 
 @pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
-def test_column_rescan_partial_hit_is_not_full_confidence(
+def test_column_rescan_partial_hit_is_a_candidate_not_applied(
     premium, ontology, monkeypatch
 ):
     monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
     samples = [{"run_accession": "SRR004", "tissue": "colorectal tissue"}]
+    enriched, _ = enrichment_config.phase1_column_rescan(samples)
+    assert enriched == 0
+    assert "disease" not in samples[0]
+    assert samples[0]["disease_candidate"] == "crc"
+    assert samples[0]["disease_candidate_confidence"] < 1.0
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+@pytest.mark.parametrize(
+    "term", ["adjacent healthy tissue", "disease-free survival", "healthy control: no"]
+)
+def test_column_rescan_never_applies_or_proposes_health_from_text(
+    term, premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR006", "condition": term}]
     enrichment_config.phase1_column_rescan(samples)
-    assert samples[0]["disease"] == "crc"
-    assert samples[0]["disease_confidence"] < 1.0
+    assert "disease" not in samples[0]
+    assert samples[0].get("disease_candidate") != "healthy"
+
+
+def test_multi_flag_text_keeps_only_the_positive_segment(ontology):
+    matches = ontology.match_disease("crc=1;uc=0;cd=0")
+    assert [m.disease_id for m in matches] == ["crc"]
+    assert matches[0].confidence < 1.0
+
+
+def test_whole_value_match_is_applied_by_column_rescan_premium(ontology, monkeypatch):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", True)
+    samples = [{"run_accession": "SRR007", "dx": "Crohn's disease"}]
+    enrichment_config.phase1_column_rescan(samples)
+    assert samples[0]["disease"] == "cd"
+    assert samples[0]["disease_confidence"] == 1.0
 
 
 # --- Valid healthy / control mappings keep working -----------------------------
@@ -316,7 +358,6 @@ HEALTHY_PHRASES = [
     "healthy volunteer",
     "healthy donor",
     "healthy subject",
-    "normal control",
     "non-ibd",
     "non-diseased",
     "disease-free",

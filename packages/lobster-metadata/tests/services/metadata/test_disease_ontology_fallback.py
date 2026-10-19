@@ -97,16 +97,15 @@ class TestMetadataAssistantFallback:
 
             enriched_count, log = phase1_column_rescan(samples)
 
-            # Verify all samples enriched
-            assert enriched_count == 3
-            assert samples[0]["disease"] == "crc"
+            # Only whole-value matches are applied; a keyword found inside
+            # longer text stays a non-applied candidate.
+            assert enriched_count == 2
+            assert "disease" not in samples[0]
+            assert samples[0]["disease_candidate"] == "crc"
+            assert samples[0]["disease_candidate_confidence"] < 1.0
             assert samples[1]["disease"] == "uc"
             assert samples[2]["disease"] == "healthy"
-
-            # Partial (in-text) keyword hits never get full confidence;
-            # only a whole-value match does.
-            assert samples[0]["disease_confidence"] < 1.0
-            assert samples[1]["disease_confidence"] < 1.0
+            assert samples[1]["disease_confidence"] == 1.0
             assert samples[2]["disease_confidence"] == 1.0
 
 

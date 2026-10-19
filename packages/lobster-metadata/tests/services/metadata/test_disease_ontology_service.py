@@ -502,12 +502,9 @@ class TestFallbackBehavior:
                 raise ImportError("No module named 'chromadb'")
             return real_import(name, *args, **kwargs)
 
-        with (
-            patch("builtins.__import__", side_effect=import_raiser),
-            patch(
-                "lobster.services.metadata.disease_ontology_service.logger"
-            ) as mock_logger,
-        ):
+        with patch("builtins.__import__", side_effect=import_raiser), patch(
+            "lobster.services.metadata.disease_ontology_service.logger"
+        ) as mock_logger:
             DiseaseOntologyService(config_path=config_path)
 
         # Check that logger.warning was called with fallback message

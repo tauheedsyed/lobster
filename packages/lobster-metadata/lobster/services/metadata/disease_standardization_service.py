@@ -66,13 +66,13 @@ class DiseaseStandardizationService:
                     # Block if EXACTLY "control" (no context)
                     "block_exact": ["control"],
                     # Allow only these specific compound phrases
-                    "allowed_phrases": ["healthy control", "normal control"],
+                    "allowed_phrases": ["healthy control"],
                 },
                 "normal": {
                     # Block if EXACTLY "normal" (no context)
                     "block_exact": ["normal"],
                     # Allow only in this valid compound context
-                    "allowed_phrases": ["normal control"],
+                    "allowed_phrases": [],
                 },
             },
         },
@@ -99,6 +99,9 @@ class DiseaseStandardizationService:
             "colorectal carcinoma",
             "colon carcinoma",
             "rectal carcinoma",
+            "colorectal adenocarcinoma",
+            "colon adenocarcinoma",
+            "rectal adenocarcinoma",
             "colorectal",
             "colon_cancer",
             "rectal_cancer",
@@ -131,7 +134,6 @@ class DiseaseStandardizationService:
             "healthy volunteer",
             "healthy donor",
             "healthy subject",
-            "normal control",
             "non-ibd",
             "non ibd",
             "non_ibd",
@@ -380,7 +382,13 @@ class DiseaseStandardizationService:
             - contains: Value contains exactly one category's variant as whole words
             - unmapped: No match, blank, negated or ambiguous (returns original value)
         """
-        normalized_value = self._normalize_term(value)
+        # A negative/unknown value ("healthy control: no", "crc_status=0") is not
+        # a mapping, whatever keyword it contains. In a ';'-separated list only
+        # the positive segments are considered.
+        remaining = self._positive_segments(" ".join(str(value).lower().split()))
+        if not remaining:
+            return value, "unmapped"
+        normalized_value = self._normalize_term(remaining)
 
         # Check exclusion patterns first (prevent false positives)
         # Uses allow-list approach for ambiguous terms (Gemini-recommended)
@@ -423,8 +431,11 @@ class DiseaseStandardizationService:
         # Level 2: a variant appears in the value as a whole phrase (not inside a
         # longer word such as "unhealthy" or "CD4") and is not negated.
         # Several different categories in one value is ambiguous -> unmapped.
+        # Health status is only taken from a whole-value (exact) match.
         hits = set()
         for standard, variants in mappings.items():
+            if standard == "healthy":
+                continue
             for variant in variants:
                 if self._contains_phrase(
                     normalized_value, self._normalize_term(variant)
@@ -437,6 +448,31 @@ class DiseaseStandardizationService:
         # Partial (reverse-contains) and single-token overlaps are not accepted:
         # "IBD" or an empty string must never resolve to a category.
         return value, "unmapped"
+
+    _NEG_TOKEN = (
+        r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"
+        r"not applicable|missing|null|nan)"
+    )
+    _AFTER_SEPARATOR = re.compile(r"[:=]\s*" + _NEG_TOKEN + r"(?![^\W_])")
+    _PAREN_NEGATIVE = re.compile(r"\(\s*(?:negative|neg|no|absent|none|false|0)\s*\)")
+    _BARE_LEADING = re.compile(r"^(?:negative|neg|no|not|without|absent)\b")
+
+    @classmethod
+    def _positive_segments(cls, text_lower: str) -> str:
+        """Drop negated/unknown ';'- or '|'-separated segments of a value."""
+        kept = []
+        for segment in re.split(r"[;|]", text_lower):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if (
+                cls._BARE_LEADING.search(segment)
+                or cls._AFTER_SEPARATOR.search(segment)
+                or cls._PAREN_NEGATIVE.search(segment)
+            ):
+                continue
+            kept.append(segment)
+        return "; ".join(kept)
 
     _MISSING_VALUES = frozenset({"", "nan", "none", "null", "na", "n a"})
     _NEGATION_BEFORE = re.compile(

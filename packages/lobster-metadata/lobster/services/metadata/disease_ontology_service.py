@@ -35,8 +35,39 @@ _NEGATION_BEFORE = re.compile(
 _NEGATIVE_AFTER = re.compile(
     r"^\s*[:=\-]?\s*(?:0|no|false|n|negative|neg|absent|none)\b"
 )
+# Whole-value negation: a negative / unknown value after a key separator
+# ("healthy control: no", "crc_status=0"), "(negative)", or a leading "negative".
+_NEGATIVE_TOKEN = (
+    r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"
+    r"not applicable|missing|null|nan)"
+)
+_AFTER_SEPARATOR = re.compile(r"[:=]\s*" + _NEGATIVE_TOKEN + r"(?![^\W_])")
+_PAREN_NEGATIVE = re.compile(r"\(\s*(?:negative|neg|no|absent|none|false|0)\s*\)")
+_BARE_LEADING = re.compile(r"^(?:negative|neg|no|not|without|absent)\b")
 # Confidence for a keyword found inside longer text: never a full-confidence hit.
 PARTIAL_KEYWORD_CONFIDENCE = 0.85
+# Health status is only ever taken from a whole-value match, never from text.
+WHOLE_VALUE_ONLY_IDS = frozenset({"healthy"})
+
+
+def positive_segments(text_lower: str) -> str:
+    """Drop negated/unknown ';'- or '|'-separated segments of a value.
+
+    Returns the remaining text ('' when the whole value is negative/unknown).
+    """
+    kept = []
+    for segment in re.split(r"[;|]", text_lower):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if (
+            _BARE_LEADING.search(segment)
+            or _AFTER_SEPARATOR.search(segment)
+            or _PAREN_NEGATIVE.search(segment)
+        ):
+            continue
+        kept.append(segment)
+    return "; ".join(kept)
 
 
 def _find_keyword(text_lower: str, keyword_lower: str) -> Optional[re.Match]:
@@ -213,7 +244,8 @@ class DiseaseOntologyService:
             - Whole-token keyword matching (case-insensitive); negated, blank
               and ambiguous (multi-disease) text returns no match
             - confidence=1.0 only when the whole query equals a keyword; a
-              keyword found inside longer text scores 0.85
+              keyword found inside longer text scores 0.85 (candidate only) and
+              health ("healthy") is matched on a whole value only
             - Returns <=1 result
 
         Phase 2 Implementation:
@@ -258,8 +290,11 @@ class DiseaseOntologyService:
             return [m for m in disease_matches if m.confidence >= min_confidence]
 
         query_lower = " ".join(str(query).lower().split())
-        if not query_lower:
-            return []
+        remaining = positive_segments(query_lower)
+        if not remaining:
+            return []  # blank, negative or unknown as a whole value
+        whole = remaining == query_lower
+        query_lower = remaining
 
         # Phase 1: whole-token keyword matching. Unknown, negated, blank or
         # ambiguous (several diseases) text yields no match instead of a guess.
@@ -269,7 +304,7 @@ class DiseaseOntologyService:
             exact = False
             for keyword in disease.keywords:
                 keyword_lower = keyword.lower()
-                if keyword_lower == query_lower:
+                if whole and keyword_lower == query_lower:
                     matched_keyword, exact = keyword, True
                     break
                 if matched_keyword is None and _find_keyword(
@@ -295,6 +330,14 @@ class DiseaseOntologyService:
 
         if len({m.disease_id for m in matches}) > 1:
             return []  # ambiguous: more than one disease in the text
+
+        # Health is never read out of free text ("adjacent healthy tissue",
+        # "disease-free survival"): only a whole-value match counts.
+        matches = [
+            m
+            for m in matches
+            if m.disease_id not in WHOLE_VALUE_ONLY_IDS or m.confidence >= 1.0
+        ]
 
         matches = [m for m in matches if m.confidence >= min_confidence]
         return matches[:k]

@@ -15,6 +15,9 @@
         "colorectal carcinoma",
         "colon carcinoma",
         "rectal carcinoma",
+        "colorectal adenocarcinoma",
+        "colon adenocarcinoma",
+        "rectal adenocarcinoma",
         "colorectal",
         "colon_cancer",
         "rectal_cancer"
@@ -65,7 +68,6 @@
         "healthy volunteer",
         "healthy donor",
         "healthy subject",
-        "normal control",
         "non-ibd",
         "non ibd",
         "non_ibd",
