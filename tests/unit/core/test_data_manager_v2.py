@@ -218,12 +218,14 @@ class TestDataManagerV2Initialization:
 
     def test_default_adapters_registration(self, temp_workspace):
         """Test that default adapters are registered properly."""
+        # Default adapters are constructed by the shared adapter factory, which
+        # imports the adapter classes from their own modules.
         with (
             patch(
-                "lobster.core.runtime.data_manager.TranscriptomicsAdapter"
+                "lobster.core.adapters.transcriptomics_adapter.TranscriptomicsAdapter"
             ) as mock_transcriptomics,
             patch(
-                "lobster.core.runtime.data_manager.ProteomicsAdapter"
+                "lobster.core.adapters.proteomics_adapter.ProteomicsAdapter"
             ) as mock_proteomics,
             patch("lobster.core.runtime.data_manager.H5ADBackend"),
         ):
