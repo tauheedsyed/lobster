@@ -24,6 +24,7 @@ except ImportError:
 
 from lobster.core.exceptions import (
     FeatureNotImplementedError,
+    InferenceRefused,
     UnsupportedPlatformError,
 )
 from lobster.services.data_access.geo.constants import (
@@ -98,6 +99,8 @@ class MetadataFetcher:
         except FeatureNotImplementedError:
             # Re-raise modality errors - they should be handled by caller
             raise
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.exception(f"Error fetching metadata for {geo_id}: {e}")
             return (None, None)
@@ -136,6 +139,8 @@ class MetadataFetcher:
                 )
                 try:
                     return self._fetch_gse_metadata_via_entrez(gse_id)
+                except InferenceRefused:
+                    raise
                 except Exception as e:
                     logger.error(f"Entrez fallback also failed for {gse_id}: {e}")
                     logger.error(
@@ -196,6 +201,8 @@ class MetadataFetcher:
             raise
         except FeatureNotImplementedError:
             # Re-raise modality errors without catching them
+            raise
+        except InferenceRefused:
             raise
         except Exception as geoparse_error:
             logger.error(f"GEOparse metadata fetch failed: {geoparse_error}")
@@ -302,6 +309,8 @@ class MetadataFetcher:
             logger.error(f"Error parsing GDS JSON response: {e}")
             logger.error(f"Error parsing GDS metadata response for {gds_id}: {str(e)}")
             return (None, None)
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.error(f"Error fetching GDS metadata for {gds_id}: {e}")
             logger.error(f"Error fetching GDS metadata for {gds_id}: {str(e)}")
@@ -517,6 +526,8 @@ class MetadataFetcher:
             raise Exception(
                 f"Error parsing Entrez metadata response for {gse_id}: {str(e)}"
             )
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.error(f"Error in Entrez fallback for {gse_id}: {e}")
             raise
@@ -1053,7 +1064,9 @@ class MetadataFetcher:
         from lobster.agents.data_expert.assistant import DataExpertAssistant
 
         if not hasattr(self.service, "_data_expert_assistant"):
-            self.service._data_expert_assistant = DataExpertAssistant()
+            self.service._data_expert_assistant = DataExpertAssistant(
+                data_manager=self.service.data_manager
+            )
 
         # Call LLM to detect modality
         modality_result = self.service._data_expert_assistant.detect_modality(

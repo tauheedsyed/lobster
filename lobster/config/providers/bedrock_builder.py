@@ -34,6 +34,7 @@ def build_bedrock_converse(
     params: dict[str, Any] = {
         "model_id": model_id,
         "temperature": temperature,
+        "max_tokens": max_tokens,
     }
 
     # Gateway path: inject pre-built clients

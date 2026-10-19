@@ -38,6 +38,7 @@ from lobster.config.settings import get_settings
 
 # Premium feature - graceful fallback if unavailable
 from lobster.core.component_registry import component_registry
+from lobster.core.exceptions import InferenceRefused
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.schemas.download_queue import (
     DownloadStatus,
@@ -162,7 +163,7 @@ def research_agent(
         if _data_expert is None:
             from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-            _data_expert = DataExpertAssistant()
+            _data_expert = DataExpertAssistant(data_manager=data_manager)
             logger.debug("Lazy-loaded DataExpertAssistant")
         return _data_expert
 
@@ -1345,15 +1346,22 @@ def research_agent(
                         f"For '{identifier}', use `prepare_dataset_download(accession='{identifier}')` instead."
                     )
 
+            except InferenceRefused:
+                raise
             except Exception as e:
                 logger.error(f"Error accessing dataset {identifier}: {e}")
                 return f"Error accessing dataset {identifier}: {str(e)}"
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.error(f"Error in metadata validation: {e}")
             return f"Error validating dataset metadata: {str(e)}"
 
-    validate_dataset_metadata.metadata = {"categories": ["UTILITY"], "provenance": False}
+    validate_dataset_metadata.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     validate_dataset_metadata.tags = ["UTILITY"]
 
     @tool
@@ -2276,7 +2284,10 @@ Could not extract content for: {identifier}
         )
         return outcome.response_markdown
 
-    process_publication_entry.metadata = {"categories": ["UTILITY"], "provenance": False}
+    process_publication_entry.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     process_publication_entry.tags = ["UTILITY"]
 
     @tool
@@ -2403,7 +2414,10 @@ Could not extract content for: {identifier}
             )
             return result
 
-    process_publication_queue.metadata = {"categories": ["UTILITY"], "provenance": False}
+    process_publication_queue.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     process_publication_queue.tags = ["UTILITY"]
 
     # ============================================================
@@ -2417,7 +2431,10 @@ Could not extract content for: {identifier}
     get_content_from_workspace = create_get_content_from_workspace_tool(
         data_manager, agent_name="research_agent"
     )
-    get_content_from_workspace.metadata = {"categories": ["UTILITY"], "provenance": False}
+    get_content_from_workspace.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     get_content_from_workspace.tags = ["UTILITY"]
 
     # ============================================================
@@ -2453,7 +2470,9 @@ Could not extract content for: {identifier}
         elif db_lower in providers_map:
             selected = [(db_lower, providers_map[db_lower])]
         else:
-            return f"Unknown database '{database}'. Use: dbaasp, iedb, peptipedia, or all"
+            return (
+                f"Unknown database '{database}'. Use: dbaasp, iedb, peptipedia, or all"
+            )
 
         all_results = []
         for db_name, provider_cls in selected:

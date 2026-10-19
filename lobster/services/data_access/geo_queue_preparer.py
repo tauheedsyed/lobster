@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from lobster.core.exceptions import InferenceRefused
 from lobster.core.interfaces.queue_preparer import (
     IQueuePreparer,
     QueuePreparationResult,
@@ -257,7 +258,7 @@ class GEOQueuePreparer(IQueuePreparer):
         if self._data_expert is None:
             from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-            self._data_expert = DataExpertAssistant()
+            self._data_expert = DataExpertAssistant(data_manager=self.data_manager)
             logger.debug("Lazy-loaded DataExpertAssistant for GEOQueuePreparer")
         return self._data_expert
 
@@ -457,6 +458,8 @@ class GEOQueuePreparer(IQueuePreparer):
                     cached_strategy_config, analysis, metadata, url_data
                 )
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.warning(
                 f"LLM strategy extraction failed for {accession}: {e}, "

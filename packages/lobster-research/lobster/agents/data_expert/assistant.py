@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.exceptions import InferenceRefused
 from lobster.utils.json_extractor import extract_json_from_text
 from lobster.utils.llm_response_utils import extract_text_from_llm_response
 from lobster.utils.logger import get_logger
@@ -129,8 +130,9 @@ class DataExpertAssistant:
     All rule-based logic has been moved to services.
     """
 
-    def __init__(self):
-        """Initialize the Data Expert Assistant."""
+    def __init__(self, data_manager=None):
+        """Initialize with an optional explicit workspace owner."""
+        self.data_manager = data_manager
         self.settings = get_settings()
         self._llm = None
 
@@ -141,7 +143,11 @@ class DataExpertAssistant:
             from lobster.core.workspace import resolve_workspace
 
             llm_params = self.settings.get_agent_llm_params("data_expert_assistant")
-            workspace_path = resolve_workspace(explicit_path=None, create=False)
+            workspace_path = (
+                self.data_manager.workspace_path
+                if self.data_manager is not None
+                else resolve_workspace(explicit_path=None, create=False)
+            )
             self._llm = create_llm(
                 "data_expert_assistant", llm_params, workspace_path=workspace_path
             )
@@ -472,6 +478,8 @@ Return only a valid JSON object conforming to the ModalityDetectionResult schema
 
             return modality_result
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.warning(
                 f"Failed to detect modality using LLM for {geo_id}: {e}",
@@ -567,6 +575,8 @@ Return only a valid JSON object that conforms to the StrategyConfig schema."""
             logger.info(f"Successfully extracted strategy config for {geo_id}")
             return strategy_config
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.warning(
                 f"Failed to extract strategy config using LLM for {geo_id}: {e}"

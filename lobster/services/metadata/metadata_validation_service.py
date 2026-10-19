@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, validator
 
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.exceptions import InferenceRefused
 from lobster.utils.json_extractor import extract_json_from_text
 from lobster.utils.llm_response_utils import extract_text_from_llm_response
 from lobster.utils.logger import get_logger
@@ -493,6 +494,8 @@ IMPORTANT:
             logger.debug(f"Validation result: {validation_config.recommendation}")
             return validation_config
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.warning(f"Failed to validate metadata for {geo_id}: {e}")
 

@@ -18,6 +18,7 @@ except ImportError:
     GEOparse = None
 
 from lobster.core.exceptions import (
+    InferenceRefused,
     UnsupportedPlatformError,
 )
 from lobster.services.data_access.geo.constants import (
@@ -165,7 +166,9 @@ class DownloadExecutor:
                 try:
                     from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-                    assistant = DataExpertAssistant()
+                    assistant = DataExpertAssistant(
+                        data_manager=self.service.data_manager
+                    )
 
                     # Get metadata for detection
                     # First try metadata from the GEO result, then fallback to cached metadata
@@ -231,6 +234,8 @@ class DownloadExecutor:
                                 f"{clean_geo_id}: Using sample count heuristic - {n_samples} samples suggests single-cell"
                             )
                             enhanced_metadata["data_type"] = "single_cell_rna_seq"
+                except InferenceRefused:
+                    raise
                 except Exception as e:
                     # Ultimate fallback if modality detection fails completely
                     logger.error(f"Modality detection failed for {clean_geo_id}: {e}")
@@ -435,6 +440,8 @@ Multi-Modal Dataset Detected:
 
             return success_msg
 
+        except InferenceRefused:
+            raise
         except GEOServiceError:
             raise
         except UnsupportedPlatformError:
@@ -531,6 +538,8 @@ Multi-Modal Dataset Detected:
                         return result
                     else:
                         logger.debug(f"Step failed: {result.error_message}")
+                except InferenceRefused:
+                    raise
                 except Exception as e:
                     logger.debug(f"Pipeline step {pipeline_func.__name__} failed: {e}")
                     continue
@@ -542,6 +551,8 @@ Multi-Modal Dataset Detected:
                 source=GEODataSource.GEOPARSE,
             )
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.exception(f"Error in strategic download: {e}")
             return GEOResult(
@@ -1132,7 +1143,9 @@ Multi-Modal Dataset Detected:
                 try:
                     from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-                    assistant = DataExpertAssistant()
+                    assistant = DataExpertAssistant(
+                        data_manager=self.service.data_manager
+                    )
 
                     modality_result = assistant.detect_modality(metadata, geo_id)
                     if modality_result and modality_result.modality == "bulk_rna":
@@ -1182,6 +1195,8 @@ Multi-Modal Dataset Detected:
                             ),
                         )
 
+                except InferenceRefused:
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Metadata detection failed for {geo_id} in supplementary path: {e}"
@@ -1207,6 +1222,8 @@ Multi-Modal Dataset Detected:
                 success=False, error_message="GEOparse could not find usable data"
             )
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.warning(f"GEOparse download failed: {e}")
             return GEOResult(success=False, error_message=str(e))

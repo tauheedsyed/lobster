@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import InferenceRefused
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.data_access.docling_service import DoclingService
 from lobster.tools.providers.abstract_provider import AbstractProvider
@@ -1547,6 +1548,8 @@ class ContentAccessService:
 
             return report
 
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.error(f"Metadata validation error: {e}", exc_info=True)
             return f"Metadata validation error for {dataset_id}: {str(e)}"

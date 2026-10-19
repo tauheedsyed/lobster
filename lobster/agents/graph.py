@@ -36,6 +36,7 @@ from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.config.supervisor_config import SupervisorConfig
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import InferenceRefused
 from lobster.tools.custom_code_tool import create_execute_custom_code_tool
 from lobster.tools.todo_tools import create_todo_tools
 from lobster.tools.workspace_tool import (
@@ -533,6 +534,8 @@ def _create_agents_single_pass(
             created_agents[agent_name] = factory_function(**factory_kwargs).with_config(
                 {"recursion_limit": 200}
             )
+        except InferenceRefused:
+            raise
         except Exception as e:
             logger.warning(
                 f"Skipping agent '{agent_name}': factory execution failed: {e}"

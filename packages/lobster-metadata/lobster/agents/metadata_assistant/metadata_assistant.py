@@ -26,6 +26,7 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.exceptions import InferenceRefused
 from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -1007,6 +1008,8 @@ def metadata_assistant(
             logger.info(f"Validation complete for {source}")
             return report
 
+        except InferenceRefused:
+            raise
         except ValueError as e:
             logger.error(f"Validation error: {e}")
             return f"❌ Validation failed: {str(e)}"
@@ -2025,6 +2028,8 @@ Which approach would you prefer?"""
                     for future in as_completed(futures):
                         try:
                             future.result()
+                        except InferenceRefused:
+                            raise
                         except Exception as e:
                             logger.error(f"Worker error: {e}")
                 finally:
