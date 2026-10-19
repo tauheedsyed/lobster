@@ -85,6 +85,7 @@ tests.unit.core.test_replay_compare::test_semantic_sparse_ignores_format_and_exp
 tests.unit.core.test_replay_compare::test_single_change_is_a_mismatch 45
 tests.unit.core.test_replay_compare::test_single_change_leaves_unrelated_slots_matching 43
 tests.unit.core.test_replay_compare::test_slot_results_must_explain_themselves 1
+tests.unit.core.test_replay_compare::test_sparse_value_moved_to_another_position_is_a_mismatch 2
 tests.unit.core.test_replay_compare::test_symlinked_output_file_is_not_followed 1
 tests.unit.core.test_replay_compare::test_tolerance_below_matches_and_above_mismatches 1
 tests.unit.core.test_replay_compare::test_tolerance_lookup_is_segment_aware 1

@@ -523,6 +523,14 @@ def test_semantic_sparse_ignores_format_and_explicit_zeros():
     assert _sparse_case("semantic", csr, changed) is Verdict.MISMATCH
 
 
+@pytest.mark.parametrize("policy_name", ["semantic", "representation"])
+def test_sparse_value_moved_to_another_position_is_a_mismatch(policy_name):
+    # Same stored values and count, different positions.
+    expected = sp.csr_matrix(np.array([[1.0, 0.0], [0.0, 2.0]]))
+    moved = sp.csr_matrix(np.array([[0.0, 1.0], [2.0, 0.0]]))
+    assert _sparse_case(policy_name, expected, moved) is Verdict.MISMATCH
+
+
 # --------------------------------------------------------------------------
 # Comparator: output files
 # --------------------------------------------------------------------------
