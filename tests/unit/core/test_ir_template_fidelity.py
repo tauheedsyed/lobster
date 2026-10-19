@@ -257,6 +257,45 @@ def _replay(ir, source):
     return namespace["adata"]
 
 
+@pytest.mark.parametrize("annotated", ["none", "matching", "different"])
+def test_quality_replay_leaves_existing_gene_annotations_alone(annotated):
+    """The service never reads or rewrites var['mt'] / var['ribo'].
+
+    A data adapter adds both columns on load. The template used to delete
+    them (and, when present, read its masks from them), so a replay changed
+    the column order, or the QC metrics when the columns disagreed with the
+    gene names.
+    """
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(3)
+    names = [f"MT-{i}" for i in range(4)] + [f"RPL{i}" for i in range(4)]
+    names += [f"G{i}" for i in range(40)]
+    var = pd.DataFrame(index=names)
+    if annotated != "none":
+        is_mt = np.array([n.startswith("MT-") for n in names])
+        is_ribo = np.array([n.startswith("RPL") for n in names])
+        if annotated == "different":
+            is_mt, is_ribo = is_ribo, np.zeros(len(names), dtype=bool)
+        var["mt"] = is_mt
+        var["ribo"] = is_ribo
+        var["other"] = np.arange(len(names))
+    source = ad.AnnData(
+        X=rng.poisson(3, size=(60, len(names))).astype(np.float32),
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(60)]),
+        var=var,
+    )
+    live, _, ir = QualityService().assess_quality(
+        source.copy(), min_genes=5, max_genes=60, max_mt_pct=50.0
+    )
+    replayed = _replay(ir, source)
+    assert list(replayed.var.columns) == list(live.var.columns)
+    pd.testing.assert_frame_equal(replayed.var, live.var)
+    pd.testing.assert_frame_equal(replayed.obs, live.obs)
+
+
 @pytest.mark.parametrize("method", ["log1p", "sctransform_like"])
 @pytest.mark.parametrize("sparse_input", [False, True])
 def test_filter_normalization_replay_matches_live(method, sparse_input):
