@@ -1,0 +1,57 @@
+# Notebook-export fidelity tests that CI must execute: '<classname::function> <count>'.
+# Checked by scripts/check_test_results.py --expect-tests in .github/workflows/ci-testing.yml.
+# When you add, remove or re-parametrize one of these tests, regenerate this file:
+#   python scripts/check_test_results.py --write-expected tests/unit/core/notebook_fidelity_tests.txt results-notebook-fidelity-*.xml
+# and keep the header. Review every changed line: a removed test is lost coverage.
+tests.unit.core.test_analysis_ir_repr_filter.TestReprFilterContract::test_all_real_repr_templates_render 1
+tests.unit.core.test_analysis_ir_repr_filter.TestReprFilterContract::test_clustering_service_nospace_repr 1
+tests.unit.core.test_analysis_ir_repr_filter.TestReprFilterContract::test_repr_both_spacings_identical 1
+tests.unit.core.test_analysis_ir_repr_filter.TestReprFilterContract::test_source_files_present 1
+tests.unit.core.test_analysis_ir_repr_filter.TestReprFilterExporterRoundTrip::test_repr_ir_exports_to_valid_notebook 1
+tests.unit.core.test_ir_coverage.TestCoverageReport::test_empty_report 1
+tests.unit.core.test_ir_coverage.TestCoverageReport::test_report_to_dict 1
+tests.unit.core.test_ir_coverage.TestCoverageReport::test_report_with_services 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_analyze_methods 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_analyze_service_file 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_analyzer_initialization_custom 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_analyzer_initialization_default 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_generate_report 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_has_analysis_step_import_negative 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_has_analysis_step_import_positive 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_identify_gaps 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_method_returns_ir_negative_2tuple 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_method_returns_ir_negative_wrong_var_name 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_method_returns_ir_positive 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_print_report 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_print_report_verbose 1
+tests.unit.core.test_ir_coverage.TestIRCoverageAnalyzer::test_scan_services 1
+tests.unit.core.test_ir_coverage.TestServiceCoverage::test_coverage_calculation_empty 1
+tests.unit.core.test_ir_coverage.TestServiceCoverage::test_coverage_calculation_full 1
+tests.unit.core.test_ir_coverage.TestServiceCoverage::test_coverage_calculation_no_ir 1
+tests.unit.core.test_ir_coverage.TestServiceCoverage::test_coverage_calculation_partial 1
+tests.unit.core.test_ir_escaped_names::test_auto_annotation_replays_exact_cluster_key 4
+tests.unit.core.test_ir_escaped_names::test_gene_set_score_replays_exact_column 4
+tests.unit.core.test_ir_peptide_fidelity::test_activity_template_replays_scores_and_labels 6
+tests.unit.core.test_ir_peptide_fidelity::test_digestion_template_replays_fragments_including_empty_output 4
+tests.unit.core.test_ir_peptide_fidelity::test_property_template_replays_all_requested_properties 8
+tests.unit.core.test_ir_python_literal::test_identical_to_repr_for_plain_values 13
+tests.unit.core.test_ir_python_literal::test_nan_evaluates_to_nan 1
+tests.unit.core.test_ir_python_literal::test_non_repr_safe_values_evaluate_back 7
+tests.unit.core.test_ir_python_literal::test_template_with_inf_runs 1
+tests.unit.core.test_ir_python_literal::test_unsupported_numpy_values_keep_their_repr 5
+tests.unit.core.test_ir_template_fidelity::test_annotation_template_is_not_a_stub 1
+tests.unit.core.test_ir_template_fidelity::test_bulk_normalization_real_pydeseq2_replay 2
+tests.unit.core.test_ir_template_fidelity::test_bulk_normalization_replay_matches_live 10
+tests.unit.core.test_ir_template_fidelity::test_clustering_template_declares_n_comps 2
+tests.unit.core.test_ir_template_fidelity::test_clustering_template_does_not_leave_adata_as_the_subset 2
+tests.unit.core.test_ir_template_fidelity::test_clustering_template_runs_marker_genes 2
+tests.unit.core.test_ir_template_fidelity::test_clustering_template_sets_the_uns_keys_the_service_sets 2
+tests.unit.core.test_ir_template_fidelity::test_exporter_coverage_wording_matches_selection 4
+tests.unit.core.test_ir_template_fidelity::test_exporter_default_wording_remains_exportable 1
+tests.unit.core.test_ir_template_fidelity::test_filter_normalization_replay_matches_live 4
+tests.unit.core.test_ir_template_fidelity::test_filter_template_filters_genes_before_the_mt_ribo_cell_filter 1
+tests.unit.core.test_ir_template_fidelity::test_filter_template_stores_raw_before_normalizing 1
+tests.unit.core.test_ir_template_fidelity::test_filter_template_uses_filter_cells_so_n_genes_is_written 1
+tests.unit.core.test_ir_template_fidelity::test_quality_template_does_not_use_scanpy_qc_metric_names 1
+tests.unit.core.test_ir_template_fidelity::test_quality_template_qc_pass_includes_the_housekeeping_floor 1
+tests.unit.core.test_ir_template_fidelity::test_quality_template_writes_the_services_column_names 1

@@ -148,5 +148,95 @@ class TestCIResults(unittest.TestCase):
             self.assertIn(b"DOCTYPE", result.stderr)
 
 
+EXPECTED_XML = (
+    '<testsuite><testcase classname="m.T" name="test_a[x]"/>'
+    '<testcase classname="m.T" name="test_a[y]"/>'
+    '<testcase classname="m" name="test_b"/></testsuite>'
+)
+
+
+class TestExpectedTests(unittest.TestCase):
+    def check(self, xml_text, expected_text):
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.xml"
+            result.write_text(xml_text)
+            expected = Path(directory) / "expected.txt"
+            expected.write_text(expected_text)
+            MODULE.check_expected([result], MODULE.read_expected(expected))
+
+    def test_exact_match_accepted(self):
+        self.check(EXPECTED_XML, "# header\nm.T::test_a 2\n\nm::test_b 1\n")
+
+    def test_missing_function_rejected(self):
+        xml = EXPECTED_XML.replace('<testcase classname="m" name="test_b"/>', "")
+        with self.assertRaisesRegex(ValueError, "m::test_b: expected 1, executed 0"):
+            self.check(xml, "m.T::test_a 2\nm::test_b 1\n")
+
+    def test_lost_parametrized_case_rejected(self):
+        with self.assertRaisesRegex(ValueError, "m.T::test_a: expected 3, executed 2"):
+            self.check(EXPECTED_XML, "m.T::test_a 3\nm::test_b 1\n")
+
+    def test_unexpected_test_rejected(self):
+        with self.assertRaisesRegex(ValueError, "m::test_b: expected 0, executed 1"):
+            self.check(EXPECTED_XML, "m.T::test_a 2\n")
+
+    def test_skipped_case_does_not_count(self):
+        xml = EXPECTED_XML.replace(
+            '<testcase classname="m" name="test_b"/>',
+            '<testcase classname="m" name="test_b"><skipped/></testcase>',
+        )
+        with self.assertRaisesRegex(ValueError, "m::test_b: expected 1, executed 0"):
+            self.check(xml, "m.T::test_a 2\nm::test_b 1\n")
+
+    def test_counts_combine_across_result_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.xml"
+            first.write_text(EXPECTED_XML)
+            second = Path(directory) / "second.xml"
+            second.write_text(
+                '<testsuite><testcase classname="n" name="test_c"/></testsuite>'
+            )
+            MODULE.check_expected(
+                [first, second],
+                {"m.T::test_a": 2, "m::test_b": 1, "n::test_c": 1},
+            )
+
+    def test_malformed_or_empty_expected_list_rejected(self):
+        for text in (
+            "m::test_b\n",
+            "m::test_b 0\n",
+            "m::test_b two\n",
+            "m::test_b 1\nm::test_b 1\n",
+            "# only a comment\n",
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.check(EXPECTED_XML, text)
+
+    def test_cli_writes_and_checks_expected_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.xml"
+            result.write_text(EXPECTED_XML)
+            expected = Path(directory) / "expected.txt"
+            command = [sys.executable, str(SCRIPT)]
+            written = subprocess.run(  # nosec B603 # Fixed local validator/fixture argv, no shell interpolation.
+                [*command, "--write-expected", str(expected), str(result)],
+                capture_output=True,
+            )
+            self.assertEqual(written.returncode, 0)
+            self.assertEqual(expected.read_text(), "m.T::test_a 2\nm::test_b 1\n")
+            checked = subprocess.run(  # nosec B603 # Fixed local validator/fixture argv, no shell interpolation.
+                [*command, "--expect-tests", str(expected), str(result)],
+                capture_output=True,
+            )
+            self.assertEqual(checked.returncode, 0)
+            expected.write_text("m.T::test_a 2\n")
+            stale = subprocess.run(  # nosec B603 # Fixed local validator/fixture argv, no shell interpolation.
+                [*command, "--expect-tests", str(expected), str(result)],
+                capture_output=True,
+            )
+            self.assertEqual(stale.returncode, 1)
+            self.assertIn(b"m::test_b", stale.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
