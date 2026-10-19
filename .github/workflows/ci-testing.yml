@@ -335,6 +335,7 @@ jobs:
             tests/unit/core/test_ir_python_literal.py
             tests/unit/core/test_analysis_ir_repr_filter.py
             tests/unit/core/test_ir_coverage.py
+            tests/unit/core/test_replay_compare.py
           )
           RESULTS=()
           for index in "${!FIDELITY_TESTS[@]}"; do

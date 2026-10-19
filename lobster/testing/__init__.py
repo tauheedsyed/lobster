@@ -34,10 +34,33 @@ Example - Contract testing:
     >>> # Run with pytest - validates plugin API compliance and AQUADIF metadata
 """
 
-from lobster.testing.contract_mixins import AgentContractTestMixin
-from lobster.testing.fixtures import create_test_workspace
-from lobster.testing.mock_data_manager import MockDataManager, MockProvenanceTracker
-from lobster.testing.mock_llm import MockLLM, MockLLMResponse
+import importlib
+
+# Exports load on first use, so a light submodule (for example
+# ``lobster.testing.replay_contract``) can be imported without pulling in the
+# scientific stack through the mocks and mixins below.
+_EXPORTS = {
+    "AgentContractTestMixin": "lobster.testing.contract_mixins",
+    "create_test_workspace": "lobster.testing.fixtures",
+    "MockDataManager": "lobster.testing.mock_data_manager",
+    "MockProvenanceTracker": "lobster.testing.mock_data_manager",
+    "MockLLM": "lobster.testing.mock_llm",
+    "MockLLMResponse": "lobster.testing.mock_llm",
+}
+
+
+def __getattr__(name):
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORTS))
+
 
 __all__ = [
     # Mock objects
