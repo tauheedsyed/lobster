@@ -465,9 +465,9 @@ complete code generation instructions for reproducibility.
             Markdown cell with the export record
         """
         record = {
-            "export_record": {
+            "data_integrity_manifest": {
                 "generated_at": datetime.now().isoformat(),
-                "provenance_summary": self._get_provenance_hash(),
+                "provenance": self._get_provenance_hash(),
                 "input_files": self._get_input_file_hashes(),
                 "system": self._get_system_info(),
             }
@@ -483,7 +483,7 @@ Recorded when this notebook was exported, for your own checks.
 
 **What is recorded**
 - `input_files`: SHA-256 of each modality's `.h5ad` file in the workspace at export time (`file_not_found` if the file was missing).
-- `provenance_summary.sha256`: SHA-256 of the session ID and the activity and entity counts only. It does not cover the content of the provenance record.
+- `provenance.sha256`: SHA-256 of the session ID and the activity and entity counts only. It does not cover the content of the provenance record.
 - `system`: Lobster and Python versions, the platform, and the short Git commit of the directory the export ran in (if any), as plain text.
 
 **Limits**

@@ -322,8 +322,9 @@ class TestNotebookExporter:
         assert "activity and entity counts only" in source
         assert "not tamper evidence and not proof of regulatory compliance" in source
         assert "does not show that running this notebook reproduces" in source
-        assert '"export_record"' in source
-        assert '"provenance_summary"' in source
+        # JSON keys stay stable so existing hash-checking scripts keep working.
+        assert '"data_integrity_manifest"' in source
+        assert '"provenance"' in source
 
     def test_create_header_cell(self, provenance_tracker, data_manager):
         """Test header cell creation."""
