@@ -398,6 +398,7 @@ NOTEBOOK_FIDELITY_FILES = (
     "tests/unit/core/test_analysis_ir_repr_filter.py",
     "tests/unit/core/test_ir_coverage.py",
     "tests/unit/core/test_replay_compare.py",
+    "tests/unit/core/test_ir_load_fidelity.py",
 )
 NOTEBOOK_FIDELITY_LIST = "tests/unit/core/notebook_fidelity_tests.txt"
 
