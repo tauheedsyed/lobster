@@ -14,6 +14,7 @@ This module contains:
 
 import json
 import logging
+import re
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
@@ -246,6 +247,8 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                     break  # Found disease, move to next sample
     else:
         # Public version (lobster-local): Use hardcoded fallback
+        # Whole-token keywords only; no bare "control" (negative/technical controls
+        # are not healthy samples).
         disease_keywords = {
             "crc": [
                 "colorectal",
@@ -256,8 +259,32 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
             ],
             "uc": ["ulcerative", "uc_", "colitis_ulcerosa", "ulcerative_colitis"],
             "cd": ["crohn", "cd_", "crohns", "crohns_disease"],
-            "healthy": ["healthy", "control", "non_ibd", "non-ibd", "non_diseased"],
+            "healthy": [
+                "healthy",
+                "healthy control",
+                "non_ibd",
+                "non-ibd",
+                "non_diseased",
+            ],
         }
+        negation_before = re.compile(
+            r"\b(?:no|not|non|without|negative for|free of|absent)\b[\s\-:_]*$"
+        )
+        negative_after = re.compile(
+            r"^\s*[:=\-]?\s*(?:0|no|false|n|negative|neg|absent|none)\b"
+        )
+
+        def _hit(text: str, keyword: str) -> bool:
+            pattern = r"(?<![^\W_])" + re.escape(keyword)
+            if keyword[-1].isalnum():
+                pattern += r"(?![^\W_])"
+            for found in re.finditer(pattern, text):
+                if negation_before.search(text[: found.start()]):
+                    continue
+                if negative_after.search(text[found.end() :]):
+                    continue
+                return True
+            return False
 
         for sample in samples:
             if sample.get("disease"):
@@ -268,30 +295,29 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 if not col_value:
                     continue
 
-                col_str = str(col_value).lower()
+                col_str = " ".join(str(col_value).lower().split())
+                found_diseases = [
+                    disease
+                    for disease, keywords in disease_keywords.items()
+                    if any(_hit(col_str, keyword) for keyword in keywords)
+                ]
+                if len(found_diseases) != 1:
+                    continue  # no hit, or ambiguous: leave unresolved
 
-                # Try each disease mapping
-                for disease, keywords in disease_keywords.items():
-                    for keyword in keywords:
-                        if keyword in col_str:
-                            sample["disease"] = disease
-                            sample["disease_original"] = str(col_value)
-                            sample["disease_source"] = f"column_remapped:{col_name}"
-                            sample["disease_confidence"] = 1.0
-                            sample["enrichment_timestamp"] = datetime.now().isoformat()
+                disease = found_diseases[0]
+                exact = col_str in disease_keywords[disease]
+                sample["disease"] = disease
+                sample["disease_original"] = str(col_value)
+                sample["disease_source"] = f"column_remapped:{col_name}"
+                sample["disease_confidence"] = 1.0 if exact else 0.85
+                sample["enrichment_timestamp"] = datetime.now().isoformat()
 
-                            enriched_count += 1
-                            log.append(
-                                f"  - Sample {sample.get('run_accession', 'unknown')}: "
-                                f"Found '{disease}' in column '{col_name}' (value: {col_value})"
-                            )
-                            break
-
-                    if sample.get("disease"):
-                        break  # Found disease, move to next sample
-
-                if sample.get("disease"):
-                    break  # Found disease, move to next sample
+                enriched_count += 1
+                log.append(
+                    f"  - Sample {sample.get('run_accession', 'unknown')}: "
+                    f"Found '{disease}' in column '{col_name}' (value: {col_value})"
+                )
+                break  # Found disease, move to next sample
 
     return enriched_count, log
 

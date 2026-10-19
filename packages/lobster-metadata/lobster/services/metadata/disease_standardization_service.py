@@ -37,7 +37,8 @@ class DiseaseStandardizationService:
 
     Key capabilities:
     - Maps messy disease labels to standard categories (CRC, UC, CD, Healthy)
-    - 5-level fuzzy matching (exact → contains → reverse → token → unmapped)
+    - Conservative matching (exact → whole-phrase contains → unmapped); blank,
+      negated and ambiguous values stay unmapped
     - Sample type filtering (fecal, biopsy, tissue, etc.)
     - Provenance tracking for all transformations
     """
@@ -365,7 +366,7 @@ class DiseaseStandardizationService:
         self, value: str, mappings: Dict[str, List[str]]
     ) -> Tuple[str, str]:
         """
-        5-level fuzzy matching strategy with exclusion pattern checking.
+        Conservative matching strategy with exclusion pattern checking.
 
         Args:
             value: Input string to match
@@ -376,10 +377,8 @@ class DiseaseStandardizationService:
 
         Match types:
             - exact: Direct match in variant list
-            - contains: Value contains a variant term
-            - reverse_contains: Variant term contains value
-            - token: Individual tokens match
-            - unmapped: No match found (returns original value)
+            - contains: Value contains exactly one category's variant as whole words
+            - unmapped: No match, blank, negated or ambiguous (returns original value)
         """
         normalized_value = self._normalize_term(value)
 
@@ -417,39 +416,48 @@ class DiseaseStandardizationService:
             if normalized_value in [self._normalize_term(v) for v in variants]:
                 return standard, "exact"
 
-        # Level 2: Value contains variant
+        # Blank or missing-value text is never a disease or a health status
+        if normalized_value in self._MISSING_VALUES:
+            return value, "unmapped"
+
+        # Level 2: a variant appears in the value as a whole phrase (not inside a
+        # longer word such as "unhealthy" or "CD4") and is not negated.
+        # Several different categories in one value is ambiguous -> unmapped.
+        hits = set()
         for standard, variants in mappings.items():
             for variant in variants:
-                normalized_variant = self._normalize_term(variant)
-                if normalized_variant in normalized_value:
-                    return standard, "contains"
+                if self._contains_phrase(
+                    normalized_value, self._normalize_term(variant)
+                ):
+                    hits.add(standard)
+                    break
+        if len(hits) == 1:
+            return hits.pop(), "contains"
 
-        # Level 3: Variant contains value (reverse)
-        for standard, variants in mappings.items():
-            for variant in variants:
-                normalized_variant = self._normalize_term(variant)
-                if normalized_value in normalized_variant:
-                    return standard, "reverse_contains"
-
-        # Level 4: Token-based matching
-        value_tokens = set(self._tokenize(normalized_value))
-        best_match = None
-        best_overlap = 0
-
-        for standard, variants in mappings.items():
-            for variant in variants:
-                variant_tokens = set(self._tokenize(self._normalize_term(variant)))
-                overlap = len(value_tokens & variant_tokens)
-
-                if overlap > 0 and overlap > best_overlap:
-                    best_match = standard
-                    best_overlap = overlap
-
-        if best_match:
-            return best_match, "token"
-
-        # Level 5: No match found
+        # Partial (reverse-contains) and single-token overlaps are not accepted:
+        # "IBD" or an empty string must never resolve to a category.
         return value, "unmapped"
+
+    _MISSING_VALUES = frozenset({"", "nan", "none", "null", "na", "n a"})
+    _NEGATION_BEFORE = re.compile(
+        r"\b(?:no|not|non|without|negative for|free of|absence of|absent)\s*$"
+    )
+    _NEGATIVE_AFTER = re.compile(r"^\s*(?:0|no|false|n|negative|neg|absent|none)\b")
+
+    def _contains_phrase(self, normalized_value: str, normalized_phrase: str) -> bool:
+        """True if the phrase occurs as whole words and is not negated."""
+        if not normalized_phrase:
+            return False
+        pattern = r"(?<![^\W_])" + re.escape(normalized_phrase) + r"(?![^\W_])"
+        for found in re.finditer(pattern, normalized_value):
+            before = normalized_value[: found.start()]
+            after = normalized_value[found.end() :]
+            if self._NEGATION_BEFORE.search(before) or self._NEGATIVE_AFTER.search(
+                after
+            ):
+                continue
+            return True
+        return False
 
     def _normalize_term(self, term: str) -> str:
         """

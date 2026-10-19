@@ -11,6 +11,7 @@ Part of the Strangler Fig migration pattern for ontology modernization.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -25,6 +26,33 @@ if TYPE_CHECKING:
     from lobster.core.schemas.search import OntologyMatch
 
 logger = get_logger(__name__)
+
+# A keyword only counts when it is a whole token (not part of a longer word such
+# as "CD4", "ductal" or "unhealthy") and is not negated in its context.
+_NEGATION_BEFORE = re.compile(
+    r"(?:\b(?:no|not|non|without|negative for|free of|absence of|absent)\b[\s\-:_]*)$"
+)
+_NEGATIVE_AFTER = re.compile(
+    r"^\s*[:=\-]?\s*(?:0|no|false|n|negative|neg|absent|none)\b"
+)
+# Confidence for a keyword found inside longer text: never a full-confidence hit.
+PARTIAL_KEYWORD_CONFIDENCE = 0.85
+
+
+def _find_keyword(text_lower: str, keyword_lower: str) -> Optional[re.Match]:
+    """Return the first whole-token, non-negated occurrence of ``keyword_lower``."""
+    if not keyword_lower:
+        return None
+    pattern = r"(?<![^\W_])" + re.escape(keyword_lower)
+    if keyword_lower[-1].isalnum():
+        pattern += r"(?![^\W_])"
+    for found in re.finditer(pattern, text_lower):
+        before = text_lower[: found.start()]
+        after = text_lower[found.end() :]
+        if _NEGATION_BEFORE.search(before) or _NEGATIVE_AFTER.search(after):
+            continue
+        return found
+    return None
 
 
 class DiseaseOntologyService:
@@ -182,9 +210,11 @@ class DiseaseOntologyService:
         **MIGRATION-STABLE API**: This signature works for both Phase 1 and Phase 2.
 
         Phase 1 Implementation:
-            - Keyword substring matching (case-insensitive)
-            - Returns confidence=1.0 (exact match)
-            - Returns <=1 result (first match wins)
+            - Whole-token keyword matching (case-insensitive); negated, blank
+              and ambiguous (multi-disease) text returns no match
+            - confidence=1.0 only when the whole query equals a keyword; a
+              keyword found inside longer text scores 0.85
+            - Returns <=1 result
 
         Phase 2 Implementation:
             - Embedding semantic search (ChromaDB)
@@ -227,25 +257,33 @@ class DiseaseOntologyService:
             ]
             return [m for m in disease_matches if m.confidence >= min_confidence]
 
-        query_lower = query.lower()
-        matches = []
+        query_lower = " ".join(str(query).lower().split())
+        if not query_lower:
+            return []
 
-        # Phase 1: Keyword substring matching
+        # Phase 1: whole-token keyword matching. Unknown, negated, blank or
+        # ambiguous (several diseases) text yields no match instead of a guess.
+        matches = []
         for disease in self._diseases:
             matched_keyword = None
+            exact = False
             for keyword in disease.keywords:
                 keyword_lower = keyword.lower()
-                if keyword_lower in query_lower:
-                    matched_keyword = keyword
+                if keyword_lower == query_lower:
+                    matched_keyword, exact = keyword, True
                     break
+                if matched_keyword is None and _find_keyword(
+                    query_lower, keyword_lower
+                ):
+                    matched_keyword = keyword
 
             if matched_keyword:
                 matches.append(
                     DiseaseMatch(
                         disease_id=disease.id,
                         name=disease.name,
-                        confidence=1.0,  # Phase 1: Always exact match
-                        match_type="exact_keyword",
+                        confidence=1.0 if exact else PARTIAL_KEYWORD_CONFIDENCE,
+                        match_type="exact_keyword" if exact else "keyword_in_text",
                         matched_term=matched_keyword,
                         metadata={
                             "mondo_id": disease.mondo_id,
@@ -255,10 +293,10 @@ class DiseaseOntologyService:
                     )
                 )
 
-        # Filter by confidence (Phase 2 will use this, Phase 1 always passes)
-        matches = [m for m in matches if m.confidence >= min_confidence]
+        if len({m.disease_id for m in matches}) > 1:
+            return []  # ambiguous: more than one disease in the text
 
-        # Return top-k (Phase 1 returns <=1, Phase 2 returns k ranked)
+        matches = [m for m in matches if m.confidence >= min_confidence]
         return matches[:k]
 
     def _convert_ontology_match(

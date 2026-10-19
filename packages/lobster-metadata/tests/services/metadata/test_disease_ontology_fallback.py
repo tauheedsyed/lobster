@@ -103,8 +103,11 @@ class TestMetadataAssistantFallback:
             assert samples[1]["disease"] == "uc"
             assert samples[2]["disease"] == "healthy"
 
-            # Verify all have disease_confidence
-            assert all(s.get("disease_confidence") == 1.0 for s in samples)
+            # Partial (in-text) keyword hits never get full confidence;
+            # only a whole-value match does.
+            assert samples[0]["disease_confidence"] < 1.0
+            assert samples[1]["disease_confidence"] < 1.0
+            assert samples[2]["disease_confidence"] == 1.0
 
 
 class TestBothPathsProduceSameResults:
