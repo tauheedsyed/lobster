@@ -1101,15 +1101,13 @@ class QualityService:
         # Keep the template aligned with _calculate_qc_metrics_from_adata().
         # It must use the same output columns and include the housekeeping floor
         # in qc_pass, so replayed notebooks preserve service behavior.
-        code_template = """# Annotate mitochondrial and ribosomal genes (5-pattern cascade)
-annotate_qc_genes(adata)
-_mt_mask = np.asarray(adata.var['mt'].values, dtype=bool)
-_ribo_mask = np.asarray(adata.var['ribo'].values, dtype=bool)
-# The service detects these genes without persisting var['mt'] / var['ribo'] at
-# this stage, so drop them to keep the exported state faithful. The filtering
-# stage re-annotates them itself, so nothing downstream loses them.
-del adata.var['mt']
-del adata.var['ribo']
+        code_template = """# Detect mitochondrial and ribosomal genes (5-pattern cascade) exactly as
+# the service does: from the gene names, without persisting var['mt'] /
+# var['ribo'] and without reading or changing those columns if the data
+# already has them (an adapter adds them on load). The filtering stage
+# annotates them itself, so nothing downstream loses them.
+_mt_mask = _detect_mt(adata.var_names.tolist())
+_ribo_mask = _detect_ribo(adata.var_names.tolist())
 
 # QC metrics — computed exactly as QualityService._calculate_qc_metrics_from_adata
 _total_counts = np.asarray(adata.X.sum(axis=1)).ravel()
