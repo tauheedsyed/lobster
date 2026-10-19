@@ -390,6 +390,72 @@ def test_release_ci_gate_rejects_weakened_selection(mutation):
         assert_release_tests_are_required(document)
 
 
+NOTEBOOK_FIDELITY_FILES = (
+    "tests/unit/core/test_ir_template_fidelity.py",
+    "tests/unit/core/test_ir_escaped_names.py",
+    "tests/unit/core/test_ir_peptide_fidelity.py",
+    "tests/unit/core/test_ir_python_literal.py",
+    "tests/unit/core/test_analysis_ir_repr_filter.py",
+    "tests/unit/core/test_ir_coverage.py",
+)
+NOTEBOOK_FIDELITY_LIST = "tests/unit/core/notebook_fidelity_tests.txt"
+
+
+def assert_notebook_fidelity_tests_are_required(document):
+    job = document["jobs"]["integration-tests"]
+    fidelity = step(job, name="Run notebook export fidelity tests")
+    assert fidelity.get("continue-on-error", "false") == "false"
+    assert job.get("continue-on-error", "false") == "false"
+    assert fidelity["if"] == "${{ !cancelled() && steps.install.outcome == 'success' }}"
+    listed = [line.strip() for line in fidelity["run"].splitlines()]
+    command = " ".join(fidelity["run"].replace("\\\n", " ").split())
+    for path in NOTEBOOK_FIDELITY_FILES:
+        assert path in listed, path
+        assert (ROOT / path).is_file(), path
+    assert 'test -f "${FIDELITY_TESTS[$index]}"' in command
+    assert '--junit-xml="$RESULT"' in command
+    assert '-m "not slow and not real_api"' in command
+    assert "--deselect" not in command and "--ignore" not in command
+    assert (
+        "scripts/check_test_results.py --require-no-skips "
+        f"--expect-tests {NOTEBOOK_FIDELITY_LIST}" in command
+    )
+    assert (ROOT / NOTEBOOK_FIDELITY_LIST).is_file()
+    for path in NOTEBOOK_FIDELITY_FILES:
+        module = path.removesuffix(".py").replace("/", ".")
+        assert module in (ROOT / NOTEBOOK_FIDELITY_LIST).read_text(), module
+    upload = step(job, name="Upload test results")
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "results-*.xml"
+    assert "integration-tests" in document["jobs"]["test-summary"]["needs"]
+
+
+def test_testing_ci_requires_every_notebook_fidelity_test():
+    assert_notebook_fidelity_tests_are_required(workflow("ci-testing"))
+
+
+@pytest.mark.parametrize(
+    "mutation", ["drop-file", "allow-skips", "drop-expected-list", "ignore-failure"]
+)
+def test_notebook_fidelity_gate_rejects_weakened_selection(mutation):
+    document = workflow("ci-testing")
+    fidelity = step(
+        document["jobs"]["integration-tests"], name="Run notebook export fidelity tests"
+    )
+    if mutation == "drop-file":
+        fidelity["run"] = fidelity["run"].replace(NOTEBOOK_FIDELITY_FILES[2], "")
+    elif mutation == "allow-skips":
+        fidelity["run"] = fidelity["run"].replace("--require-no-skips", "")
+    elif mutation == "drop-expected-list":
+        fidelity["run"] = fidelity["run"].replace(
+            f"--expect-tests {NOTEBOOK_FIDELITY_LIST}", ""
+        )
+    else:
+        fidelity["continue-on-error"] = "true"
+    with pytest.raises(AssertionError):
+        assert_notebook_fidelity_tests_are_required(document)
+
+
 @pytest.mark.parametrize("job_name", ["fast-validation", "extended-tests"])
 def test_uv_validation_does_not_enable_an_unused_pip_cache(job_name):
     job = workflow("pr-validation-basic")["jobs"][job_name]

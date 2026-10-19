@@ -320,6 +320,34 @@ jobs:
           fi
           python scripts/check_test_results.py results-integration.xml
 
+      # Notebook-export fidelity: generated notebook code must reproduce what the
+      # live tools did. Each file runs in its own process with its own JUnit file;
+      # together they must execute exactly the tests listed in
+      # tests/unit/core/notebook_fidelity_tests.txt, so a deleted, renamed, skipped
+      # or deselected test fails here instead of silently dropping coverage.
+      - name: Run notebook export fidelity tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          FIDELITY_TESTS=(
+            tests/unit/core/test_ir_template_fidelity.py
+            tests/unit/core/test_ir_escaped_names.py
+            tests/unit/core/test_ir_peptide_fidelity.py
+            tests/unit/core/test_ir_python_literal.py
+            tests/unit/core/test_analysis_ir_repr_filter.py
+            tests/unit/core/test_ir_coverage.py
+          )
+          RESULTS=()
+          for index in "${!FIDELITY_TESTS[@]}"; do
+            test -f "${FIDELITY_TESTS[$index]}"
+            RESULT="results-notebook-fidelity-$index.xml"
+            python -m pytest "${FIDELITY_TESTS[$index]}" \
+              -m "not slow and not real_api" --import-mode=importlib \
+              -v --no-cov --junit-xml="$RESULT" --tb=short
+            RESULTS+=("$RESULT")
+          done
+          python scripts/check_test_results.py --require-no-skips \
+            --expect-tests tests/unit/core/notebook_fidelity_tests.txt "${RESULTS[@]}"
+
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

@@ -58,6 +58,9 @@ dependencies = [
     # Data I/O
     "openpyxl>=3.1.0",
     "pyreadr>=0.4.0",
+    # fsspec>=2026.6.0: CVE-2026-104851 (ReferenceFileSystem/Kerchunk); pandas/anndata hand
+    # scheme:// strings to it, incl. via allow-listed custom code execution.
+    "fsspec>=2026.6.0",
     "xmltodict>=0.13.0",
     "lxml>=4.9.0",
     # HTTP
@@ -523,7 +526,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [tool.bumpversion]
-current_version = "1.1.426"
+current_version = "1.1.427"
 commit = true
 tag = true
 
