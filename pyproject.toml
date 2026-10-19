@@ -338,6 +338,11 @@ metabolights = "lobster.services.data_access.metabolights_download_service:Metab
 #   - lobster-genomics: VCF/PLINK, GWAS, variant annotation
 #   - lobster-proteomics: MS (DDA/DIA), affinity platforms (Olink, SomaScan)
 #   - lobster-ml: Feature engineering, data splitting, scVI embeddings
+[tool.uv]
+# fsspec is not a direct dependency; it arrives via dask/huggingface-hub/sgkit/torch.
+# Floor for the CVE-2026-104851 fix (ReferenceFileSystem/Kerchunk), fixed in 2026.6.0.
+constraint-dependencies = ["fsspec>=2026.6.0"]
+
 [tool.uv.workspace]
 # Explicit list — private packages (metadata, ml, structural-viz) are .gitignore'd
 # and absent from CI checkouts, so wildcard "packages/*" breaks uv build.
