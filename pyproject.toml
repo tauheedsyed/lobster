@@ -536,6 +536,11 @@ dev = [
     "pytest-asyncio>=1.1.0",
     "pytest-cov>=6.2.1",
 ]
+notebook-replay = [
+    # Kernel for the fresh-kernel notebook replay lane, pinned so the lane is
+    # reproducible (papermill and nbclient do not bring a kernel).
+    "ipykernel==7.4.0",
+]
 
 [tool.ruff]
 line-length = 88
