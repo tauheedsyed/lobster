@@ -38,6 +38,7 @@ from lobster.config.inference_context import (
     InferenceContext,
     validate_inference_binding,
 )
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 
@@ -126,6 +127,9 @@ def research_agent(
         delegation_tools = filtered_delegation_tools
 
     strict_binding = validate_inference_binding(inference_context, model_factory)
+    capture_inference_binding(
+        data_manager, inference_context, model_factory, inherit=False
+    )
     model_params = {}
     if not strict_binding:
         settings = get_settings()
@@ -178,7 +182,11 @@ def research_agent(
         if _data_expert is None:
             from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-            _data_expert = DataExpertAssistant(data_manager=data_manager)
+            _data_expert = DataExpertAssistant(
+                data_manager=data_manager,
+                inference_context=inference_context,
+                model_factory=model_factory,
+            )
             logger.debug("Lazy-loaded DataExpertAssistant")
         return _data_expert
 
@@ -190,7 +198,11 @@ def research_agent(
                 MetadataValidationService,
             )
 
-            _metadata_validator = MetadataValidationService(data_manager=data_manager)
+            _metadata_validator = MetadataValidationService(
+                data_manager=data_manager,
+                inference_context=inference_context,
+                model_factory=model_factory,
+            )
             logger.debug("Lazy-loaded MetadataValidationService")
         return _metadata_validator
 

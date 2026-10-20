@@ -53,6 +53,7 @@ from lobster.config.inference_context import (
     InferenceContext,
     validate_inference_binding,
 )
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.exceptions import reraise_inference_refusal
@@ -157,6 +158,9 @@ def data_expert(
     """
 
     strict_binding = validate_inference_binding(inference_context, model_factory)
+    capture_inference_binding(
+        data_manager, inference_context, model_factory, inherit=False
+    )
     model_params = {}
     if not strict_binding:
         settings = get_settings()

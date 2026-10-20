@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, validator
 
+from lobster.config.inference_context import BoundModelFactory, InferenceContext
+from lobster.config.inference_runtime import InferenceBoundHelper
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
@@ -107,7 +109,7 @@ class FieldMapping(BaseModel):
     )
 
 
-class MetadataValidationService:
+class MetadataValidationService(InferenceBoundHelper):
     """
     Service for validating dataset metadata against required fields.
 
@@ -195,32 +197,42 @@ class MetadataValidationService:
         ),
     }
 
-    def __init__(self, data_manager=None):
-        """
-        Initialize the Metadata Validation Service.
-
-        Args:
-            data_manager: Optional DataManagerV2 instance for provenance tracking
-        """
-        self.data_manager = data_manager
-        self.settings = get_settings()
+    def __init__(
+        self,
+        data_manager=None,
+        *,
+        inference_context: InferenceContext | None = None,
+        model_factory: BoundModelFactory | None = None,
+    ):
+        """Capture the explicit pair or the owner's runtime-only legacy bridge."""
+        self._capture_binding(data_manager, inference_context, model_factory)
+        self.settings = get_settings() if self._inference_binding is None else None
         self._llm = None
 
     @property
     def llm(self):
-        """Lazy initialization of LLM using provider-agnostic factory."""
+        """Lazy initialization; cached models never outlive their run binding."""
+        context, factory = self._check_binding()
         if self._llm is None:
-            llm_params = self.settings.get_agent_llm_params(
-                "metadata_validation_service"
-            )
-            workspace_path = (
-                self.data_manager.workspace_path if self.data_manager else None
-            )
-            self._llm = create_llm(
-                "metadata_validation_service",
-                llm_params,
-                workspace_path=workspace_path,
-            )
+            if context is not None:
+                self._llm = create_llm(
+                    "metadata_validation_service",
+                    {},
+                    inference_context=context,
+                    model_factory=factory,
+                )
+            else:
+                llm_params = self.settings.get_agent_llm_params(
+                    "metadata_validation_service"
+                )
+                workspace_path = (
+                    self.data_manager.workspace_path if self.data_manager else None
+                )
+                self._llm = create_llm(
+                    "metadata_validation_service",
+                    llm_params,
+                    workspace_path=workspace_path,
+                )
         return self._llm
 
     def normalize_field_name(self, field: str) -> str:
@@ -381,12 +393,13 @@ IMPORTANT:
 """
 
             # Invoke the LLM with structured output expectation
-            response = self.llm.invoke(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
+            with self._inference_scope():
+                response = self.llm.invoke(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ]
+                )
 
             # Extract text from response (provider-agnostic, skips thinking blocks)
             response_text = extract_text_from_llm_response(response)
