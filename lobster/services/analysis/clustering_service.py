@@ -584,6 +584,75 @@ print(f"Clustering pipeline complete: {adata.n_obs} cells in {n_clusters} cluste
             logger.exception(f"Error in PCA: {e}")
             raise ClusteringError(f"PCA failed: {str(e)}")
 
+    def _create_embedding_clustering_ir(
+        self,
+        use_rep: str,
+        resolution: float,
+        algorithm: str,
+        demo_mode: bool,
+        find_markers: bool,
+    ) -> AnalysisStep:
+        """IR for clustering on an existing embedding (``use_rep``).
+
+        Mirrors the ``use_rep`` branch of ``_perform_clustering``: no
+        normalization, feature selection or PCA.
+        """
+        algorithm = str(algorithm).lower()
+        if algorithm not in ("leiden", "louvain"):
+            raise ValueError(f"Unknown clustering algorithm {algorithm!r}")
+        code_template = """# Clustering on the existing embedding (no normalization or PCA)
+adata.raw = adata.copy()
+n_neighbors = {{ n_neighbors }}
+if adata.n_obs <= n_neighbors:
+    n_neighbors = max(2, adata.n_obs - 1)
+sc.pp.neighbors(adata, use_rep={{ use_rep | repr }}, n_neighbors=n_neighbors)
+sc.tl.{{ algorithm }}(adata, resolution={{ resolution }}, key_added={{ algorithm | repr }})
+{% if demo_mode %}
+sc.tl.umap(adata, min_dist=0.5, spread=1.5)
+{% else %}
+sc.tl.umap(adata)
+{% endif %}
+{% if find_markers %}
+try:
+    sc.tl.rank_genes_groups(adata, {{ algorithm | repr }}, method={{ marker_method | repr }})
+except ValueError as e:
+    print(f"Skipping marker gene identification: {e}")
+{% endif %}
+print(f"Clustering complete: {adata.obs[{{ algorithm | repr }}].nunique()} clusters")
+"""
+        parameters = {
+            "use_rep": use_rep,
+            "resolution": resolution,
+            "n_neighbors": 10 if demo_mode else 15,
+            "algorithm": algorithm,
+            "demo_mode": demo_mode,
+            "find_markers": find_markers,
+            "marker_method": "t-test" if demo_mode else "wilcoxon",
+        }
+        return AnalysisStep(
+            operation=f"scanpy.tl.{algorithm}",
+            tool_name="cluster_and_visualize",
+            description=(
+                f"{algorithm.capitalize()} clustering on existing embedding "
+                f"'{use_rep}' (res={resolution})"
+            ),
+            library="scanpy",
+            code_template=code_template,
+            imports=["import scanpy as sc"],
+            parameters=parameters,
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=["adata"],
+            execution_context={
+                "operation_type": "clustering",
+                "algorithm": algorithm,
+                "use_rep": use_rep,
+                "resolution": resolution,
+            },
+            validates_on_export=True,
+            requires_validation=False,
+        )
+
     def _create_pca_ir(
         self,
         n_comps: int,
@@ -1090,6 +1159,18 @@ print(f"Neighborhood graph computed (n_neighbors={{ {{{{ n_neighbors | repr }}}}
             logger.info(f"Clustering completed: {n_clusters} clusters identified")
 
             # Create IR for notebook export
+            if use_rep and use_rep in adata.obsm:
+                # _perform_clustering used the existing embedding and skipped
+                # normalization, feature selection and PCA; export the same.
+                ir = self._create_embedding_clustering_ir(
+                    use_rep=use_rep,
+                    resolution=resolution,
+                    algorithm=algorithm,
+                    demo_mode=demo_mode,
+                    find_markers="marker_genes" not in skip_steps,
+                )
+                return adata_clustered, clustering_stats, ir
+
             ir = self._create_clustering_ir(
                 resolution=(
                     resolution if resolution else self.default_cluster_resolution
