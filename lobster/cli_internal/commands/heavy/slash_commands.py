@@ -306,7 +306,7 @@ def extract_available_commands() -> Dict[str, str]:
                         if cmd not in command_descriptions:
                             command_descriptions[cmd] = f"Execute {cmd} command"
 
-    except Exception:
+    except Exception:  # nosec B110 - static command list is the fallback
         # Fallback to static definitions if AST parsing fails (silent)
         pass
 
@@ -512,7 +512,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                     display_meta=HTML(f"<dim>{meta}</dim>"),
                                     style="class:completion.dataset",
                                 )
-                except Exception:
+                except Exception:  # nosec B110 - tab completion is best-effort
                     pass
 
             elif text.startswith("/workspace remove "):
@@ -542,7 +542,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                         display=HTML(f"<ansired>{name}</ansired>"),
                                         style="class:completion.modality",
                                     )
-                except Exception:
+                except Exception:  # nosec B110 - tab completion is best-effort
                     pass
 
             elif text.startswith("/restore "):
@@ -587,7 +587,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                     display_meta=HTML(f"<dim>{meta}</dim>"),
                                     style="class:completion.modality",
                                 )
-                except Exception:
+                except Exception:  # nosec B110 - tab completion is best-effort
                     pass
 
             elif text == "/config" or text == "/config ":
@@ -638,7 +638,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                 display_meta=HTML(f"<dim>{meta}</dim>"),
                                 style="class:completion.model",
                             )
-                    except Exception:
+                    except Exception:  # nosec B110 - tab completion is best-effort
                         pass
 
                 elif text == "/config provider":
@@ -699,7 +699,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                     display_meta=HTML(f"<dim>{meta}</dim>"),
                                     style="class:completion.model",
                                 )
-                    except Exception:
+                    except Exception:  # nosec B110 - tab completion is best-effort
                         # Silent fail for tab completion
                         pass
 
@@ -1649,7 +1649,7 @@ def _build_help_blocks(*, protocol_friendly: bool = False) -> list[OutputBlock]:
                 ["/config", "Provider/model settings"],
                 ["/plots", "List generated plots"],
                 ["/read <file>", "Load data file"],
-                ["/pipeline export", "Export as Jupyter notebook"],
+                ["/pipeline export [--replay]", "Export as Jupyter notebook"],
                 ["/tokens", "Token usage & costs"],
                 ["/clear", "Clear screen"],
                 ["/exit", "Exit"],
@@ -2582,9 +2582,12 @@ when they are started by agents or analysis workflows.
         subcommand = parts[1] if len(parts) > 1 else None
 
         if subcommand == "export":
-            name = parts[2] if len(parts) > 2 else None
-            description = " ".join(parts[3:]) if len(parts) > 3 else None
-            return pipeline_export(client, output, name, description)
+            args = parts[2:]
+            mode = "replay" if "--replay" in args else "successful"
+            args = [a for a in args if a != "--replay"]
+            name = args[0] if args else None
+            description = " ".join(args[1:]) if len(args) > 1 else None
+            return pipeline_export(client, output, name, description, mode=mode)
         elif subcommand == "list":
             return pipeline_list(client, output)
         elif subcommand == "run":
@@ -2816,7 +2819,7 @@ when they are started by agents or analysis workflows.
                 if hasattr(client, "_save_session_json"):
                     try:
                         client._save_session_json()
-                    except Exception:
+                    except Exception:  # nosec B110 - session autosave is best-effort
                         pass
                 raise KeyboardInterrupt
             return None
@@ -2825,7 +2828,7 @@ when they are started by agents or analysis workflows.
             if hasattr(client, "_save_session_json"):
                 try:
                     client._save_session_json()
-                except Exception:
+                except Exception:  # nosec B110 - session autosave is best-effort
                     pass
             display_goodbye()
 
@@ -3447,7 +3450,10 @@ def vector_search_cmd_impl(query_text: str, top_k=None, pretty: bool = True):
         raise typer.Exit(1)
 
 
-def serve_impl(port: int = 8000, host: str = "0.0.0.0"):
+def serve_impl(
+    port: int = 8000,
+    host: str = "0.0.0.0",  # nosec B104 - API server; bind address is set with --host
+):
     """Start the agent system as an API server (extracted from cli.py)."""
     from typing import Optional
 

@@ -440,7 +440,9 @@ class _DummyDataManager:
             },
         ]
 
-    def export_notebook(self, name: str, description: str = ""):
+    def export_notebook(
+        self, name: str, description: str = "", filter_strategy: str = "successful"
+    ):
         _ = description
         path = self.workspace_path / "notebooks" / f"{name}.ipynb"
         path.write_text(

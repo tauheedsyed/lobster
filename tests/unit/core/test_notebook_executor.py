@@ -320,7 +320,7 @@ class TestNotebookExecutor:
             # Mock papermill
             mock_papermill.execute_notebook.return_value = None
 
-            custom_params = {"random_seed": 123, "custom_param": "value"}
+            custom_params = {"random_seed": 123}
             result = executor.execute(
                 notebook_path, input_path, parameters=custom_params
             )
@@ -331,7 +331,15 @@ class TestNotebookExecutor:
             call_args = mock_papermill.execute_notebook.call_args
             passed_params = call_args.kwargs["parameters"]
             assert passed_params["random_seed"] == 123
-            assert passed_params["custom_param"] == "value"
+
+            # A name the parameters cell does not define is refused, not ignored.
+            mock_papermill.execute_notebook.reset_mock()
+            result = executor.execute(
+                notebook_path, input_path, parameters={"custom_param": "value"}
+            )
+            assert result["status"] == "validation_failed"
+            assert "custom_param" in result["errors"][0]
+            mock_papermill.execute_notebook.assert_not_called()
         finally:
             notebook_path.unlink()
             input_path.unlink()
