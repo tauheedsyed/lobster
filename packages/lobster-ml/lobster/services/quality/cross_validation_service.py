@@ -232,14 +232,14 @@ import numpy as np
 import pandas as pd
 
 # Validate target column
-target_column = "{{ target_column }}"
+target_column = {{ target_column | string | repr }}
 if target_column not in adata.obs.columns:
     raise ValueError(f"Target column '{target_column}' not found in adata.obs")
 
 # Extract features and target
 {% if feature_space_key %}
 # Use alternate feature space (e.g., integrated factors from MOFA)
-feature_space_key = "{{ feature_space_key }}"
+feature_space_key = {{ feature_space_key | string | repr }}
 if feature_space_key not in adata.obsm:
     available_keys = list(adata.obsm.keys())
     raise KeyError(
@@ -278,7 +278,7 @@ else:
 n_classes = len(np.unique(y))
 is_binary = n_classes == 2
 
-print(f"Starting {{ n_splits }}-fold CV: {X.shape[0]} samples, {X.shape[1]} features, {n_classes} classes")
+print(f"Starting { {{ n_splits | repr }} }-fold CV: {X.shape[0]} samples, {X.shape[1]} features, {n_classes} classes")
 
 # Initialize stratified K-fold
 skf = StratifiedKFold(
@@ -315,7 +315,7 @@ model = LogisticRegression(
 from sklearn.svm import SVC
 model = SVC(
     C={{ model_params.get('C', 1.0) }},
-    kernel='{{ model_params.get("kernel", "rbf") }}',
+    kernel={{ model_params.get("kernel", "rbf") | string | repr }},
     probability=True,
     random_state={{ random_state }}
 )
@@ -333,7 +333,7 @@ all_importances = []
 
 # Cross-validation loop
 for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
-    print(f"Processing fold {fold_idx + 1}/{{ n_splits }}")
+    print(f"Processing fold {fold_idx + 1}/{ {{ n_splits | repr }} }")
 
     # Split data
     X_train, X_test = X[train_idx], X[test_idx]
@@ -370,7 +370,7 @@ for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
     {% elif model_class == "SVC" %}
     fold_model = SVC(
         C={{ model_params.get('C', 1.0) }},
-        kernel='{{ model_params.get("kernel", "rbf") }}',
+        kernel={{ model_params.get("kernel", "rbf") | string | repr }},
         probability=True,
         random_state={{ random_state }} + fold_idx
     )
@@ -829,7 +829,9 @@ print(f"CV complete: accuracy={aggregated_metrics['accuracy']['mean']:.3f}+/-{ag
                     import random
 
                     random.seed(random_state + fold_idx)
-                    fold_preds = random.sample(fold_preds, MAX_PREDICTIONS_PER_FOLD)
+                    fold_preds = random.sample(
+                        fold_preds, MAX_PREDICTIONS_PER_FOLD
+                    )  # nosec B311 - sampling, not security
                 sampled_predictions.extend(fold_preds)
 
             adata.uns["cross_validation"]["predictions"] = sampled_predictions

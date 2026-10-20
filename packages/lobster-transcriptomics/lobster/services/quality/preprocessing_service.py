@@ -285,9 +285,9 @@ sc.pp.scale(adata, max_value=10)
 {% endif %}
 
 {% if normalization_method == "sctransform_like" %}
-print(f"Normalization complete (target_sum={{ target_sum }}, log1p transformed, scaled)")
+print(f"Normalization complete (target_sum={ {{ target_sum | repr }} }, log1p transformed, scaled)")
 {% else %}
-print(f"Normalization complete (target_sum={{ target_sum }}, log1p transformed)")
+print(f"Normalization complete (target_sum={ {{ target_sum | repr }} }, log1p transformed)")
 {% endif %}
 """
 
@@ -901,12 +901,12 @@ print(f"Top 10 genes: {adata.var_names[adata.var['highly_deviant']].tolist()[:10
         }
 
         code_template = """# Highly variable gene selection
-# Using scanpy's HVG method (flavor={{ flavor }})
+# Using scanpy's HVG method (flavor={{ flavor | string | repr }})
 
 sc.pp.highly_variable_genes(
     adata,
     n_top_genes={{ n_top_genes }},
-    flavor='{{ flavor }}',
+    flavor={{ flavor | string | repr }},
 )
 
 n_hvg = adata.var['highly_variable'].sum()

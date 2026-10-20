@@ -192,7 +192,6 @@ class TestCrossValidationService:
 
     def test_template_renders_successfully(self, cv_service):
         """Test that IR template renders without Jinja2 errors."""
-        from jinja2 import Template
 
         ir = cv_service._create_stratified_kfold_ir(
             target_column="label",
@@ -207,8 +206,7 @@ class TestCrossValidationService:
             store_predictions=False,
         )
 
-        template = Template(ir.code_template)
-        rendered = template.render(ir.parameters)
+        rendered = ir.render()
 
         assert len(rendered) > 0, "Template rendered to empty string"
         assert "RandomForestClassifier" in rendered

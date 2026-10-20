@@ -6,7 +6,7 @@ structure visualizations using the ChimeraX Python API, following the Lobster
 3-tuple pattern (Dict, stats, IR).
 """
 
-import subprocess
+import subprocess  # nosec B404 - subprocess used with fixed argument lists
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -234,11 +234,13 @@ class ChimeraXVisualizationService:
 
         # Check if chimerax is in PATH
         try:
-            result = subprocess.run(
-                ["chimerax", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+            result = (
+                subprocess.run(  # nosec B603 B607 - tool resolved from PATH by design
+                    ["chimerax", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
             )
             if result.returncode == 0:
                 version = result.stdout.strip()
@@ -256,7 +258,7 @@ class ChimeraXVisualizationService:
         for path in potential_paths:
             if Path(path).exists():
                 try:
-                    result = subprocess.run(
+                    result = subprocess.run(  # nosec B603 - argument list, no shell
                         [path, "--version"],
                         capture_output=True,
                         text=True,
@@ -271,7 +273,7 @@ class ChimeraXVisualizationService:
                             "message": f"ChimeraX found at {path}: {version}",
                         }
                         return self._chimerax_available
-                except Exception:
+                except Exception:  # nosec B112 - best-effort probe
                     continue
 
         # ChimeraX not found
@@ -373,7 +375,7 @@ class ChimeraXVisualizationService:
     def _execute_chimerax_batch(self, script_file: Path, chimerax_path: str):
         """Execute ChimeraX command script in batch mode (headless, blocking)."""
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 - argument list, no shell
                 [chimerax_path, "--nogui", "--script", str(script_file)],
                 capture_output=True,
                 text=True,
@@ -415,7 +417,7 @@ class ChimeraXVisualizationService:
         try:
             # Launch ChimeraX without --nogui (opens GUI window)
             # Use Popen for non-blocking execution
-            process = subprocess.Popen(
+            process = subprocess.Popen(  # nosec B603 - argument list, no shell
                 [chimerax_path, "--script", str(script_file)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -504,9 +506,9 @@ class ChimeraXVisualizationService:
 import subprocess
 from pathlib import Path
 
-structure_file = "{{ structure_file }}"
-style = "{{ style }}"
-color_by = "{{ color_by }}"
+structure_file = {{ structure_file | string | repr }}
+style = {{ style | string | repr }}
+color_by = {{ color_by | string | repr }}
 width = {{ width }}
 height = {{ height }}
 

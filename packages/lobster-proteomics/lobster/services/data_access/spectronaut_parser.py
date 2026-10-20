@@ -218,7 +218,7 @@ class SpectronautParser(ProteomicsParser):
                 df = pd.read_csv(file_path, sep="\t", nrows=0)
                 if len(df.columns) > 1:
                     return df
-            except Exception:
+            except Exception:  # nosec B110 - best-effort cleanup
                 pass
             # Fall back to comma-separated
             return pd.read_csv(file_path, nrows=0)
@@ -288,7 +288,7 @@ class SpectronautParser(ProteomicsParser):
                 df = pd.read_csv(file_path, sep="\t", low_memory=False)
                 if len(df.columns) > 1:
                     return df
-            except Exception:
+            except Exception:  # nosec B110 - best-effort cleanup
                 pass
             # Fall back to comma-separated
             return pd.read_csv(file_path, low_memory=False)
@@ -514,19 +514,19 @@ from lobster.services.data_access.proteomics_parsers import SpectronautParser
 
 parser = SpectronautParser()
 adata, stats, ir = parser.parse(
-    file_path="{{ file_path }}",
+    file_path={{ file_path | string | repr }},
     qvalue_threshold={{ qvalue_threshold }},
-    quantity_column="{{ quantity_column }}",
+    quantity_column={{ quantity_column | string | repr }},
     log_transform={{ log_transform }},
     pseudocount={{ pseudocount }},
     use_genes_as_index={{ use_genes_as_index }},
     filter_contaminants={{ filter_contaminants }},
     filter_reverse={{ filter_reverse }},
-    aggregation_method="{{ aggregation_method }}",
+    aggregation_method={{ aggregation_method | string | repr }},
 )
 
 print(f"Loaded {adata.n_obs} samples x {adata.n_vars} proteins")
-print(f"Format: {{ format_type }}, Missing: {stats['missing_percentage']:.1f}%")
+print(f"Format: { {{ format_type | repr }} }, Missing: {stats['missing_percentage']:.1f}%")
 """
 
         # Build comprehensive parameter schema

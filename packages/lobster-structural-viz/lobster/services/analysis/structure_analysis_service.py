@@ -492,8 +492,8 @@ class StructureAnalysisService:
 from Bio import PDB
 import numpy as np
 
-structure_file = "{{ structure_file }}"
-analysis_type = "{{ analysis_type }}"
+structure_file = {{ structure_file | string | repr }}
+analysis_type = {{ analysis_type | string | repr }}
 
 # Parse structure
 parser = PDB.PDBParser(QUIET=True)
@@ -609,8 +609,8 @@ from Bio import PDB
 from Bio.PDB import Superimposer
 import numpy as np
 
-structure_file1 = "{{ structure_file1 }}"
-structure_file2 = "{{ structure_file2 }}"
+structure_file1 = {{ structure_file1 | string | repr }}
+structure_file2 = {{ structure_file2 | string | repr }}
 align = {{ align }}
 
 # Parse structures

@@ -15,7 +15,7 @@ Cross-package dependency:
 """
 
 import os
-import subprocess
+import subprocess  # nosec B404 - subprocess used with fixed argument lists
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -129,7 +129,7 @@ class BulkRNASeqService:
             )
 
             # Run FastQC
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 - argument list, no shell
                 cmd, capture_output=True, text=True, timeout=300
             )  # 5 minute timeout
 
@@ -203,7 +203,7 @@ Next suggested step: Run MultiQC to aggregate results or proceed with quantifica
             logger.info(f"Running MultiQC command: {' '.join(cmd)}")
 
             # Run MultiQC
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 - argument list, no shell
                 cmd, capture_output=True, text=True, timeout=180
             )  # 3 minute timeout
 
@@ -343,7 +343,7 @@ Next suggested step: Proceed with quantification if quality looks good, or inves
                 )
 
                 # Run Salmon with timeout
-                result = subprocess.run(
+                result = subprocess.run(  # nosec B603 - argument list, no shell
                     cmd, capture_output=True, text=True, timeout=600
                 )  # 10 minute timeout
 
@@ -2019,8 +2019,8 @@ else:
     adata_de = adata.copy()
 
 # Subset groups
-group1_data = adata_de[adata_de.obs['{{ groupby }}'] == '{{ group1 }}']
-group2_data = adata_de[adata_de.obs['{{ groupby }}'] == '{{ group2 }}']
+group1_data = adata_de[adata_de.obs[{{ groupby | string | repr }}] == {{ group1 | string | repr }}]
+group2_data = adata_de[adata_de.obs[{{ groupby | string | repr }}] == {{ group2 | string | repr }}]
 
 # Extract expression matrices
 group1_expr = group1_data.X.toarray() if hasattr(group1_data.X, 'toarray') else group1_data.X
@@ -2051,7 +2051,7 @@ results_df = pd.DataFrame({
 }, index=adata_de.var_names)
 
 # Store results in AnnData
-adata_de.uns['de_results_{{ group1 }}_vs_{{ group2 }}'] = results_df.to_dict()
+adata_de.uns[{{ ('de_results_' ~ group1 ~ '_vs_' ~ group2) | repr }}] = results_df.to_dict()
 """
             library = "scipy"
             imports = [
@@ -2069,8 +2069,8 @@ from scipy import stats
 from statsmodels.stats.multitest import multipletests
 
 # Filter and subset groups
-group1_data = adata[adata.obs['{{ groupby }}'] == '{{ group1 }}']
-group2_data = adata[adata.obs['{{ groupby }}'] == '{{ group2 }}']
+group1_data = adata[adata.obs[{{ groupby | string | repr }}] == {{ group1 | string | repr }}]
+group2_data = adata[adata.obs[{{ groupby | string | repr }}] == {{ group2 | string | repr }}]
 
 group1_expr = group1_data.X.toarray() if hasattr(group1_data.X, 'toarray') else group1_data.X
 group2_expr = group2_data.X.toarray() if hasattr(group2_data.X, 'toarray') else group2_data.X
@@ -2113,8 +2113,8 @@ from scipy import stats
 from statsmodels.stats.multitest import multipletests
 
 # Subset groups
-group1_data = adata[adata.obs['{{ groupby }}'] == '{{ group1 }}']
-group2_data = adata[adata.obs['{{ groupby }}'] == '{{ group2 }}']
+group1_data = adata[adata.obs[{{ groupby | string | repr }}] == {{ group1 | string | repr }}]
+group2_data = adata[adata.obs[{{ groupby | string | repr }}] == {{ group2 | string | repr }}]
 
 group1_expr = group1_data.X.toarray() if hasattr(group1_data.X, 'toarray') else group1_data.X
 group2_expr = group2_data.X.toarray() if hasattr(group2_data.X, 'toarray') else group2_data.X
@@ -2233,7 +2233,7 @@ gene_sets = {{ databases }}
 enr_result = gp.enrichr(
     gene_list={{ gene_list }},
     gene_sets=gene_sets,
-    organism='{{ organism }}',
+    organism={{ organism | string | repr }},
     background={{ background_genes }},
     cutoff=0.05  # Adjusted p-value cutoff
 )
@@ -2326,7 +2326,7 @@ inference = DefaultInference(n_cpus={{ n_cpus }})
 dds = DeseqDataSet(
     counts=count_matrix,  # samples x genes
     metadata=metadata,
-    design='{{ formula }}',
+    design={{ formula | string | repr }},
     inference=inference
 )
 

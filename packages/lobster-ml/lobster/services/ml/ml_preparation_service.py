@@ -832,7 +832,7 @@ class MLPreparationService:
 import numpy as np
 import pandas as pd
 
-modality_name = "{{ modality_name }}"
+modality_name = {{ modality_name | string | repr }}
 
 # Basic data structure checks
 checks = {
@@ -1050,7 +1050,9 @@ print(f"Recommendations: {recommendations}")
 
         elif handle_zeros == "impute":
             X_dense = (
-                adata_ml.X.toarray() if hasattr(adata_ml.X, "toarray") else adata_ml.X.copy()
+                adata_ml.X.toarray()
+                if hasattr(adata_ml.X, "toarray")
+                else adata_ml.X.copy()
             )
             for j in range(X_dense.shape[1]):
                 col = X_dense[:, j]
@@ -1216,11 +1218,11 @@ import numpy as np
 import pandas as pd
 import anndata as ad
 
-modality_name = "{{ modality_name }}"
-feature_selection = "{{ feature_selection }}"
+modality_name = {{ modality_name | string | repr }}
+feature_selection = {{ feature_selection | string | repr }}
 n_features = {{ n_features }}
-normalization = "{{ normalization }}"
-scaling = "{{ scaling }}"
+normalization = {{ normalization | string | repr }}
+scaling = {{ scaling | string | repr }}
 
 # Try to import scanpy for advanced normalization
 try:
@@ -1407,8 +1409,8 @@ print(f"ML feature preparation complete: {adata.shape} -> {adata_processed.shape
 from sklearn.model_selection import train_test_split
 import numpy as np
 
-modality_name = "{{ modality_name }}"
-target_column = {{ '"' + target_column + '"' if target_column else 'None' }}
+modality_name = {{ modality_name | string | repr }}
+target_column = {{ (target_column | string | repr) if target_column else 'None' }}
 test_size = {{ test_size }}
 validation_size = {{ validation_size }}
 stratify = {{ stratify }}
@@ -1597,11 +1599,11 @@ import numpy as np
 import json
 from pathlib import Path
 
-modality_name = "{{ modality_name }}"
-framework = "{{ framework }}"
-split = {{ '"' + split + '"' if split else 'None' }}
-target_column = {{ '"' + target_column + '"' if target_column else 'None' }}
-output_dir = Path("{{ output_dir }}")
+modality_name = {{ modality_name | string | repr }}
+framework = {{ framework | string | repr }}
+split = {{ (split | string | repr) if split else 'None' }}
+target_column = {{ (target_column | string | repr) if target_column else 'None' }}
+output_dir = Path({{ output_dir | string | repr }})
 
 output_dir.mkdir(parents=True, exist_ok=True)
 

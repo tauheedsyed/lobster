@@ -208,7 +208,7 @@ class StrategyRecommendationService:
         code_template = """# Download Strategy Recommendation
 # Recommends optimal download strategy based on platform type
 
-platform_type = '{{ platform_type }}'
+platform_type = {{ platform_type | string | repr }}
 
 # Platform-specific strategy mapping
 STRATEGY_MAP = {
@@ -275,8 +275,8 @@ Recommends optimal download strategy for platform type.
         code_template = """# Download Strategy Validation
 # Validates strategy compatibility with platform
 
-strategy = '{{ strategy }}'
-platform_type = '{{ platform_type }}'
+strategy = {{ strategy | string | repr }}
+platform_type = {{ platform_type | string | repr }}
 
 # Platform compatibility check
 PLATFORM_STRATEGIES = {

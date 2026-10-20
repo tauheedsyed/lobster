@@ -282,23 +282,23 @@ print("Setting up scVI data...")
 scvi.model.SCVI.setup_anndata(
     adata,
     layer=None,  # Use X
-    batch_key={{ "'" + batch_key + "'" if batch_key else "None" }},
+    batch_key={{ (batch_key | string | repr) if batch_key else "None" }},
     categorical_covariate_keys=None,
     continuous_covariate_keys=None,
 )
 
 # Create scVI model
-print(f"Creating scVI model with {{ n_latent }} latent dimensions...")
+print(f"Creating scVI model with { {{ n_latent | repr }} } latent dimensions...")
 model = scvi.model.SCVI(
     adata,
     n_layers={{ n_layers }},
     n_latent={{ n_latent }},
-    gene_likelihood="{{ gene_likelihood }}",
+    gene_likelihood={{ gene_likelihood | string | repr }},
     use_observed_lib_size=True,
 )
 
 # Train model with error handling
-print(f"Training scVI model for up to {{ max_epochs }} epochs on {device}...")
+print(f"Training scVI model for up to { {{ max_epochs | repr }} } epochs on {device}...")
 training_config = {
     "max_epochs": {{ max_epochs }},
     "accelerator": device,
@@ -327,7 +327,7 @@ embeddings = model.get_latent_representation()
 adata.obsm['X_scvi'] = embeddings
 
 print(f"scVI training complete:")
-print(f"  - Latent dimensions: {{ n_latent }}")
+print(f"  - Latent dimensions: { {{ n_latent | repr }} }")
 print(f"  - Cells: {adata.n_obs}")
 print(f"  - Genes: {adata.n_vars}")
 print(f"  - Device: {device}")

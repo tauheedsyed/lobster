@@ -668,8 +668,8 @@ class PlotManager:
 # (Plot figure created by analysis service)
 plot_id, stats, ir = plot_manager.add_plot(
     plot=fig,
-    title="{{ title }}",
-    source="{{ source }}",
+    title={{ title | string | repr }},
+    source={{ source | string | repr }},
 )
 print(f"Added plot: {plot_id}")
 """,

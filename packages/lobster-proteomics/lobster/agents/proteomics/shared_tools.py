@@ -196,13 +196,17 @@ adata = ad.AnnData(df.select_dtypes(include='number').values.astype('float32'),
 
             response = f"Successfully imported generic expression matrix from '{Path(file_path).name}'!\n\n"
             response += f"**Format:** Generic CSV/TSV matrix\n"
-            response += f"**Orientation:** {classification.orientation} (auto-detected)\n"
+            response += (
+                f"**Orientation:** {classification.orientation} (auto-detected)\n"
+            )
             response += f"**Samples:** {adata.n_obs}\n"
             response += f"**Proteins/Features:** {adata.n_vars}\n"
             response += f"**Missing values:** {missing_pct:.1f}%\n"
 
             if sample_metadata_path:
-                response += f"**Metadata:** merged from {Path(sample_metadata_path).name}\n"
+                response += (
+                    f"**Metadata:** merged from {Path(sample_metadata_path).name}\n"
+                )
 
             response += (
                 f"\n**Modality created:** '{name}'\n"
@@ -935,7 +939,10 @@ adata_filtered = adata_filtered[:, protein_filter].copy()""",
             logger.error(f"Error normalizing proteomics data: {e}")
             return f"Error in normalization: {str(e)}"
 
-    normalize_proteomics_data.metadata = {"categories": ["PREPROCESS"], "provenance": True}
+    normalize_proteomics_data.metadata = {
+        "categories": ["PREPROCESS"],
+        "provenance": True,
+    }
     normalize_proteomics_data.tags = ["PREPROCESS"]
 
     # -------------------------
@@ -1062,7 +1069,10 @@ adata_filtered = adata_filtered[:, protein_filter].copy()""",
             logger.error(f"Error analyzing proteomics patterns: {e}")
             return f"Error in pattern analysis: {str(e)}"
 
-    analyze_proteomics_patterns.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    analyze_proteomics_patterns.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+    }
     analyze_proteomics_patterns.tags = ["ANALYZE"]
 
     # -------------------------
@@ -1722,7 +1732,10 @@ adata = parser.parse({{ file_path | tojson }})""",
             logger.error(f"Error in peptide-to-protein summarization: {e}")
             return f"Error in peptide-to-protein rollup: {str(e)}"
 
-    summarize_peptide_to_protein.metadata = {"categories": ["PREPROCESS"], "provenance": True}
+    summarize_peptide_to_protein.metadata = {
+        "categories": ["PREPROCESS"],
+        "provenance": True,
+    }
     summarize_peptide_to_protein.tags = ["PREPROCESS"]
 
     # -------------------------
@@ -1815,7 +1828,10 @@ adata = parser.parse({{ file_path | tojson }})""",
             logger.error(f"Error normalizing PTM to protein: {e}")
             return f"Error in PTM-to-protein normalization: {str(e)}"
 
-    normalize_ptm_to_protein.metadata = {"categories": ["PREPROCESS"], "provenance": True}
+    normalize_ptm_to_protein.metadata = {
+        "categories": ["PREPROCESS"],
+        "provenance": True,
+    }
     normalize_ptm_to_protein.tags = ["PREPROCESS"]
 
     # =========================================================================
@@ -1870,15 +1886,22 @@ adata = parser.parse({{ file_path | tojson }})""",
 
                 # Extension-based shortcuts for native formats
                 if classification.format == "somascan_adat":
-                    from lobster.services.data_access.somascan_parser import SomaScanParser
+                    from lobster.services.data_access.somascan_parser import (
+                        SomaScanParser,
+                    )
+
                     parser = SomaScanParser()
                     detected_platform = "somascan"
                 elif classification.format == "olink_npx":
                     from lobster.services.data_access.olink_parser import OlinkParser
+
                     parser = OlinkParser()
                     detected_platform = "olink"
                 elif classification.format == "luminex":
-                    from lobster.services.data_access.luminex_parser import LuminexParser
+                    from lobster.services.data_access.luminex_parser import (
+                        LuminexParser,
+                    )
+
                     parser = LuminexParser()
                     detected_platform = "luminex"
                 elif classification.format == "generic_matrix":
@@ -1894,9 +1917,13 @@ adata = parser.parse({{ file_path | tojson }})""",
                     )
                 else:
                     # Try vendor parser validation as fallback
-                    from lobster.services.data_access.luminex_parser import LuminexParser
+                    from lobster.services.data_access.luminex_parser import (
+                        LuminexParser,
+                    )
                     from lobster.services.data_access.olink_parser import OlinkParser
-                    from lobster.services.data_access.somascan_parser import SomaScanParser
+                    from lobster.services.data_access.somascan_parser import (
+                        SomaScanParser,
+                    )
 
                     for parser_cls, pname in [
                         (OlinkParser, "olink"),
@@ -1909,7 +1936,9 @@ adata = parser.parse({{ file_path | tojson }})""",
                                 parser = p
                                 detected_platform = pname
                                 break
-                        except Exception:  # nosec B112 # Try the next supported workspace data source after a failed probe.
+                        except (
+                            Exception
+                        ):  # nosec B112 # Try the next supported workspace data source after a failed probe.
                             continue
 
                 if parser is None:
@@ -2195,7 +2224,7 @@ adata, stats = parser.parse({{{{ file_path | tojson }}}})""",
                 code_template="""# LOD quality assessment
 import numpy as np
 X = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
-lod_values = adata.var['{{ lod_column }}'].values
+lod_values = adata.var[{{ lod_column | string | repr }}].values
 below_lod_pct = np.zeros(adata.n_vars)
 for j in range(adata.n_vars):
     col = X[:, j]
@@ -2425,13 +2454,13 @@ adata.var['lod_pass'] = below_lod_pct <= {{ max_below_lod_pct }}""",
                 code_template="""# Bridge sample normalization
 import numpy as np
 
-bridge_mask = adata.obs['{{ bridge_column }}'].astype(bool).values
-plates = adata.obs['{{ plate_column }}'].unique()
+bridge_mask = adata.obs[{{ bridge_column | string | repr }}].astype(bool).values
+plates = adata.obs[{{ plate_column | string | repr }}].unique()
 X = adata.X.copy()
 
 global_bridge_medians = np.nanmedian(X[bridge_mask, :], axis=0)
 for plate in plates:
-    plate_mask = (adata.obs['{{ plate_column }}'] == plate).values
+    plate_mask = (adata.obs[{{ plate_column | string | repr }}] == plate).values
     plate_bridge = plate_mask & bridge_mask
     if plate_bridge.sum() > 0:
         plate_medians = np.nanmedian(X[plate_bridge, :], axis=0)
@@ -2502,7 +2531,10 @@ adata.X = X""",
             logger.error(f"Error in bridge sample normalization: {e}")
             return f"Error in bridge normalization: {str(e)}"
 
-    normalize_bridge_samples.metadata = {"categories": ["PREPROCESS"], "provenance": True}
+    normalize_bridge_samples.metadata = {
+        "categories": ["PREPROCESS"],
+        "provenance": True,
+    }
     normalize_bridge_samples.tags = ["PREPROCESS"]
 
     # -------------------------
@@ -2732,7 +2764,10 @@ for protein in common_proteins:
             logger.error(f"Error in cross-platform concordance: {e}")
             return f"Error in concordance assessment: {str(e)}"
 
-    assess_cross_platform_concordance.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    assess_cross_platform_concordance.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+    }
     assess_cross_platform_concordance.tags = ["ANALYZE"]
 
     # -------------------------
@@ -2767,7 +2802,10 @@ for protein in common_proteins:
         analysis_results["summary"] = summary
         return summary
 
-    create_proteomics_summary.metadata = {"categories": ["UTILITY"], "provenance": False}
+    create_proteomics_summary.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     create_proteomics_summary.tags = ["UTILITY"]
 
     # Return all shared tools

@@ -495,12 +495,12 @@ class SRADownloadService(IDownloadService):
             description=f"List downloaded FASTQ files for SRA dataset {accession}",
             library="pathlib",
             imports=["from pathlib import Path"],
-            code_template="""# SRA dataset {{ dataset_id }} — FASTQ files
+            code_template="""# SRA dataset {{ dataset_id | string | repr }} — FASTQ files
 # Originally downloaded via Lobster AI DownloadOrchestrator (ENA mirror)
 # Run this notebook from the workspace root directory
-fastq_dir = Path("{{ fastq_dir }}")
+fastq_dir = Path({{ fastq_dir | string | repr }})
 fastq_files = sorted(fastq_dir.glob("*.fastq*"))
-print(f"SRA {{ dataset_id }}: {len(fastq_files)} FASTQ file(s) in {fastq_dir}")
+print(f"SRA { {{ dataset_id | repr }} }: {len(fastq_files)} FASTQ file(s) in {fastq_dir}")
 for f in fastq_files:
     print(f"  {f.name}  ({f.stat().st_size / 1e6:.1f} MB)")
 """,
@@ -832,7 +832,7 @@ class SRADownloadManager:
         Returns:
             True if checksum matches, False otherwise
         """
-        md5 = hashlib.md5()
+        md5 = hashlib.md5(usedforsecurity=False)
 
         with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(8192), b""):
