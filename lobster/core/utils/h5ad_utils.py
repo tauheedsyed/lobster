@@ -246,6 +246,11 @@ def sanitize_value(
 
     # numpy arrays
     if isinstance(obj, np.ndarray):
+        # Structured arrays (e.g. scanpy's rank_genes_groups results, one field
+        # per group) are written natively by anndata; stringifying each row
+        # destroyed the per-group fields.
+        if obj.dtype.names is not None:
+            return obj
         try:
             # Numeric arrays can be preserved
             if np.issubdtype(obj.dtype, np.number):
