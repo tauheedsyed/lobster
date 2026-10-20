@@ -15,25 +15,11 @@ import numpy as np
 import pandas as pd
 
 from lobster.core.backends.base import BaseBackend
+from lobster.core.utils.h5ad_utils import repair_log1p_base as _repair_log1p_base
 from lobster.core.utils.h5ad_utils import sanitize_key as util_sanitize_key
 from lobster.core.utils.h5ad_utils import sanitize_value as util_sanitize_value
 
 logger = logging.getLogger(__name__)
-
-
-def _repair_log1p_base(adata: anndata.AnnData) -> None:
-    """Keep ``uns['log1p']['base']`` usable by scanpy.
-
-    scanpy reads it as a number or None (natural log) and calls ``np.log`` on
-    it. The uns sanitizer writes None as ``""`` and numbers as strings, so
-    reloaded data broke ``rank_genes_groups``. A missing key means None.
-    """
-    log1p = adata.uns.get("log1p")
-    if not isinstance(log1p, dict) or not isinstance(log1p.get("base"), str):
-        return
-    base = log1p.pop("base")
-    if base.strip() not in ("", "None"):
-        log1p["base"] = float(base)
 
 
 class H5ADBackend(BaseBackend):

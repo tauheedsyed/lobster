@@ -42,3 +42,17 @@ def test_file_saved_with_empty_base_is_repaired_on_load(tmp_path):
     loaded = H5ADBackend(base_path=tmp_path).load(tmp_path / "old.h5ad")
 
     assert _base_as_scanpy_reads_it(loaded) is None
+
+
+def test_every_load_path_repairs_the_base(tmp_path):
+    """`/workspace load` reads through the data manager, not the backend."""
+    from lobster.core.adapters.base import BaseAdapter
+    from lobster.core.runtime.data_manager import _read_h5ad_smart
+
+    path = tmp_path / "old.h5ad"
+    _adata({"base": ""}).write_h5ad(path)
+
+    assert _base_as_scanpy_reads_it(_read_h5ad_smart(path)) is None
+    adapter = object.__new__(BaseAdapter)
+    adapter.logger = __import__("logging").getLogger("test")
+    assert _base_as_scanpy_reads_it(adapter._load_h5ad_data(path)) is None

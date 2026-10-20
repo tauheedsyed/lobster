@@ -17,7 +17,7 @@ import pandas as pd
 from lobster.core.adapters.base import BaseAdapter
 from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.schemas.transcriptomics import TranscriptomicsSchema
-from lobster.core.utils.h5ad_utils import sanitize_value
+from lobster.core.utils.h5ad_utils import repair_log1p_base, sanitize_value
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +357,7 @@ class TranscriptomicsAdapter(BaseAdapter):
         try:
             # Try to load as H5AD format first (anndata native)
             adata = anndata.read_h5ad(path)
+            repair_log1p_base(adata)
             return adata
         except Exception:
             # Fallback to pandas HDF5 (requires PyTables)

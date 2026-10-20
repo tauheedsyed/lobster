@@ -588,3 +588,19 @@ def convert_arrow_to_standard(adata):
     pd.options.future.infer_string = _prev_infer_string
 
     return adata_copy
+
+
+def repair_log1p_base(adata) -> None:
+    """Keep ``uns['log1p']['base']`` usable by scanpy.
+
+    scanpy reads it as a number or None (natural log) and calls ``np.log`` on
+    it. The uns sanitizer writes None as ``""`` and numbers as strings, so
+    reloaded data broke ``rank_genes_groups``. A missing key means None.
+    Call it on every AnnData read from disk.
+    """
+    log1p = adata.uns.get("log1p")
+    if not isinstance(log1p, dict) or not isinstance(log1p.get("base"), str):
+        return
+    base = log1p.pop("base")
+    if base.strip() not in ("", "None"):
+        log1p["base"] = float(base)

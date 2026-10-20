@@ -16,6 +16,7 @@ import pandas as pd
 
 from lobster.core.interfaces.adapter import IModalityAdapter
 from lobster.core.interfaces.validator import ValidationResult
+from lobster.core.utils.h5ad_utils import repair_log1p_base
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ class BaseAdapter(IModalityAdapter):
         """
         try:
             adata = anndata.read_h5ad(path)
-            # adata = sc.read_h5ad(path)
+            repair_log1p_base(adata)
             self.logger.info(
                 f"Loaded H5AD data from {path}: {adata.n_obs} obs × {adata.n_vars} vars"
             )
