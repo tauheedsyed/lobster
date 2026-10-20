@@ -395,7 +395,7 @@ class DiseaseStandardizationService:
             return value, "unmapped"
         # A negative/unknown segment was dropped: the rest may name a disease but
         # can never establish health ("healthy; ibd: unknown").
-        dropped = remaining != raw_lower
+        dropped = remaining != raw_lower.strip(" ;|")
         normalized_value = self._normalize_term(remaining)
 
         # Check exclusion patterns first (prevent false positives)

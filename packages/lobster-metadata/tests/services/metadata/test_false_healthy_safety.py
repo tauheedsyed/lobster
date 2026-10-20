@@ -438,7 +438,6 @@ def test_column_rescan_run_twice_does_not_promote_candidate(
         "disease_match_type",
         "disease_evidence",
         "Disease_Candidate",
-        "DISEASE_ORIGINAL",
         "disease_candidate_extra",
     ],
 )
@@ -528,3 +527,36 @@ def test_ir_field_list_covers_every_field_the_enrichment_writes():
 
     assert set(module._DISEASE_FIELDS) == set(enrichment_config.DERIVED_DISEASE_FIELDS)
     assert "disease_candidate" in module._DISEASE_FIELDS
+
+
+# --- User columns named like the output fields are still input ----------------
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+@pytest.mark.parametrize("column", ["Disease", "DISEASE"])
+@pytest.mark.parametrize(
+    "value,expected",
+    [("Healthy", "healthy"), ("Crohn's disease", "cd"), ("healthy control", "healthy")],
+)
+def test_user_disease_column_with_other_casing_is_scanned(
+    column, value, expected, premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR012", column: value}]
+    enriched, _ = enrichment_config.phase1_column_rescan(samples)
+    assert enriched == 1
+    assert samples[0]["disease"] == expected
+    first = dict(samples[0])
+
+    again, _ = enrichment_config.phase1_column_rescan(samples)
+
+    assert again == 0 and samples[0] == first  # run-twice stays idempotent
+
+
+@pytest.mark.parametrize("term", ["healthy;", "healthy ;", " healthy | "])
+def test_trailing_separator_is_not_a_dropped_segment(term, ontology, standardizer):
+    assert [m.disease_id for m in ontology.match_disease(term)] == ["healthy"]
+    standardized, _, _ = standardizer.standardize_disease_terms(
+        pd.DataFrame({"disease": [term]})
+    )
+    assert standardized.loc[0, "disease"] == "healthy"

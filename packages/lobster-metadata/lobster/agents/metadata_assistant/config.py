@@ -220,9 +220,15 @@ DERIVED_DISEASE_FIELDS = frozenset(DISEASE_ENRICHMENT_FIELDS)
 
 
 def _is_derived_field(name: Any) -> bool:
-    """True for fields written by the enrichment (case-insensitive)."""
-    folded = str(name).casefold()
-    return folded in DERIVED_DISEASE_FIELDS or folded.startswith("disease_candidate")
+    """True for fields written by the enrichment.
+
+    Output fields match by exact name, so a user column such as ``Disease`` is
+    still scanned; only the ``disease_candidate*`` family is matched
+    case-insensitively.
+    """
+    return name in DERIVED_DISEASE_FIELDS or str(name).casefold().startswith(
+        "disease_candidate"
+    )
 
 
 
@@ -405,7 +411,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 disease = found_diseases[0]
                 # Only a whole-value match is applied; health only ever from a
                 # whole value. Other in-text hits are kept as candidates.
-                if not (col_str == full_text and col_str in disease_keywords[disease]):
+                if not (col_str == full_text.strip(" ;|") and col_str in disease_keywords[disease]):
                     if disease != "healthy" and "disease_candidate" not in sample:
                         sample["disease_candidate"] = disease
                         sample["disease_candidate_confidence"] = 0.85
