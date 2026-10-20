@@ -54,6 +54,30 @@ def _kernel_receipt():
     return receipt
 
 
+def subprocess_timeout():
+    import subprocess  # nosec B404 # only the exception type
+
+    return subprocess.TimeoutExpired("docker", 1)
+
+
+def _probe_args(**changes):
+    probe = {
+        "version": staging.PROBE_VERSION,
+        "forbidden": sorted(
+            [
+                "/capture",
+                "/reports",
+                "/src",
+                "/w/capture/oracle/final.pkl",
+                "/w/capture/capture.json",
+            ]
+        ),
+        "control": ["/stage/roots/input.h5ad"],
+    }
+    probe.update(changes)
+    return probe
+
+
 def _sha(data):
     import hashlib
 
@@ -117,13 +141,11 @@ class FakeRun:
         (self.stage / "roots").mkdir(parents=True)
         (self.stage / "roots" / "input.h5ad").write_bytes(b"root")
         mode = self.spec["mode"]
-        appended = [staging.PROBE_HEADER + "pass\n"] if self.spec.get("probe") else []
+        self.probe = _probe_args() if self.spec.get("probe") else None
         (self.stage / "notebook.ipynb").write_text(
-            staging.with_appended_cells(
-                (self.capture / "notebooks" / f"{mode}.ipynb").read_text(), appended
+            staging.staged_notebook(
+                (self.capture / "notebooks" / f"{mode}.ipynb").read_text(), self.probe
             )
-            if appended
-            else (self.capture / "notebooks" / f"{mode}.ipynb").read_text()
         )
         tools = [{"tool": "t", "arguments": {"a": 1}}]
         self.parameters = {
@@ -157,7 +179,7 @@ class FakeRun:
                 "capture": "t",
                 "mode": mode,
                 "stage_root": self.spec["stage_root"],
-                "appended_cells": appended,
+                "probe": self.probe,
                 "parameters": self.parameters,
                 "output_basename": "results",
             },
@@ -653,6 +675,59 @@ def test_capture_detects_an_export_that_changes_the_live_object(tmp_path):
     assert sealed.X[0, 0] == 0.0  # the sealed copy is unchanged
 
 
+class _Lossy:
+    """Pickles as a different value, so a frozen copy would lose it."""
+
+    def __reduce__(self):
+        return float, (3.5,)
+
+
+def test_capture_refuses_an_unfaithful_copy_before_exporting(tmp_path):
+    import capture
+
+    policy = tmp_path / "policy.json"
+    _write(policy, POLICY)
+    live = _adata()
+    live.uns["opaque"] = _Lossy()
+    calls = []
+
+    def export():  # an exporter that would also hide the loss
+        calls.append(1)
+        live.uns["opaque"] = 3.5
+
+    with pytest.raises(capture.CaptureError, match="not faithful"):
+        capture.seal_and_export(live, policy, OUTPUT, export)
+    assert calls == []
+
+
+def test_capture_refuses_an_export_that_changes_the_live_object(tmp_path):
+    import capture
+
+    policy = tmp_path / "policy.json"
+    _write(policy, POLICY)
+    live = _adata()
+
+    def export():
+        live.X[0, 0] = -1.0
+
+    with pytest.raises(capture.CaptureError, match="exporting changed"):
+        capture.seal_and_export(live, policy, OUTPUT, export)
+
+
+def test_capture_seals_then_exports_once(tmp_path):
+    import capture
+
+    policy = tmp_path / "policy.json"
+    _write(policy, POLICY)
+    live = _adata()
+    calls = []
+    frozen, exported = capture.seal_and_export(
+        live, policy, OUTPUT, lambda: calls.append(1) or "nb"
+    )
+    assert calls == [1] and exported == "nb"
+    assert capture._oracle_problems(live, policy, OUTPUT, frozen) == []
+
+
 @pytest.mark.parametrize(
     "field,value",
     [("capture", "other"), ("mode", "successful"), ("stage_root", "roots_perturbed")],
@@ -675,17 +750,69 @@ def test_changed_captured_export_is_refused(run):
         run.build()
 
 
-def test_only_the_probe_may_append_a_cell(run):
-    run.update(run.stage / "stage.json", appended_cells=[staging.PROBE_HEADER])
+def test_only_the_probe_scenario_may_carry_a_probe(run):
+    run.update(run.stage / "stage.json", probe=_probe_args())
     with pytest.raises(checker.CheckError, match="only the probe"):
         run.build()
 
 
-def test_probe_cell_must_be_the_approved_kind(tmp_path):
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"forbidden": []},
+        {"forbidden": ["/capture", "/reports", "/src"]},  # not the reference itself
+        {
+            "forbidden": sorted(
+                ["/reports", "/src", "/w/oracle/final.pkl", "/w/capture.json"]
+            )
+        },
+        {"control": []},
+        {"control": ["/etc/hostname"]},
+        {"version": 2},
+        {"extra": "x"},
+    ],
+)
+def test_probe_arguments_must_make_a_meaningful_probe(tmp_path, changes):
     run = FakeRun(tmp_path, spec=_probe_spec())
-    run.update(run.stage / "stage.json", appended_cells=["import os\n"])
-    with pytest.raises(checker.CheckError, match="approved probe cell"):
+    run.update(run.stage / "stage.json", probe=_probe_args(**changes))
+    with pytest.raises(checker.CheckError):
         run.build()
+
+
+def test_probe_control_must_be_the_staged_input(tmp_path):
+    run = FakeRun(tmp_path, spec=_probe_spec())
+    run.update(
+        run.stage / "stage.json",
+        probe=_probe_args(control=["/stage/roots/other/roots/input.h5ad"]),
+    )
+    with pytest.raises(checker.CheckError, match="probe control"):
+        run.build()
+
+
+def test_a_forged_success_probe_cell_is_a_binding_difference(tmp_path):
+    """A cell that writes a clean result without checking anything."""
+    run = FakeRun(tmp_path, spec=_probe_spec())
+    _write(
+        run.outputs / "results_visibility.json",
+        {"forbidden_visible": [], "control_visible": True},
+    )
+    forged = staging.PROBE_HEADER + (
+        "import json\n"
+        "with open(output_prefix + '_visibility.json', 'w') as h:\n"
+        "    json.dump({'forbidden_visible': [], 'control_visible': True}, h)\n"
+    )
+    data = json.loads((run.capture / "notebooks" / "replay.ipynb").read_text())
+    data["cells"].append(
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": forged,
+        }
+    )
+    (run.stage / "notebook.ipynb").write_text(json.dumps(data, indent=1))
+    assert run.build()["binding_differences"] == ["notebook_sha256"]
 
 
 def test_probe_notebook_must_be_the_export_plus_its_cell(tmp_path):
@@ -699,6 +826,21 @@ def test_probe_notebook_must_be_the_export_plus_its_cell(tmp_path):
     data["cells"].insert(0, data["cells"][-1])  # an extra cell elsewhere
     (run.stage / "notebook.ipynb").write_text(json.dumps(data, indent=1))
     assert run.build()["binding_differences"] == ["notebook_sha256"]
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [(None, None), (4242, None), (True, True), ("4242", "4242"), (0, 0), (-1, -1)],
+)
+def test_missing_or_malformed_kernel_witnesses_block_the_claim(run, before, after):
+    run.set_kernel(pid=before)
+    run.update(run.receipts / "execution.json", kernel_pid_after=after)
+    wrapper = run.build()
+    assert (
+        "the receipted kernel did not run the whole notebook"
+        in wrapper["receipt_problems"]
+    )
+    assert _report(wrapper)["claim_achieved"] is None
 
 
 def test_receipt_from_another_kernel_blocks_the_claim(run):
@@ -832,20 +974,24 @@ class _Proc:
         self._wait = 0
 
 
-def _lane(monkeypatch, tmp_path, proc, inspect_codes=(1,)):
+def _lane(monkeypatch, tmp_path, proc, listing=("",), listing_code=0, raises=None):
     import run_lane
 
     calls = []
-    codes = list(inspect_codes)
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        code = (
-            codes.pop(0)
-            if cmd[:3] == ["docker", "container", "inspect"] and codes
-            else 0
-        )
-        return type("Done", (), {"returncode": code})()
+        if raises is not None and cmd[:2] == raises[0]:
+            raise raises[1]
+        if cmd[:2] == ["docker", "ps"]:
+            out = listing[
+                min(
+                    len([c for c in calls if c[:2] == ["docker", "ps"]]) - 1,
+                    len(listing) - 1,
+                )
+            ]
+            return type("Done", (), {"returncode": listing_code, "stdout": out})()
+        return type("Done", (), {"returncode": 0, "stdout": ""})()
 
     monkeypatch.setattr(run_lane.subprocess, "Popen", lambda *a, **k: proc)
     monkeypatch.setattr(run_lane.subprocess, "run", fake_run)
@@ -867,7 +1013,7 @@ def test_container_is_removed_and_confirmed_gone_on_every_exit(
     else:
         assert runner.run("capture", ["true"], [], check=False) == outcome
     assert ["docker", "rm", "--force"] == calls[0][:3]
-    assert calls[1][:3] == ["docker", "container", "inspect"]
+    assert calls[1][:2] == ["docker", "ps"] and "name=^/" in calls[1][-1]
 
 
 def test_timeout_removes_the_container_and_fails(monkeypatch, tmp_path):
@@ -878,13 +1024,41 @@ def test_timeout_removes_the_container_and_fails(monkeypatch, tmp_path):
     assert ["docker", "rm", "--force"] == calls[0][:3]
 
 
-def test_container_that_will_not_go_away_fails_the_lane(monkeypatch, tmp_path):
-    proc = _Proc(0)
-    run_lane, runner, calls = _lane(
-        monkeypatch, tmp_path, proc, inspect_codes=[0] * 100
-    )
-    with pytest.raises(run_lane.LaneError, match="still present"):
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"listing": ("abc123",)},  # still listed
+        {"listing_code": 1},  # daemon unreachable: unknown, not gone
+        {"raises": (["docker", "ps"], subprocess_timeout())},  # listing hangs
+    ],
+)
+def test_unconfirmed_removal_fails_the_lane_and_reaps_the_client(
+    monkeypatch, tmp_path, kwargs
+):
+    proc = _Proc(KeyboardInterrupt("cancelled"))
+    run_lane, runner, calls = _lane(monkeypatch, tmp_path, proc, **kwargs)
+    with pytest.raises(run_lane.LaneError, match="cannot confirm"):
         runner.run("capture", ["true"], [], check=False)
+    assert proc.killed
+
+
+def test_cleanup_error_still_reaps_the_client(monkeypatch, tmp_path):
+    proc = _Proc(KeyboardInterrupt("cancelled"))
+    run_lane, runner, calls = _lane(
+        monkeypatch,
+        tmp_path,
+        proc,
+        raises=(["docker", "rm"], OSError("docker missing")),
+    )
+    with pytest.raises(OSError):
+        runner.run("capture", ["true"], [], check=False)
+    assert proc.killed
+
+
+def test_container_listed_once_then_gone_is_confirmed(monkeypatch, tmp_path):
+    proc = _Proc(0)
+    run_lane, runner, calls = _lane(monkeypatch, tmp_path, proc, listing=("abc", ""))
+    assert runner.run("capture", ["true"], [], check=False) == 0
 
 
 @pytest.mark.parametrize("outcome", [0, KeyboardInterrupt("cancelled")])
@@ -903,9 +1077,3 @@ def test_host_phase_kills_its_whole_process_group(monkeypatch, tmp_path, outcome
     else:
         runner.run("capture", ["true"], [], check=False)
     assert killed == [proc.pid]
-
-
-def subprocess_timeout():
-    import subprocess  # nosec B404 # only the exception type
-
-    return subprocess.TimeoutExpired("docker", 1)

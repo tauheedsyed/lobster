@@ -44,7 +44,7 @@ import sys
 import time
 from pathlib import Path
 
-from staging import PROBE_HEADER, with_appended_cells
+from staging import PROBE_VERSION, staged_notebook
 
 HARNESS = Path(__file__).resolve().parent
 REPO = HARNESS.parents[2]
@@ -166,11 +166,14 @@ class Runner:
             finally:
                 # Every exit (success, timeout, interrupt, cancellation) ends
                 # with the container verified gone, so nothing keeps running
-                # after this phase, or after the caller releases a lock.
-                remove_container(name)
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
+                # after this phase, or after the caller releases a lock. The
+                # Docker client is reaped even if that verification fails.
+                try:
+                    remove_container(name)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=60)
         peak = None
         for line in log.read_text(errors="replace").splitlines():
             if line.startswith("REPLAY_MEMORY_PEAK "):
@@ -205,19 +208,37 @@ class Runner:
         return code, peak
 
 
-def remove_container(name, attempts=60):
-    """Force-remove ``name`` and confirm it no longer exists."""
-    subprocess.run(  # nosec B603 B607
-        ["docker", "rm", "--force", name], capture_output=True
-    )
-    for _ in range(attempts):
-        gone = subprocess.run(  # nosec B603 B607
-            ["docker", "container", "inspect", name], capture_output=True
+def remove_container(name, attempts=30):
+    """Force-remove ``name`` and positively confirm it no longer exists.
+
+    Only a successful listing that does not contain the container counts as
+    gone; a failing, hanging or unreachable Docker is an unknown state and
+    raises, so a caller never treats it as cleaned up.
+    """
+    try:
+        subprocess.run(  # nosec B603 B607
+            ["docker", "rm", "--force", name], capture_output=True, timeout=60
         )
-        if gone.returncode != 0:
+    except subprocess.TimeoutExpired:
+        pass  # the listing below decides
+    listing = [
+        "docker", "ps", "--all", "--quiet", "--no-trunc",
+        "--filter", f"name=^/{name}$",
+    ]  # fmt: skip
+    for _ in range(attempts):
+        try:
+            found = subprocess.run(  # nosec B603 B607
+                listing, capture_output=True, text=True, timeout=30
+            )
+        except subprocess.TimeoutExpired:
+            found = None
+        if found is not None and found.returncode == 0 and not found.stdout.strip():
             return
         time.sleep(1)
-    raise LaneError(f"container {name} is still present after removal")
+    raise LaneError(
+        f"cannot confirm container {name} is gone; check 'docker ps -a' before "
+        "starting another run"
+    )
 
 
 def kill_group(pid):
@@ -344,22 +365,6 @@ def capture(runner, work, harness, cap, policy):
     return out
 
 
-PROBE_CELL = PROBE_HEADER + """import json as _json
-import os as _os
-
-_forbidden = {forbidden}
-_control = {control}
-_result = {{
-    "forbidden_visible": [p for p in _forbidden if _os.path.lexists(p)],
-    "control_visible": all(_os.path.isfile(p) for p in _control),
-}}
-with open(output_prefix + "_visibility.json", "w") as _handle:
-    _json.dump(_result, _handle, sort_keys=True)
-if _result["forbidden_visible"]:
-    raise RuntimeError(f"isolation breach: {{_result['forbidden_visible']}}")
-"""
-
-
 def stage(runner, work, sid, spec, cap_dir):
     cap = json.loads((cap_dir / "capture.json").read_text())
     stage_dir = work / "stage" / sid
@@ -368,7 +373,7 @@ def stage(runner, work, sid, spec, cap_dir):
         shutil.copy2(root, stage_dir / "roots" / root.name)
     notebook = stage_dir / "notebook.ipynb"
     shutil.copyfile(cap_dir / cap["notebooks"][spec["mode"]]["file"], notebook)
-    appended = []
+    probe = None
     outputs = work / "outputs" / sid
     outputs.mkdir(parents=True)
     in_stage = runner.path(stage_dir, "/stage")
@@ -387,11 +392,8 @@ def stage(runner, work, sid, spec, cap_dir):
             }
         )
         control = [f"{in_stage}/roots/input.h5ad"]
-        source = PROBE_CELL.format(
-            forbidden=json.dumps(forbidden), control=json.dumps(control)
-        )
-        appended = [source]
-        notebook.write_text(with_appended_cells(notebook.read_text(), appended))
+        probe = {"version": PROBE_VERSION, "forbidden": forbidden, "control": control}
+        notebook.write_text(staged_notebook(notebook.read_text(), probe))
     parameters = {
         "input_data": f"{in_stage}/roots/input.h5ad",
         "output_prefix": f"{runner.path(outputs, '/outputs')}/{OUTPUT_BASENAME}",
@@ -401,7 +403,7 @@ def stage(runner, work, sid, spec, cap_dir):
         "capture": spec["capture"],
         "mode": spec["mode"],
         "stage_root": spec["stage_root"],
-        "appended_cells": appended,
+        "probe": probe,
         "parameters": parameters,
         "output_basename": OUTPUT_BASENAME,
     }

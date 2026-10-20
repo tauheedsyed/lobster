@@ -115,6 +115,10 @@ def _normalize(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _is_pid(value):
+    return type(value) is int and value > 0
+
+
 def receipt_problems(kernel, env, run, execution):
     """Ways the executing kernel differs from the verified environment.
 
@@ -138,10 +142,10 @@ def receipt_problems(kernel, env, run, execution):
             )
     if environment_digest(kernel) != environment_digest(env["receipt"]):
         problems.append("kernel environment differs from the verified environment")
-    if execution["status"] == "OK" and execution["kernel_pid_after"] != kernel.get(
-        "pid"
-    ):
-        problems.append("the receipted kernel did not run the whole notebook")
+    if execution["status"] == "OK":
+        before, after = kernel.get("pid"), execution["kernel_pid_after"]
+        if not (_is_pid(before) and _is_pid(after) and before == after):
+            problems.append("the receipted kernel did not run the whole notebook")
     if execution["unexpected_receipt_entries"]:
         problems.append(
             f"receipt directory has foreign files: "
@@ -202,8 +206,13 @@ def _check_identity(sid, spec, cap, staged):
         )
     if spec["mode"] not in cap["notebooks"]:
         raise CheckError(f"{sid}: no captured export for mode {spec['mode']!r}")
-    if bool(staged.get("appended_cells")) != bool(spec.get("probe")):
-        raise CheckError(f"{sid}: only the probe scenario may append a cell")
+    if (staged.get("probe") is not None) != bool(spec.get("probe")):
+        raise CheckError(f"{sid}: only the probe scenario may carry a probe")
+    if staged.get("probe") is not None:
+        probe = staged["probe"]
+        control = probe.get("control") if isinstance(probe, dict) else None
+        if control != [staged["parameters"]["input_data"]]:
+            raise CheckError(f"{sid}: probe control is not the staged input")
 
 
 def _confined(capture, relative):
@@ -223,19 +232,20 @@ def expected_notebook_sha256(capture, cap, spec, staged):
     """SHA-256 the staged notebook must have, derived from the captured export.
 
     An ordinary scenario executes the captured export unchanged. The probe
-    executes it with the approved probe cell appended, derived here
-    independently of the driver.
+    executes it with the approved probe cell appended: the stage supplies only
+    the probe's arguments, which are validated, and the cell's source is
+    generated here from the approved template.
     """
-    from staging import with_appended_cells
+    from staging import staged_notebook
 
     entry = cap["notebooks"][spec["mode"]]
     export = _confined(capture, entry["file"])
     if sha256_file(export) != entry["sha256"]:
         raise CheckError("captured export changed since capture")
-    if not staged["appended_cells"]:
+    if staged["probe"] is None:
         return entry["sha256"]
     try:
-        text = with_appended_cells(export.read_text(), staged["appended_cells"])
+        text = staged_notebook(export.read_text(), staged["probe"])
     except ValueError as exc:
         raise CheckError(str(exc)) from None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()

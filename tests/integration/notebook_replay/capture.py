@@ -6,11 +6,11 @@ will later run in. For one scenario it:
 1. writes deterministic synthetic input files (the roots);
 2. runs real Lobster tools on a real ``DataManagerV2`` (only the agent's LLM is
    replaced, through ``factory_tools``);
-3. exports notebooks through the public export path, once per export mode;
-4. freezes the session's final object as the reference copy as soon as the
-   analysis finishes, before the exporter runs and before anything lossy
-   (such as an H5AD write) touches it, and fails if exporting changed the live
-   object afterwards;
+3. freezes the session's final object as the reference copy as soon as the
+   analysis finishes, and checks that the frozen copy equals it, before the
+   exporter runs and before anything lossy (such as an H5AD write) touches it;
+4. exports notebooks through the public export path, once per export mode,
+   then fails if exporting changed the live object;
 5. records hashes, tool parameters and an environment receipt in
    ``capture.json``.
 
@@ -122,26 +122,27 @@ def capture_s1(out):
     if dm.list_modalities()[-1] != final_name:
         raise RuntimeError(f"unexpected modalities: {dm.list_modalities()}")
     final = dm.get_modality(final_name)
-    declared = f"{OUTPUT_BASENAME}_{final_name}.h5ad"
-    frozen = freeze(final)  # before the exporter can touch anything
 
-    notebooks = {}
-    for mode in ("successful", "replay"):
-        exported = dm.export_notebook(f"s1_{mode}", "S1 replay", filter_strategy=mode)
-        target = out / "notebooks" / f"{mode}.ipynb"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(exported, target)
-        notebooks[mode] = {
-            "file": f"notebooks/{mode}.ipynb",
-            "sha256": sha256_file(target),
-        }
+    def export():
+        notebooks = {}
+        for mode in ("successful", "replay"):
+            exported = dm.export_notebook(
+                f"s1_{mode}", "S1 replay", filter_strategy=mode
+            )
+            target = out / "notebooks" / f"{mode}.ipynb"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(exported, target)
+            notebooks[mode] = {
+                "file": f"notebooks/{mode}.ipynb",
+                "sha256": sha256_file(target),
+            }
+        return notebooks
 
     return {
         "final": final,
-        "frozen": frozen,
-        "declared": declared,
+        "declared": f"{OUTPUT_BASENAME}_{final_name}.h5ad",
+        "export": export,
         "tool_parameters": [{"tool": name, "arguments": args} for name, args in calls],
-        "notebooks": notebooks,
         "roots": {"input.h5ad": sha256_file(root)},
         "perturbed_roots": {
             "input.h5ad": sha256_file(out / "roots_perturbed" / "input.h5ad")
@@ -153,6 +154,32 @@ def capture_s1(out):
 SCENARIOS = {"s1": capture_s1}
 
 
+class CaptureError(Exception):
+    pass
+
+
+def seal_and_export(final, policy_path, declared, export):
+    """Freeze the reference, prove it faithful, then export, then re-check.
+
+    1. freeze the live object's bytes;
+    2. before anything is exported, require the frozen copy to equal the
+       still-untouched live object, so a value the copy cannot carry
+       faithfully stops the capture here;
+    3. run ``export``;
+    4. require the live object to still equal the frozen copy, so an exporter
+       that changed the session cannot redefine the reference.
+    """
+    frozen = freeze(final)
+    problems = _oracle_problems(final, policy_path, declared, frozen)
+    if problems:
+        raise CaptureError(f"reference copy is not faithful: {problems[:10]}")
+    exported = export()
+    problems = _oracle_problems(final, policy_path, declared, frozen)
+    if problems:
+        raise CaptureError(f"exporting changed the live object: {problems[:10]}")
+    return frozen, exported
+
+
 def freeze(value):
     """The reference copy's bytes, taken from the live object right now."""
     return pickle.dumps(value, protocol=5)
@@ -162,9 +189,8 @@ def _oracle_problems(final, policy_path, declared, frozen=None):
     """Ways the frozen copy fails to equal ``final`` under the policy.
 
     Anything the comparator cannot compare counts as a problem, so an
-    unsupported type stops the capture. Called right after freezing (is the
-    copy faithful?) and again after exporting (did exporting change the live
-    object the copy was taken from?).
+    unsupported type stops the capture. See :func:`seal_and_export` for when
+    it runs.
     """
     from lobster.testing.replay_compare import compare
     from lobster.testing.replay_contract import ComparisonPolicy, SlotStatus
@@ -195,15 +221,13 @@ def main(argv=None):
     receipt = collect_receipt()
     result = SCENARIOS[args.scenario](out)
 
-    declared, frozen = result["declared"], result["frozen"]
-    # The live object after exporting must still equal the copy frozen before
-    # it: an exporter that changed the session cannot redefine the reference.
-    problems = _oracle_problems(result["final"], args.policy, declared, frozen)
-    if problems:
-        raise SystemExit(
-            f"reference copy is not comparable, or exporting changed the live "
-            f"object: {problems[:10]}"
+    declared = result["declared"]
+    try:
+        frozen, notebooks = seal_and_export(
+            result["final"], args.policy, declared, result["export"]
         )
+    except CaptureError as exc:
+        raise SystemExit(str(exc)) from None
     oracle = out / "oracle" / "final.pkl"
     oracle.parent.mkdir()
     oracle.write_bytes(frozen)
@@ -217,7 +241,7 @@ def main(argv=None):
         "roots": result["roots"],
         "perturbed_roots": result["perturbed_roots"],
         "tool_parameters": result["tool_parameters"],
-        "notebooks": result["notebooks"],
+        "notebooks": notebooks,
         "recipe_sha256": sha256_file(provenance),
         "declared_outputs": {
             declared: {"file": "oracle/final.pkl", "sha256": sha256_file(oracle)}
