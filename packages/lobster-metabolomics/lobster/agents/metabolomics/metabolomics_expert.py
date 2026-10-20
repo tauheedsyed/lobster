@@ -31,6 +31,11 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.metabolomics.shared_tools import create_shared_tools
 from lobster.agents.metabolomics.state import MetabolomicsExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -72,6 +77,8 @@ def metabolomics_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for metabolomics expert agent.
@@ -96,14 +103,22 @@ def metabolomics_expert(
     # Lazy prompt import (D17 pattern - allows AGENT_CONFIG discovery before prompt exists)
     from lobster.agents.metabolomics.prompts import create_metabolomics_expert_prompt
 
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("metabolomics_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("metabolomics_expert")
     llm = create_llm(
         "metabolomics_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)

@@ -40,6 +40,11 @@ from langgraph.prebuilt import create_react_agent
 
 # Re-export state class so it can be imported from this module
 from lobster.agents.visualization_state import VisualizationExpertState  # noqa: F401
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.provenance.analysis_ir import AnalysisStep
@@ -93,7 +98,6 @@ def _plot_ir(
     )
 
 
-
 def visualization_expert(
     data_manager: DataManagerV2,
     callback_handler=None,
@@ -102,6 +106,8 @@ def visualization_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Create visualization expert agent with supervisor-mediated flow.
@@ -114,14 +120,22 @@ def visualization_expert(
         workspace_path: Optional workspace path for LLM configuration
     """
 
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("visualization_expert_agent")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("visualization_expert_agent")
     llm = create_llm(
         "visualization_expert_agent",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -181,7 +195,10 @@ def visualization_expert(
         except Exception as e:
             return f"Error checking visualization readiness: {str(e)}"
 
-    check_visualization_readiness.metadata = {"categories": ["UTILITY"], "provenance": False}
+    check_visualization_readiness.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     check_visualization_readiness.tags = ["UTILITY"]
 
     @tool
@@ -1138,7 +1155,10 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
             logger.error(f"Error creating cluster composition plot: {e}")
             return f"❌ Error creating cluster composition plot: {str(e)}"
 
-    create_cluster_composition_plot.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    create_cluster_composition_plot.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+    }
     create_cluster_composition_plot.tags = ["ANALYZE"]
 
     @tool
@@ -1164,7 +1184,10 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
         except Exception as e:
             return f"Error retrieving history: {str(e)}"
 
-    get_visualization_history.metadata = {"categories": ["UTILITY"], "provenance": False}
+    get_visualization_history.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     get_visualization_history.tags = ["UTILITY"]
 
     @tool
@@ -1190,7 +1213,10 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
         except Exception as e:
             return f"Error reporting completion: {str(e)}"
 
-    report_visualization_complete.metadata = {"categories": ["UTILITY"], "provenance": False}
+    report_visualization_complete.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     report_visualization_complete.tags = ["UTILITY"]
 
     # Combine base tools with any handoff tools

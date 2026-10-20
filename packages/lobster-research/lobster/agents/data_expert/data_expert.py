@@ -48,6 +48,11 @@ from lobster.agents.data_expert.prompts import create_data_expert_prompt
 from lobster.agents.data_expert.state import DataExpertState
 
 # Core Lobster imports
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.exceptions import reraise_inference_refusal
@@ -122,6 +127,8 @@ def data_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Create a multi-omics data acquisition, processing, and workspace management specialist agent.
@@ -149,14 +156,22 @@ def data_expert(
         Configured ReAct agent with comprehensive data management capabilities
     """
 
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("data_expert_agent")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("data_expert_agent")
     llm = create_llm(
         "data_expert_agent",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)

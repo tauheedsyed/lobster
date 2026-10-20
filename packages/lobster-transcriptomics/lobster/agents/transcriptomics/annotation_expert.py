@@ -46,6 +46,11 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.state import SingleCellExpertState
 from lobster.agents.transcriptomics.prompts import create_annotation_expert_prompt
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.component_registry import component_registry
@@ -88,6 +93,8 @@ def annotation_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for annotation expert sub-agent.
@@ -105,14 +112,22 @@ def annotation_expert(
         A LangGraph ReAct agent configured for cell type annotation
     """
 
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("annotation_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("annotation_expert")
     llm = create_llm(
         "annotation_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)

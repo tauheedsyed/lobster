@@ -32,7 +32,11 @@ AGENT_CONFIG = AgentRegistryConfig(
         "molecular property calculation, or target druggability scoring — even if "
         "the math seems simple — because these tools log provenance."
     ),
-    child_agents=["cheminformatics_expert", "clinical_dev_expert", "pharmacogenomics_expert"],
+    child_agents=[
+        "cheminformatics_expert",
+        "clinical_dev_expert",
+        "pharmacogenomics_expert",
+    ],
     supervisor_accessible=True,
     tier_requirement="free",
 )
@@ -45,6 +49,11 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.drug_discovery.shared_tools import create_shared_tools
 from lobster.agents.drug_discovery.state import DrugDiscoveryExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -71,6 +80,8 @@ def drug_discovery_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for drug discovery expert parent agent.
@@ -100,14 +111,22 @@ def drug_discovery_expert(
     )
 
     # Create LLM
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("drug_discovery_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("drug_discovery_expert")
     llm = create_llm(
         "drug_discovery_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)

@@ -48,6 +48,11 @@ from langgraph.prebuilt import create_react_agent
 from lobster.agents.transcriptomics.prompts import create_transcriptomics_expert_prompt
 from lobster.agents.transcriptomics.shared_tools import create_shared_tools
 from lobster.agents.transcriptomics.state import TranscriptomicsExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.provenance.analysis_ir import AnalysisStep
@@ -189,6 +194,8 @@ def transcriptomics_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for transcriptomics expert parent agent.
@@ -206,14 +213,22 @@ def transcriptomics_expert(
     Returns:
         Configured ReAct agent with transcriptomics analysis capabilities
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("transcriptomics_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("transcriptomics_expert")
     llm = create_llm(
         "transcriptomics_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -1356,7 +1371,9 @@ Please check:
                         )
                         adata.layers["counts"] = adata.X.copy()
                         detected_source = "featurecounts"
-                except Exception:  # nosec B110 # Failed format detection falls through to supported CSV/TSV detection.
+                except (
+                    Exception
+                ):  # nosec B110 # Failed format detection falls through to supported CSV/TSV detection.
                     pass  # Fall through to CSV/TSV
 
             # Generic CSV/TSV
