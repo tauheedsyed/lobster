@@ -423,3 +423,119 @@ def test_bound_owner_rejects_ambient_graph(context, no_ambient, tmp_path):
     capture_inference_binding(manager, context, Factory())
     with pytest.raises(InferenceRefused):
         create_bioinformatics_graph(manager, subscription_tier="enterprise")
+
+
+def test_agent_client_rebuilds_each_new_run_and_preserves_state(
+    context, no_ambient, tmp_path
+):
+    from lobster.core.client import AgentClient
+
+    manager = DataManagerV2(workspace_path=tmp_path)
+    first, second = Factory(), Factory()
+    client = AgentClient(
+        data_manager=manager,
+        workspace_path=tmp_path,
+        inference_context=context,
+        model_factory=first,
+    )
+    original_graph = client.graph
+    original_store = client.store
+    original_checkpointer = client.checkpointer
+    assert client.query("first turn")["success"]
+    history = list(client.messages)
+    with pytest.raises(InferenceRefused):
+        client.query("stale second turn")
+    assert client.messages == history
+    assert len(first.runtime.requests) == 1
+    client.bind_inference_run(inference_context=context, model_factory=second)
+    assert client.graph is not original_graph
+    assert client.data_manager is manager
+    assert client.store is original_store
+    assert client.checkpointer is original_checkpointer
+    assert client.messages == history
+    assert client.query("second turn")["success"]
+    assert len(first.runtime.requests) == len(second.runtime.requests) == 1
+    assert len(client.messages) > len(history)
+
+
+def test_agent_client_stale_pending_stream_never_uses_new_run(
+    context, no_ambient, tmp_path
+):
+    from lobster.core.client import AgentClient
+
+    first, second = Factory(), Factory()
+    client = AgentClient(
+        workspace_path=tmp_path, inference_context=context, model_factory=first
+    )
+    pending = client.query("pending turn", stream=True)
+    client.bind_inference_run(inference_context=context, model_factory=second)
+    with pytest.raises(InferenceRefused):
+        list(pending)
+    assert not first.runtime.requests
+    assert not second.runtime.requests
+
+
+def test_agent_client_active_stream_blocks_rebind_and_switch(
+    context, no_ambient, tmp_path
+):
+    from lobster.core.client import AgentClient
+
+    factory = Factory()
+    client = AgentClient(
+        workspace_path=tmp_path, inference_context=context, model_factory=factory
+    )
+    stream = client.query("first turn", stream=True)
+    next(stream)
+    with pytest.raises(InferenceRefused):
+        client.bind_inference_run(inference_context=context, model_factory=Factory())
+    with pytest.raises(InferenceRefused):
+        client.switch_provider("anthropic")
+    stream.close()
+    client.bind_inference_run(inference_context=context, model_factory=Factory())
+
+
+@pytest.mark.parametrize("part", ["context", "factory"])
+def test_partial_agent_client_pair_refuses_without_workspace_creation(
+    part, context, tmp_path
+):
+    from lobster.core.client import AgentClient
+
+    path = tmp_path / "not-created"
+    factory = Factory()
+    with pytest.raises(InferenceRefused):
+        AgentClient(
+            workspace_path=path,
+            **(
+                {"inference_context": context}
+                if part == "context"
+                else {"model_factory": factory}
+            ),
+        )
+    assert not path.exists()
+    assert not factory.calls
+
+
+def test_agent_client_new_identity_does_not_keep_initial_model_override(
+    context, no_ambient, tmp_path
+):
+    from lobster.core.client import AgentClient
+
+    first, second = Factory(), Factory()
+    client = AgentClient(
+        workspace_path=tmp_path,
+        inference_context=context,
+        model_factory=first,
+        provider_override=context.provider,
+        model_override=context.model_id,
+        manual_model_params={"model_id": context.model_id},
+    )
+    other = replace(
+        context,
+        model_id="anthropic.claude-sonnet-4-5-20250929-v1:0",
+        binding_version="version-b",
+    )
+    client.bind_inference_run(inference_context=other, model_factory=second)
+    assert all(captured is other for _, captured in second.calls)
+    assert client.query("new identity")["success"]
+    assert second.runtime.requests[0]["modelId"] == other.model_id
+    assert not first.runtime.requests
