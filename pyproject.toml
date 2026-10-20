@@ -526,7 +526,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [tool.bumpversion]
-current_version = "1.1.427"
+current_version = "1.1.428"
 commit = true
 tag = true
 
@@ -535,6 +535,11 @@ dev = [
     "psutil>=7.0.0",
     "pytest-asyncio>=1.1.0",
     "pytest-cov>=6.2.1",
+]
+notebook-replay = [
+    # Kernel for the fresh-kernel notebook replay lane, pinned so the lane is
+    # reproducible (papermill and nbclient do not bring a kernel).
+    "ipykernel==7.4.0",
 ]
 
 [tool.ruff]

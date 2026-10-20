@@ -874,8 +874,6 @@ DISEASE_FLAG_MAPPINGS: Dict[str, str] = {
 
 # Values that indicate TRUE for boolean disease flags
 TRUE_VALUES = {"yes", "y", "true", "1", "positive", "affected"}
-FALSE_VALUES = {"no", "n", "false", "0", "negative", "unaffected", "control", "healthy"}
-CONTROL_INDICATORS = {"control", "healthy", "normal", "non-ibd", "non-diseased"}
 AMBIGUOUS_VALUES = {"not applicable", "n/a", "missing", "unknown", "not collected"}
 
 
@@ -971,8 +969,6 @@ def harmonize_disease_field(
 
             active_diseases = []
             original_values = []
-            all_false = True
-            has_any_flag = False
 
             for flag_col in disease_flag_cols:
                 flag_value = row.get(flag_col)
@@ -985,14 +981,9 @@ def harmonize_disease_field(
                 if flag_str in AMBIGUOUS_VALUES:
                     continue
 
-                has_any_flag = True
-
-                # Check for control indicators first
-                if any(indicator in flag_str for indicator in CONTROL_INDICATORS):
-                    return "healthy", f"control_indicator={flag_value}"
-
+                # A flag value (negative, "control", "unhealthy", blank, ...) is
+                # never proof of health; only a positive flag yields a disease.
                 if flag_str in TRUE_VALUES:
-                    all_false = False
                     # Extract disease name from column name
                     disease_name = (
                         flag_col.lower()
@@ -1010,13 +1001,9 @@ def harmonize_disease_field(
 
                     active_diseases.append(standardized)
                     original_values.append(f"{flag_col}={flag_value}")
-                elif flag_str in FALSE_VALUES:
-                    pass  # Explicit false, not missing
 
             if active_diseases:
                 return ";".join(sorted(set(active_diseases))), ";".join(original_values)
-            elif all_false and has_any_flag:
-                return "healthy", "all_disease_flags=No"
             return None, None
 
         # Apply extraction

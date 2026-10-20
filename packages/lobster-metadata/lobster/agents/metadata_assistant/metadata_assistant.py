@@ -43,6 +43,7 @@ except ImportError:
 
 # Import helper functions from config module
 from lobster.agents.metadata_assistant.config import (
+    DISEASE_ENRICHMENT_FIELDS,
     convert_list_to_dict,
     detect_metadata_pattern,
     phase1_column_rescan,
@@ -123,15 +124,7 @@ logger = get_logger(__name__)
 _ENRICHMENT_MODES = frozenset({"column_scan", "llm_auto", "manual", "hybrid"})
 
 # Sample fields written by the disease-enrichment phases.
-_DISEASE_FIELDS = (
-    "disease",
-    "disease_original",
-    "disease_source",
-    "disease_confidence",
-    "disease_match_type",
-    "disease_evidence",
-    "enrichment_timestamp",
-)
+_DISEASE_FIELDS = DISEASE_ENRICHMENT_FIELDS
 
 
 def _plain_value(value: Any) -> Any:
@@ -1146,27 +1139,8 @@ def metadata_assistant(
                     # If multiple diseases, join with semicolon
                     return ";".join(active_diseases)
 
-                # Check for negative controls (all flags FALSE)
-                all_false = all(
-                    row.get(flag_col)
-                    in [
-                        "No",
-                        "NO",
-                        "no",
-                        "N",
-                        "n",
-                        "FALSE",
-                        "False",
-                        "false",
-                        False,
-                        0,
-                        "0",
-                    ]
-                    for flag_col in disease_flag_cols
-                )
-                if all_false:
-                    return "healthy"
-
+                # All flags negative (or unrecognised) is NOT evidence of health:
+                # the sample may simply be unannotated for other conditions.
                 return "unknown"
 
             # Apply extraction

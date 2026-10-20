@@ -187,6 +187,21 @@ def check_binary(data, mode, platform):
         )
 
 
+# lobster.testing ships reusable test helpers as plain modules. Fixtures,
+# evidence and data belong under tests/ in the repository, never in a wheel.
+TEST_SUPPORT = re.compile(r"lobster/testing/[A-Za-z0-9_]+\.py")
+
+
+def check_test_support_files(members):
+    for member in members:
+        require(not member.startswith("tests/"), f"Test file in wheel: {member}")
+        if member.startswith("lobster/testing/"):
+            require(
+                TEST_SUPPORT.fullmatch(member),
+                f"Non-module file under lobster/testing in wheel: {member}",
+            )
+
+
 def check_wheel(path, name, version, platform):
     dist_info = f"{normalized_name(name).replace('-', '_')}-{version}.dist-info"
     with zipfile.ZipFile(path) as archive:
@@ -262,6 +277,7 @@ def check_wheel(path, name, version, platform):
             )
             require(value == actual, f"RECORD hash mismatch: {member}")
         require(recorded == files.keys(), "RECORD membership mismatch")
+        check_test_support_files(files)
         if platform is not None:
             binary = "lobster_ai_tui/bin/lobster-tui"
             require(binary in files, "Missing TUI binary")

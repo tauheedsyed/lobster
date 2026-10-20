@@ -335,6 +335,9 @@ jobs:
             tests/unit/core/test_ir_python_literal.py
             tests/unit/core/test_analysis_ir_repr_filter.py
             tests/unit/core/test_ir_coverage.py
+            tests/unit/core/test_replay_compare.py
+            tests/unit/core/test_ir_load_fidelity.py
+            tests/unit/core/test_notebook_replay_checker.py
           )
           RESULTS=()
           for index in "${!FIDELITY_TESTS[@]}"; do
@@ -357,12 +360,69 @@ jobs:
           retention-days: 14
 
   # ==========================================================================
+  # Fresh-kernel replay of exported notebooks (source-tree integration lane)
+  # Captures a live session, exports its notebook, runs it in a container
+  # without network that cannot see the live capture, and compares outputs.
+  # ==========================================================================
+  notebook-replay:
+    name: Notebook replay (fresh kernel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run notebook replay lane
+        env:
+          PYTHONPATH: ""
+        run: |
+          python3 tests/integration/notebook_replay/run_lane.py \
+            --lane container --work "$RUNNER_TEMP/notebook-replay"
+
+      - name: Collect replay results
+        if: ${{ !cancelled() }}
+        run: |
+          cp "$RUNNER_TEMP/notebook-replay/junit/notebook-replay.xml" results-notebook-replay.xml
+          cat "$RUNNER_TEMP/notebook-replay/budget.json"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-notebook-replay
+          path: results-notebook-replay.xml
+          retention-days: 7
+
+      # Notebooks, synthetic roots, receipts, reports, logs and timings only;
+      # never the environment, the source copy or the live capture workspace.
+      - name: Upload replay diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notebook-replay-diagnostics
+          path: |
+            ${{ runner.temp }}/notebook-replay/stage
+            ${{ runner.temp }}/notebook-replay/receipts
+            ${{ runner.temp }}/notebook-replay/reports
+            ${{ runner.temp }}/notebook-replay/logs
+            ${{ runner.temp }}/notebook-replay/run/env.json
+            ${{ runner.temp }}/notebook-replay/run/run.json
+            ${{ runner.temp }}/notebook-replay/budget.json
+          retention-days: 7
+
+  # ==========================================================================
   # Summary Job: Aggregate Results for Branch Protection
   # ==========================================================================
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [package-tests, preset-tests, integration-tests]
+    needs: [package-tests, preset-tests, integration-tests, notebook-replay]
     if: always()
 
     steps:
@@ -423,12 +483,14 @@ jobs:
           PACKAGE_RESULT="${{ needs.package-tests.result }}"
           PRESET_RESULT="${{ needs.preset-tests.result }}"
           INTEGRATION_RESULT="${{ needs.integration-tests.result }}"
+          REPLAY_RESULT="${{ needs.notebook-replay.result }}"
 
           echo "Package tests: $PACKAGE_RESULT"
           echo "Preset tests: $PRESET_RESULT"
           echo "Integration tests: $INTEGRATION_RESULT"
+          echo "Notebook replay: $REPLAY_RESULT"
 
-          if [ "$PACKAGE_RESULT" != "success" ] || [ "$PRESET_RESULT" != "success" ] || [ "$INTEGRATION_RESULT" != "success" ]; then
+          if [ "$PACKAGE_RESULT" != "success" ] || [ "$PRESET_RESULT" != "success" ] || [ "$INTEGRATION_RESULT" != "success" ] || [ "$REPLAY_RESULT" != "success" ]; then
             echo ""
             echo "One or more test jobs did not succeed. See individual job logs for details."
             exit 1

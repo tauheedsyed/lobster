@@ -446,6 +446,33 @@ def test_bad_wheel(suite, tmp_path, options, match):
         v.check_wheel(path, CORE, VERSION, None)
 
 
+def test_wheel_may_ship_test_support_modules(suite, tmp_path):
+    path = make_wheel(
+        tmp_path,
+        extra={
+            "lobster/testing/__init__.py": b"",
+            "lobster/testing/replay_compare.py": b"# module\n",
+        },
+    )
+    v.check_wheel(path, CORE, VERSION, None)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "lobster/testing/notebook_replay/policy.json",
+        "lobster/testing/oracle.h5ad",
+        "lobster/testing/fixtures/data.csv",
+        "lobster/testing/__pycache__/x.cpython-312.pyc",
+        "tests/fixtures/notebook_replay/s1.h5ad",
+    ],
+)
+def test_wheel_rejects_test_data_files(suite, tmp_path, member):
+    path = make_wheel(tmp_path, extra={member: b"data"})
+    with pytest.raises(v.VerificationError, match="wheel"):
+        v.check_wheel(path, CORE, VERSION, None)
+
+
 @pytest.mark.parametrize(
     "change,match",
     [
