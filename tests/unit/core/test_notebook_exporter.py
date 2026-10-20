@@ -18,6 +18,7 @@ import pytest
 
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.notebook_exporter import NotebookExporter
+from lobster.core.notebooks.exporter import _guarded_save_code
 from lobster.core.provenance import ProvenanceTracker
 from lobster.core.provenance.analysis_ir import (
     AnalysisStep,
@@ -1004,6 +1005,15 @@ class TestNotebookExportCharacterization:
             "save_result": selected_saving_split,
         }
         saving_ir = create_data_saving_ir(filename_suffix="data_validation")
+
+        def guarded(ir):
+            path_line = next(
+                line
+                for line in ir.render().splitlines()
+                if line.startswith("output_path = ")
+            )
+            return _guarded_save_code(path_line, ir.parameters["compression"])
+
         ledger_exporter.provenance.activities = [
             {
                 "type": "save_dataset",
@@ -1019,21 +1029,19 @@ class TestNotebookExportCharacterization:
             assert 'f"{output_prefix}_processed.h5ad"' in source
             assert 'f"{output_prefix}_data_validation.h5ad"' not in source
         else:
-            assert source == saving_ir.render()
+            assert source == guarded(saving_ir)
         # Backward compatible direct call or unrelated saved modality: no
         # generic saver string surgery, no change to arbitrary legacy save IR.
-        assert ledger_exporter._create_data_saving_cell().source == saving_ir.render()
+        assert ledger_exporter._create_data_saving_cell().source == guarded(saving_ir)
         ledger_exporter.provenance.activities[0]["parameters"][
             "path"
         ] = "alternate.h5ad"
-        assert (
-            ledger_exporter._create_data_saving_cell([split_ir]).source
-            == saving_ir.render()
+        assert ledger_exporter._create_data_saving_cell([split_ir]).source == guarded(
+            saving_ir
         )
         ledger_exporter.provenance.activities[0]["parameters"]["name"] = "other"
-        assert (
-            ledger_exporter._create_data_saving_cell([split_ir]).source
-            == saving_ir.render()
+        assert ledger_exporter._create_data_saving_cell([split_ir]).source == guarded(
+            saving_ir
         )
 
     def test_save_ir_alone_bypasses_zero_ir_guard(self, notebook_with_only_save_ir):

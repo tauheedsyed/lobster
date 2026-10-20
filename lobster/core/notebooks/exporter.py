@@ -33,6 +33,44 @@ from lobster.core.provenance.provenance import ProvenanceTracker
 logger = logging.getLogger(__name__)
 
 
+def _guarded_save_code(path_line: str, compression: Optional[str] = None) -> str:
+    """Code for the final save cell.
+
+    ``path_line`` assigns ``output_path``. If h5ad cannot write some uns
+    entries, the cell writes a copy without them, names them in
+    ``uns['lobster_unsaved_uns_keys']`` and leaves the in-memory adata as is.
+    """
+    kwargs = f", compression={compression!r}" if compression else ""
+    return f"""# Save processed data
+{path_line}
+try:
+    adata.write_h5ad(output_path{kwargs})
+except Exception as exc:
+    # Some uns entries cannot be written to h5ad. Write a copy without them
+    # and record their names in that copy; the in-memory adata keeps them.
+    import tempfile
+    from pathlib import Path as _Path
+
+    _unwritable = []
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _key in list(adata.uns):
+            _probe = adata.copy()
+            _probe.uns = {{_key: adata.uns[_key]}}
+            try:
+                _probe.write_h5ad(_Path(_tmp) / "probe.h5ad")
+            except Exception:
+                _unwritable.append(_key)
+    _to_write = adata.copy()
+    for _key in _unwritable:
+        del _to_write.uns[_key]
+    _to_write.uns["lobster_unsaved_uns_keys"] = list(_unwritable)
+    print(f"WARNING: these uns keys could not be written and are NOT in {{output_path}}: {{_unwritable}}")
+    print(f"         original error: {{type(exc).__name__}}: {{exc}}")
+    _to_write.write_h5ad(output_path{kwargs})
+print(f"Saved processed data to: {{output_path}}")
+"""
+
+
 class NotebookExporter:
     """
     Convert Lobster provenance to executable Jupyter notebook using IR.
@@ -856,8 +894,24 @@ print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
                         else:
                             ir = AnalysisStep.from_dict(ir_obj)
                         code = ir.render()
-                        logger.debug("Using IR for data saving cell")
-                        return new_code_cell(code)
+                        path_lines = [
+                            line
+                            for line in code.splitlines()
+                            if line.startswith("output_path = ")
+                        ]
+                        if not path_lines:
+                            # Not the standard saver; keep its code as is.
+                            return new_code_cell(code)
+                        else:
+                            # Keep the session's file name and compression, but
+                            # write through the same guarded save as below.
+                            compression = ir.parameters.get("compression")
+                            if compression in (None, "", "none"):
+                                compression = None
+                            logger.debug("Using IR for data saving cell")
+                            return new_code_cell(
+                                _guarded_save_code(path_lines[0], compression)
+                            )
                     except Exception as e:
                         logger.warning(f"Failed to use IR for data saving: {e}")
 
@@ -876,35 +930,9 @@ print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
         # AttributeError instead and the replay aborted on the last cell again.
         # Any serialisation failure should sanitise and retry, because reaching
         # this cell means every analysis step already succeeded.
-        code = """# Save processed data
-output_path = f"{output_prefix}_processed.h5ad"
-try:
-    adata.write_h5ad(output_path)
-except Exception as exc:
-    # Some uns entries cannot be written to h5ad. Write a copy without them
-    # and record their names in that copy; the in-memory adata keeps them.
-    import tempfile
-    from pathlib import Path as _Path
-
-    _unwritable = []
-    with tempfile.TemporaryDirectory() as _tmp:
-        for _key in list(adata.uns):
-            _probe = adata.copy()
-            _probe.uns = {_key: adata.uns[_key]}
-            try:
-                _probe.write_h5ad(_Path(_tmp) / "probe.h5ad")
-            except Exception:
-                _unwritable.append(_key)
-    _to_write = adata.copy()
-    for _key in _unwritable:
-        del _to_write.uns[_key]
-    _to_write.uns["lobster_unsaved_uns_keys"] = list(_unwritable)
-    print(f"WARNING: these uns keys could not be written and are NOT in {output_path}: {_unwritable}")
-    print(f"         original error: {type(exc).__name__}: {exc}")
-    _to_write.write_h5ad(output_path)
-print(f"Saved processed data to: {output_path}")
-"""
-        return new_code_cell(code)
+        return new_code_cell(
+            _guarded_save_code('output_path = f"{output_prefix}_processed.h5ad"')
+        )
 
     def _create_doc_cell(
         self, activity: Dict[str, Any], step_number: int

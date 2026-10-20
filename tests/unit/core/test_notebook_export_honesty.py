@@ -195,6 +195,36 @@ def test_fallback_save_keeps_live_data_and_records_unwritten_keys(data_manager):
     assert "bad" in adata.uns  # in-memory result is untouched
 
 
+def test_session_save_ir_uses_the_same_guarded_save(data_manager):
+    """A recorded save_dataset IR keeps its file name but not a bare write.
+
+    Seen in a manual CLI run: clustering stores uns['clustering_results'] with
+    float keys, h5ad raises, and the whole notebook failed on its last cell.
+    """
+    from lobster.core.provenance.analysis_ir import create_data_saving_ir
+
+    tracker = ProvenanceTracker()
+    exporter = NotebookExporter(tracker, data_manager)
+    tracker.activities = [
+        {
+            "type": "save_dataset",
+            "parameters": {"name": "pbmc_clustered"},
+            "ir": create_data_saving_ir(filename_suffix="pbmc_clustered").to_dict(),
+        }
+    ]
+    save_cell = exporter._create_data_saving_cell().source
+    adata = _adata()
+    adata.uns["clustering_results"] = {0.4: {"n_clusters": 2}}
+    prefix = str(Path(tempfile.mkdtemp()) / "out")
+    namespace = {"adata": adata, "output_prefix": prefix}
+
+    exec(compile(save_cell, "save_cell", "exec"), namespace)  # nosec B102
+
+    written = anndata.read_h5ad(prefix + "_pbmc_clustered.h5ad")
+    assert list(written.uns["lobster_unsaved_uns_keys"]) == ["clustering_results"]
+    assert "compression='gzip'" in save_cell
+
+
 # --- failed steps -------------------------------------------------------------
 
 

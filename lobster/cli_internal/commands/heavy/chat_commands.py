@@ -957,7 +957,7 @@ def chat_impl(
             _ollama = get_provider("ollama")
             if _ollama:
                 _ollama.preload_model_async(model)
-        except Exception:
+        except Exception:  # nosec B110 - optional model preload
             pass  # Non-critical — user gets normal cold-load if this fails
 
     # Initialize client (heavy imports happen here)
@@ -1001,7 +1001,7 @@ def chat_impl(
     while True:
         try:
             # Get current token usage for prompt prefix
-            token_prefix = ""
+            token_prefix = ""  # nosec B105 - display text, not a password
             try:
                 token_usage = client.get_token_usage()
                 if token_usage and "error" not in token_usage:
@@ -1033,7 +1033,7 @@ def chat_impl(
                     else:
                         # Cloud providers - show icon, cost, and token count
                         token_prefix = f"[dim grey42]{provider_icon} · ${cost:.4f} · {tokens:,}t[/dim grey42] "
-            except Exception:
+            except Exception:  # nosec B110 - token display is optional
                 pass
 
             # Prompt with token costs on the left
@@ -1088,12 +1088,12 @@ def chat_impl(
             else:
                 # Existing non-streaming path
                 if should_show_progress(client):
-                    console.print("[dim]...[/dim]", end="", flush=True)
+                    console.print("[dim]...[/dim]", end="")
 
                 result = _query_classic(client, user_input)
 
                 if should_show_progress(client):
-                    console.print("\r   \r", end="", flush=True)
+                    console.print("\r   \r", end="")
 
                 # Display response
                 if result["success"]:
@@ -1122,7 +1122,7 @@ def chat_impl(
                 if hasattr(client, "_save_session_json"):
                     try:
                         client._save_session_json()
-                    except Exception:
+                    except Exception:  # nosec B110 - best-effort session save
                         pass
                 display_goodbye()
 
