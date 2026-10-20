@@ -2,7 +2,7 @@
 
 import asyncio
 import importlib
-import pickle
+import pickle  # nosec B403 # dumps only tests serialization refusal; no untrusted loads.
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace

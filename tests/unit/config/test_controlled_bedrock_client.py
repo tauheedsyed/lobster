@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-import pickle
+import pickle  # nosec B403 # dumps only tests serialization refusal; no untrusted loads.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor

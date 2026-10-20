@@ -3,7 +3,7 @@
 import asyncio
 import hmac
 import json
-import pickle
+import pickle  # nosec B403 # dumps only tests serialization refusal; no untrusted loads.
 import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4

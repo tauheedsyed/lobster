@@ -92,7 +92,7 @@ def encode_event(kind, payload):
 
 
 def bedrock_model(probe):
-    runtime = boto3.client(
+    runtime = boto3.client(  # nosec B106 # fake fixture credentials; native HTTP IO is replaced below.
         "bedrock-runtime",
         region_name="us-east-1",
         aws_access_key_id="fake-access-id",
