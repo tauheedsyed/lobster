@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+import threading
 import time
 from uuid import uuid4
 
@@ -48,6 +49,7 @@ class NativeFactory:
 
     def __init__(self):
         self.records = []
+        self.models = {}
 
     def create(self, *, component, context):
         probe = HookProbe()
@@ -106,6 +108,7 @@ class NativeFactory:
                 cache=False,
             ).attach_request_owner(owner)
         self.records.append((component, context, owner, probe, authorizer, views))
+        self.models[component] = model
         return model
 
     def close(self):
@@ -113,6 +116,12 @@ class NativeFactory:
             owner.close()
             if context.provider == "anthropic":
                 asyncio.run(owner.aclose())
+
+    async def aclose(self):
+        for _, context, owner, *_ in self.records:
+            owner.close()
+            if context.provider == "anthropic":
+                await owner.aclose()
 
 
 @pytest.mark.parametrize("provider", ["bedrock", "anthropic"])
@@ -173,6 +182,185 @@ def test_official_compiled_agent_native_request_and_outward_refusal(
         assert len(probe.sent) == len(authorizer.outcomes) == 1
     finally:
         factory.close()
+
+
+@pytest.mark.parametrize("provider", ["bedrock", "anthropic"])
+@pytest.mark.parametrize("reuse_path", ["ui", "abstract", "methods"])
+def test_actual_shared_model_reuses_authorize_and_refuse_after_disposal(
+    provider, reuse_path, tmp_path
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from langgraph.store.memory import InMemoryStore
+
+    from lobster.agents.graph import create_bioinformatics_graph
+    from lobster.agents.metadata_assistant.config import (
+        phase2_llm_abstract_extraction,
+        phase3_llm_methods_extraction,
+    )
+    from lobster.services.interaction.component_mapper import map_question
+
+    manager = DataManagerV2(workspace_path=tmp_path)
+    context = InferenceContext(
+        provider,
+        BEDROCK_MODEL if provider == "bedrock" else ANTHROPIC_MODEL,
+        "synthetic-binding",
+        "version-a",
+        200000,
+        137,
+    )
+    factory = NativeFactory()
+    try:
+        if reuse_path == "ui":
+            create_bioinformatics_graph(
+                manager,
+                enabled_agents=["research_agent"],
+                store=InMemoryStore(),
+                inference_context=context,
+                model_factory=factory,
+            )
+            model = factory.models["supervisor"]
+
+            def call():
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    return executor.submit(
+                        map_question, "synthetic ambiguous question", llm=model
+                    ).result()
+
+        else:
+            config = get_agent_registry_config("metadata_assistant")
+            assert config is not None
+            constructor = import_agent_factory(config.factory_function)
+            constructor(
+                data_manager=manager, inference_context=context, model_factory=factory
+            )
+            model = factory.models["metadata_assistant"]
+            cache = tmp_path / "metadata"
+            cache.mkdir(exist_ok=True)
+            (cache / "pub1_metadata.json").write_text(
+                json.dumps({"content": "synthetic abstract"})
+            )
+            (cache / "pub1_methods.json").write_text(
+                json.dumps({"methods_text": "synthetic methods"})
+            )
+            samples = [
+                {"publication_entry_id": "pub1", "publication_title": "Synthetic study"}
+            ]
+            phase = (
+                phase2_llm_abstract_extraction
+                if reuse_path == "abstract"
+                else phase3_llm_methods_extraction
+            )
+
+            def call():
+                return phase(samples, manager, 0.9, model)
+
+        record = next(r for r in factory.records if factory.models[r[0]] is model)
+        _, actual, _, probe, authorizer, _ = record
+        call()
+        assert actual is context
+        assert len(authorizer.outcomes) == len(probe.sent) == 1
+        refusal = InferenceRefused("budget")
+        authorizer.refusal = refusal
+        with pytest.raises(InferenceRefused) as caught:
+            call()
+        assert caught.value is refusal
+        assert len(authorizer.outcomes) == len(probe.sent) == 1
+        assert len(authorizer.descriptors) == 2
+        factory.close()
+        authorizer.refusal = None
+        with pytest.raises(InferenceRefused):
+            call()
+        assert len(authorizer.descriptors) == 2
+        assert len(authorizer.outcomes) == len(probe.sent) == 1
+    finally:
+        factory.close()
+
+
+@pytest.mark.parametrize("provider", ["bedrock", "anthropic"])
+@pytest.mark.parametrize("recording_failure", [False, True])
+@pytest.mark.asyncio
+async def test_actual_graph_cancellation_drains_native_receipt_before_reporting(
+    tmp_path, provider, recording_failure
+):
+    from langgraph.store.memory import InMemoryStore
+
+    from lobster.agents.graph import create_bioinformatics_graph
+    from lobster.config.inference_runtime import capture_inference_binding
+
+    manager = DataManagerV2(workspace_path=tmp_path)
+    context = InferenceContext(
+        provider,
+        BEDROCK_MODEL if provider == "bedrock" else ANTHROPIC_MODEL,
+        "synthetic-binding",
+        "version-a",
+        200000,
+        137,
+    )
+    factory = NativeFactory()
+    entered, release = threading.Event(), threading.Event()
+    task = None
+    try:
+        graph, _ = create_bioinformatics_graph(
+            manager,
+            enabled_agents=["research_agent"],
+            store=InMemoryStore(),
+            inference_context=context,
+            model_factory=factory,
+        )
+        record = next(r for r in factory.records if r[0] == "supervisor")
+        authorizer = record[4]
+        write = authorizer.after_request
+
+        def blocked_write(permit, outcome):
+            entered.set()
+            assert release.wait(5), "Synthetic receipt writer was not released"
+            write(permit, outcome)
+
+        authorizer.after_request = blocked_write
+
+        async def blocked_awrite(permit, outcome):
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 5)
+            write(permit, outcome)
+
+        authorizer.aafter_request = blocked_awrite
+        accounting_refusal = InferenceRefused("accounting")
+        if recording_failure:
+            authorizer.finalization_refusal = accounting_refusal
+        task = asyncio.create_task(
+            graph.ainvoke(
+                {"messages": [{"role": "user", "content": "synthetic cancelled input"}]}
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.03)
+        assert (
+            not task.done()
+        ), "Graph reported cancellation before native receipt drained"
+        with pytest.raises(InferenceRefused):
+            capture_inference_binding(manager, context, NativeFactory(), replace=True)
+        task.cancel()
+        await asyncio.sleep(0.03)
+        assert not task.done()
+        release.set()
+        if recording_failure:
+            with pytest.raises(InferenceRefused) as caught:
+                await task
+            assert caught.value is accounting_refusal
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert len(authorizer.outcomes) == len(record[3].sent) == 1
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            try:
+                await task
+            except (asyncio.CancelledError, InferenceRefused):
+                pass
+        await factory.aclose()
 
 
 @pytest.mark.parametrize("deny_child", [False, True])
