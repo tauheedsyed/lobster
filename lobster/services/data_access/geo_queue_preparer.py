@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.core.interfaces.queue_preparer import (
     IQueuePreparer,
     QueuePreparationResult,
@@ -461,6 +461,7 @@ class GEOQueuePreparer(IQueuePreparer):
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"LLM strategy extraction failed for {accession}: {e}, "
                 "using URL-based fallback"

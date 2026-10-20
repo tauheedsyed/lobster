@@ -26,6 +26,7 @@ from lobster.core.exceptions import (
     FeatureNotImplementedError,
     InferenceRefused,
     UnsupportedPlatformError,
+    reraise_inference_refusal,
 )
 from lobster.services.data_access.geo.constants import (
     PLATFORM_REGISTRY,
@@ -102,6 +103,7 @@ class MetadataFetcher:
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error fetching metadata for {geo_id}: {e}")
             return (None, None)
 
@@ -142,6 +144,7 @@ class MetadataFetcher:
                 except InferenceRefused:
                     raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.error(f"Entrez fallback also failed for {gse_id}: {e}")
                     logger.error(
                         f"Failed to fetch metadata for {gse_id}: "
@@ -205,6 +208,7 @@ class MetadataFetcher:
         except InferenceRefused:
             raise
         except Exception as geoparse_error:
+            reraise_inference_refusal(geoparse_error)
             logger.error(f"GEOparse metadata fetch failed: {geoparse_error}")
             logger.error(
                 f"Failed to fetch metadata for {gse_id}. GEOparse ({geoparse_error}) failed."
@@ -312,6 +316,7 @@ class MetadataFetcher:
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error fetching GDS metadata for {gds_id}: {e}")
             logger.error(f"Error fetching GDS metadata for {gds_id}: {str(e)}")
             return (None, None)
@@ -529,6 +534,7 @@ class MetadataFetcher:
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error in Entrez fallback for {gse_id}: {e}")
             raise
 

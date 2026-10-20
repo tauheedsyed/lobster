@@ -20,6 +20,7 @@ except ImportError:
 from lobster.core.exceptions import (
     InferenceRefused,
     UnsupportedPlatformError,
+    reraise_inference_refusal,
 )
 from lobster.services.data_access.geo.constants import (
     GEODataSource,
@@ -237,6 +238,7 @@ class DownloadExecutor:
                 except InferenceRefused:
                     raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     # Ultimate fallback if modality detection fails completely
                     logger.error(f"Modality detection failed for {clean_geo_id}: {e}")
                     # Conservative default: Use the old logic
@@ -447,6 +449,7 @@ Multi-Modal Dataset Detected:
         except UnsupportedPlatformError:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error downloading dataset: {e}")
             raise GEOServiceError(
                 f"Error downloading dataset {geo_id}: {str(e)}"
@@ -554,6 +557,7 @@ Multi-Modal Dataset Detected:
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error in strategic download: {e}")
             return GEOResult(
                 success=False, error_message=str(e), source=GEODataSource.GEOPARSE
@@ -1198,6 +1202,7 @@ Multi-Modal Dataset Detected:
                 except InferenceRefused:
                     raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.warning(
                         f"Metadata detection failed for {geo_id} in supplementary path: {e}"
                     )
@@ -1225,5 +1230,6 @@ Multi-Modal Dataset Detected:
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(f"GEOparse download failed: {e}")
             return GEOResult(success=False, error_message=str(e))

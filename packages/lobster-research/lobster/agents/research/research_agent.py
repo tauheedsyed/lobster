@@ -1380,12 +1380,14 @@ def research_agent(
             except InferenceRefused:
                 raise
             except Exception as e:
+                reraise_inference_refusal(e)
                 logger.error(f"Error accessing dataset {identifier}: {e}")
                 return f"Error accessing dataset {identifier}: {str(e)}"
 
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error in metadata validation: {e}")
             return f"Error validating dataset metadata: {str(e)}"
 

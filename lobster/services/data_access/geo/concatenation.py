@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from lobster.core.exceptions import InferenceRefused
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -130,6 +130,7 @@ class SampleConcatenator:
                     except InferenceRefused:
                         raise
                     except Exception as e:
+                        reraise_inference_refusal(e)
                         logger.error(f"Modality detection failed for {gse_id}: {e}")
                         n_samples = len(metadata.get("samples", {}))
                         adapter_name = (
@@ -175,6 +176,7 @@ class SampleConcatenator:
                 except InferenceRefused:
                     raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.error(f"Failed to store sample {gsm_id}: {e}")
                     continue
 
@@ -186,6 +188,7 @@ class SampleConcatenator:
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error storing samples as AnnData: {e}")
             return stored_samples
 
@@ -502,6 +505,7 @@ class SampleConcatenator:
             except InferenceRefused:
                 raise
             except Exception as e:
+                reraise_inference_refusal(e)
                 logger.warning(f"Metadata-based detection failed for {gsm_id}: {e}")
                 n_samples = n_obs if n_obs < 1000 else n_vars
                 adapter_name = (
@@ -540,6 +544,7 @@ Ready for single-cell analysis!"""
         except InferenceRefused:
             raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error storing sample {gsm_id}: {e}")
             return f"Error storing sample {gsm_id}: {str(e)}"
 

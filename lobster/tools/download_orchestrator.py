@@ -45,6 +45,7 @@ import traceback
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import reraise_inference_refusal
 from lobster.core.interfaces.download_service import IDownloadService
 from lobster.core.schemas.download_queue import DownloadStatus
 from lobster.utils.logger import get_logger
@@ -416,6 +417,7 @@ class DownloadOrchestrator:
             return modality_name, stats
 
         except Exception as e:
+            reraise_inference_refusal(e)
             # Step 9: Error handling - update queue and re-raise
             error_log = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
             logger.error(
