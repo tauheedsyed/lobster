@@ -2823,60 +2823,55 @@ print(f"Quality metrics computed for {len(np.unique(labels))} clusters")
         }
 
         # Jinja2 code template
+        # Mirrors subcluster_cells step by step (fresh PCA on the subset, one
+        # key per resolution, labels as strings prefixed with the parent).
         code_template = """# Sub-clustering pipeline: Re-cluster specific cell populations
 import scanpy as sc
 import numpy as np
 
 # Configuration
 cluster_key = {{ cluster_key|repr }}
-clusters_to_refine = {{ clusters_to_refine|repr }}
-resolution = {{ resolution }}
+clusters_to_refine = [str(c) for c in {{ clusters_to_refine|repr }}]
+resolutions = {{ resolutions|repr }} or [{{ resolution }}]
 n_pcs = {{ n_pcs }}
 n_neighbors = {{ n_neighbors }}
 algorithm = {{ algorithm|repr }}
 
-# Validate cluster key exists
 if cluster_key not in adata.obs.columns:
-    raise ValueError(f"Cluster key '{cluster_key}' not found in adata.obs")
+    raise ValueError(f"Cluster key {cluster_key!r} not found in adata.obs")
+if "X_pca" not in adata.obsm:
+    raise ValueError("PCA results not found in adata.obsm['X_pca']; run clustering first")
+if not clusters_to_refine:
+    clusters_to_refine = sorted(adata.obs[cluster_key].astype(str).unique())
 
-# Select cells to sub-cluster
-if clusters_to_refine:
-    subset_mask = adata.obs[cluster_key].astype(str).isin([str(c) for c in clusters_to_refine])
-    print(f"Sub-clustering {len(clusters_to_refine)} parent clusters: {clusters_to_refine}")
-else:
-    subset_mask = adata.obs.index.isin(adata.obs.index)  # All cells
-    print("Sub-clustering ALL cells")
-
-n_cells_to_subcluster = subset_mask.sum()
-print(f"Selected {n_cells_to_subcluster} cells for sub-clustering")
-
-# Create subset
+# Select and copy the cells to sub-cluster
+subset_mask = adata.obs[cluster_key].astype(str).isin(clusters_to_refine)
+print(f"Selected {subset_mask.sum()} cells from {len(clusters_to_refine)} clusters")
 adata_subset = adata[subset_mask].copy()
 
-# Compute neighbors on subset (using existing PCA from adata.obsm['X_pca'])
-print(f"Computing neighbors (n_neighbors={n_neighbors}, n_pcs={n_pcs})")
+# PCA and neighbors on the subset
+sc.tl.pca(adata_subset, n_comps=n_pcs)
 sc.pp.neighbors(adata_subset, n_neighbors=n_neighbors, n_pcs=n_pcs)
 
-# Run clustering
-subcluster_key = f"{algorithm}_subcluster"
-print(f"Running {algorithm} sub-clustering (resolution={resolution})")
-getattr(sc.tl, algorithm)(adata_subset, resolution=resolution, key_added=subcluster_key)
+for res in resolutions:
+    if len(resolutions) == 1:
+        subcluster_key = f"{algorithm}_subcluster"
+    else:
+        subcluster_key = f"{algorithm}_sub_res{res}".replace(".", "_")
+    getattr(sc.tl, algorithm)(adata_subset, resolution=res, key_added=subcluster_key)
 
-# Add parent cluster prefix to sub-cluster labels
-if clusters_to_refine:
+    # Labels become strings "<parent>.<sub>"
+    adata_subset.obs[subcluster_key] = adata_subset.obs[subcluster_key].astype(str)
     for parent_cluster in clusters_to_refine:
-        parent_mask = adata_subset.obs[cluster_key].astype(str) == str(parent_cluster)
-        if parent_mask.sum() > 0:
-            sub_labels = adata_subset.obs.loc[parent_mask, subcluster_key].astype(str)
-            prefixed_labels = sub_labels.apply(lambda x: f"{parent_cluster}.{x}")
-            adata_subset.obs.loc[parent_mask, subcluster_key] = prefixed_labels
+        parent_mask = adata_subset.obs[cluster_key].astype(str) == parent_cluster
+        adata_subset.obs.loc[parent_mask, subcluster_key] = adata_subset.obs.loc[
+            parent_mask, subcluster_key
+        ].apply(lambda x: f"{parent_cluster}.{x}")
 
-# Merge back to original AnnData
-adata.obs[subcluster_key] = adata.obs[cluster_key].astype(str)
-adata.obs.loc[subset_mask, subcluster_key] = adata_subset.obs[subcluster_key]
-
-n_subclusters = adata.obs[subcluster_key].nunique()
-print(f"Sub-clustering complete: {n_subclusters} sub-clusters identified")
+    # Merge back: cells not sub-clustered keep their parent label
+    adata.obs[subcluster_key] = adata.obs[cluster_key].astype(str)
+    adata.obs.loc[subset_mask, subcluster_key] = adata_subset.obs[subcluster_key]
+    print(f"{subcluster_key}: {adata.obs[subcluster_key].nunique()} clusters")
 """
 
         return AnalysisStep(
