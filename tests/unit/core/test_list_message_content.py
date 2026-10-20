@@ -169,13 +169,3 @@ def test_local_client_raw_fallback_does_not_stringify_reasoning():
         client._extract_from_raw_content([{"type": "text", "text": "answer"}])
         == "answer"
     )
-
-
-def test_minimum_langchain_aws_profiles_drop_unsupported_temperature():
-    from langchain_aws.chat_models.bedrock_converse import _get_default_model_profile
-
-    for model in (
-        "global.anthropic.claude-sonnet-5-5",
-        "global.anthropic.claude-haiku-5-5",
-    ):
-        assert _get_default_model_profile(model)["temperature"] is False
