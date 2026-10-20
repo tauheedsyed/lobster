@@ -293,7 +293,7 @@ class DiseaseOntologyService:
         remaining = positive_segments(query_lower)
         if not remaining:
             return []  # blank, negative or unknown as a whole value
-        whole = remaining == query_lower
+        whole = remaining == query_lower.strip(" ;|")
         query_lower = remaining
 
         # Phase 1: whole-token keyword matching. Unknown, negated, blank or

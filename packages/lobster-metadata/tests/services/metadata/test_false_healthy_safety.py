@@ -437,6 +437,8 @@ def test_column_rescan_run_twice_does_not_promote_candidate(
         "disease_source",
         "disease_match_type",
         "disease_evidence",
+        "Disease_Candidate",
+        "disease_candidate_extra",
     ],
 )
 def test_column_rescan_ignores_its_own_output_fields(
@@ -464,9 +466,97 @@ def test_exported_and_reimported_candidate_is_not_promoted(
         for row in exported
     ]
     for row in reimported:
-        row.pop("disease", None)  # the export left disease unresolved
+        assert pd.isna(row.get("disease")), "export must leave disease unresolved"
+        row.pop("disease", None)
     enriched, _ = enrichment_config.phase1_column_rescan(reimported)
 
     assert enriched == 0
     assert not reimported[0].get("disease")
     assert reimported[0]["disease_candidate"] == "crc"
+
+
+# --- Multi-segment values, plurals and field-list consistency -----------------
+
+
+@pytest.mark.parametrize(
+    "term",
+    [
+        "healthy; ibd: unknown",
+        "healthy control; crc_status=0",
+        "healthy | cd: no",
+        "Crohn's disease and healthy controls",
+        "colorectal cancer and healthy volunteers",
+    ],
+)
+def test_standardization_dropped_segment_or_mixed_text_is_not_resolved(
+    term, standardizer
+):
+    standardized, _, _ = standardizer.standardize_disease_terms(
+        pd.DataFrame({"disease": [term]})
+    )
+    assert standardized.loc[0, "disease"] not in KNOWN_IDS
+
+
+@pytest.mark.parametrize(
+    "term",
+    ["healthy controls", "healthy volunteers", "healthy donors", "healthy subjects"],
+)
+def test_healthy_plurals_map_on_a_whole_value(term, ontology, standardizer):
+    matches = ontology.match_disease(term)
+    assert [m.disease_id for m in matches] == ["healthy"]
+    assert matches[0].confidence == 1.0
+    standardized, _, _ = standardizer.standardize_disease_terms(
+        pd.DataFrame({"disease": [term]})
+    )
+    assert standardized.loc[0, "disease"] == "healthy"
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+@pytest.mark.parametrize("term", ["healthy controls", "healthy volunteers"])
+def test_healthy_plurals_enrich_on_a_whole_value_in_column_rescan(
+    term, premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR011", "condition": term}]
+    enrichment_config.phase1_column_rescan(samples)
+    assert samples[0]["disease"] == "healthy"
+
+
+def test_ir_field_list_covers_every_field_the_enrichment_writes():
+    from lobster.agents.metadata_assistant import metadata_assistant as module
+
+    assert set(module._DISEASE_FIELDS) == set(enrichment_config.DERIVED_DISEASE_FIELDS)
+    assert "disease_candidate" in module._DISEASE_FIELDS
+
+
+# --- User columns named like the output fields are still input ----------------
+
+
+@pytest.mark.parametrize("premium", [True, False], ids=["premium", "public-fallback"])
+@pytest.mark.parametrize("column", ["Disease", "DISEASE"])
+@pytest.mark.parametrize(
+    "value,expected",
+    [("Healthy", "healthy"), ("Crohn's disease", "cd"), ("healthy control", "healthy")],
+)
+def test_user_disease_column_with_other_casing_is_scanned(
+    column, value, expected, premium, ontology, monkeypatch
+):
+    monkeypatch.setattr(enrichment_config, "HAS_ONTOLOGY_SERVICE", premium)
+    samples = [{"run_accession": "SRR012", column: value}]
+    enriched, _ = enrichment_config.phase1_column_rescan(samples)
+    assert enriched == 1
+    assert samples[0]["disease"] == expected
+    first = dict(samples[0])
+
+    again, _ = enrichment_config.phase1_column_rescan(samples)
+
+    assert again == 0 and samples[0] == first  # run-twice stays idempotent
+
+
+@pytest.mark.parametrize("term", ["healthy;", "healthy ;", " healthy | "])
+def test_trailing_separator_is_not_a_dropped_segment(term, ontology, standardizer):
+    assert [m.disease_id for m in ontology.match_disease(term)] == ["healthy"]
+    standardized, _, _ = standardizer.standardize_disease_terms(
+        pd.DataFrame({"disease": [term]})
+    )
+    assert standardized.loc[0, "disease"] == "healthy"

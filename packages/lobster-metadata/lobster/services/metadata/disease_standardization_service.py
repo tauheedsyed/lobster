@@ -134,6 +134,10 @@ class DiseaseStandardizationService:
             "healthy volunteer",
             "healthy donor",
             "healthy subject",
+            "healthy controls",
+            "healthy volunteers",
+            "healthy donors",
+            "healthy subjects",
             "non-ibd",
             "non ibd",
             "non_ibd",
@@ -385,9 +389,13 @@ class DiseaseStandardizationService:
         # A negative/unknown value ("healthy control: no", "crc_status=0") is not
         # a mapping, whatever keyword it contains. In a ';'-separated list only
         # the positive segments are considered.
-        remaining = self._positive_segments(" ".join(str(value).lower().split()))
+        raw_lower = " ".join(str(value).lower().split())
+        remaining = self._positive_segments(raw_lower)
         if not remaining:
             return value, "unmapped"
+        # A negative/unknown segment was dropped: the rest may name a disease but
+        # can never establish health ("healthy; ibd: unknown").
+        dropped = remaining != raw_lower.strip(" ;|")
         normalized_value = self._normalize_term(remaining)
 
         # Check exclusion patterns first (prevent false positives)
@@ -421,6 +429,8 @@ class DiseaseStandardizationService:
 
         # Level 1: Exact match
         for standard, variants in mappings.items():
+            if dropped and standard == "healthy":
+                continue
             if normalized_value in [self._normalize_term(v) for v in variants]:
                 return standard, "exact"
 
@@ -431,18 +441,17 @@ class DiseaseStandardizationService:
         # Level 2: a variant appears in the value as a whole phrase (not inside a
         # longer word such as "unhealthy" or "CD4") and is not negated.
         # Several different categories in one value is ambiguous -> unmapped.
-        # Health status is only taken from a whole-value (exact) match.
+        # Health status is only taken from a whole-value (exact) match, but
+        # health wording next to a disease makes the value ambiguous.
         hits = set()
         for standard, variants in mappings.items():
-            if standard == "healthy":
-                continue
             for variant in variants:
                 if self._contains_phrase(
                     normalized_value, self._normalize_term(variant)
                 ):
                     hits.add(standard)
                     break
-        if len(hits) == 1:
+        if len(hits) == 1 and "healthy" not in hits:
             return hits.pop(), "contains"
 
         # Partial (reverse-contains) and single-token overlaps are not accepted:

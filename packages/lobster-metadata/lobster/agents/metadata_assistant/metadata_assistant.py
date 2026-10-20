@@ -43,6 +43,7 @@ except ImportError:
 
 # Import helper functions from config module
 from lobster.agents.metadata_assistant.config import (
+    DISEASE_ENRICHMENT_FIELDS,
     convert_list_to_dict,
     detect_metadata_pattern,
     phase1_column_rescan,
@@ -123,15 +124,7 @@ logger = get_logger(__name__)
 _ENRICHMENT_MODES = frozenset({"column_scan", "llm_auto", "manual", "hybrid"})
 
 # Sample fields written by the disease-enrichment phases.
-_DISEASE_FIELDS = (
-    "disease",
-    "disease_original",
-    "disease_source",
-    "disease_confidence",
-    "disease_match_type",
-    "disease_evidence",
-    "enrichment_timestamp",
-)
+_DISEASE_FIELDS = DISEASE_ENRICHMENT_FIELDS
 
 
 def _plain_value(value: Any) -> Any:

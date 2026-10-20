@@ -204,20 +204,32 @@ AUTO_APPLY_CONFIDENCE = 1.0
 # Fields written by the enrichment itself. They are never scanned as input, so a
 # re-run (or a re-imported export) cannot promote its own output, e.g. turn a
 # non-applied ``disease_candidate`` into an applied disease.
-DERIVED_DISEASE_FIELDS = frozenset(
-    {
-        "disease",
-        "disease_original",
-        "disease_source",
-        "disease_confidence",
-        "disease_match_type",
-        "disease_evidence",
-        "disease_candidate",
-        "disease_candidate_confidence",
-        "disease_candidate_source",
-        "enrichment_timestamp",
-    }
+DISEASE_ENRICHMENT_FIELDS = (
+    "disease",
+    "disease_original",
+    "disease_source",
+    "disease_confidence",
+    "disease_match_type",
+    "disease_evidence",
+    "disease_candidate",
+    "disease_candidate_confidence",
+    "disease_candidate_source",
+    "enrichment_timestamp",
 )
+DERIVED_DISEASE_FIELDS = frozenset(DISEASE_ENRICHMENT_FIELDS)
+
+
+def _is_derived_field(name: Any) -> bool:
+    """True for fields written by the enrichment.
+
+    Output fields match by exact name, so a user column such as ``Disease`` is
+    still scanned; only the ``disease_candidate*`` family is matched
+    case-insensitively.
+    """
+    return name in DERIVED_DISEASE_FIELDS or str(name).casefold().startswith(
+        "disease_candidate"
+    )
+
 
 
 def phase1_column_rescan(samples: List[Dict]) -> tuple:
@@ -244,7 +256,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
 
             # Check ALL columns (not just standard ones)
             for col_name, col_value in list(sample.items()):
-                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
+                if not col_value or _is_derived_field(col_name):
                     continue
 
                 col_str = str(col_value)
@@ -321,6 +333,10 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 "healthy volunteer",
                 "healthy donor",
                 "healthy subject",
+                "healthy controls",
+                "healthy volunteers",
+                "healthy donors",
+                "healthy subjects",
                 "non_ibd",
                 "non-ibd",
                 "non ibd",
@@ -377,7 +393,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
 
             # Check ALL columns (not just standard ones)
             for col_name, col_value in list(sample.items()):
-                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
+                if not col_value or _is_derived_field(col_name):
                     continue
 
                 full_text = " ".join(str(col_value).lower().split())
@@ -395,7 +411,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 disease = found_diseases[0]
                 # Only a whole-value match is applied; health only ever from a
                 # whole value. Other in-text hits are kept as candidates.
-                if not (col_str == full_text and col_str in disease_keywords[disease]):
+                if not (col_str == full_text.strip(" ;|") and col_str in disease_keywords[disease]):
                     if disease != "healthy" and "disease_candidate" not in sample:
                         sample["disease_candidate"] = disease
                         sample["disease_candidate_confidence"] = 0.85
