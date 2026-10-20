@@ -311,6 +311,14 @@ class OpenRouterProvider(ILLMProvider):
         """Get the recommended default model."""
         return _DEFAULT_MODEL
 
+    def static_models(self) -> List[ModelInfo]:
+        """Curated catalog with pricing. Never touches the network.
+
+        Used for import-time pricing; ``list_models()`` fetches the live catalog
+        on first explicit use.
+        """
+        return list(_FALLBACK_MODELS)
+
     def list_models(self) -> List[ModelInfo]:
         """
         List available models from OpenRouter.
