@@ -8,7 +8,9 @@ import inspect
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
+from uuid import UUID
 
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 
@@ -130,6 +132,167 @@ class InferenceContext:
                 raise InferenceRefused("context")
             names.add(name)
             _immutable_generation_value(value)
+
+
+@dataclass(frozen=True, slots=True)
+class RequestDescriptor:
+    """Nonsecret identity and conservative bounds of one physical request."""
+
+    provider: str
+    model_id: str
+    component: str
+    binding_id: str
+    binding_version: str
+    invocation_id: str
+    attempt_id: str
+    max_output_tokens: int
+    input_token_upper_bound: int
+    deadline_at: float
+
+    def __post_init__(self):
+        for name in (
+            "provider",
+            "model_id",
+            "component",
+            "binding_id",
+            "binding_version",
+        ):
+            value = getattr(self, name)
+            if (
+                type(value) is not str
+                or not value
+                or value != value.strip()
+                or len(value) > 512
+            ):
+                raise InferenceRefused("context")
+        for value in (self.invocation_id, self.attempt_id):
+            try:
+                if type(value) is not str or str(UUID(value)) != value:
+                    raise ValueError
+            except (ValueError, TypeError, AttributeError):
+                raise InferenceRefused("context") from None
+        for value in (self.max_output_tokens, self.input_token_upper_bound):
+            if type(value) is not int or value <= 0:
+                raise InferenceRefused("context")
+        if (
+            type(self.deadline_at) is not float
+            or not math.isfinite(self.deadline_at)
+            or not 0 < self.deadline_at < 253402300800
+        ):
+            raise InferenceRefused("context")
+
+
+_RAW_USAGE_FIELDS = frozenset(
+    {
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+        "cacheReadInputTokens",
+        "cacheWriteInputTokens",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "ephemeral_5m_input_tokens",
+        "ephemeral_1h_input_tokens",
+        "cache_ttl",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class UsageOutcome:
+    """Usage evidence only, never provider text, prompts, keys or receipts."""
+
+    raw_usage: tuple = ()
+    normalized_input_tokens: int | None = None
+    normalized_output_tokens: int | None = None
+    finish_reason: str | None = None
+    completeness: str = "unknown"
+    request_issued: bool = False
+    outcome: str = "unknown"
+    actual_model_id: str | None = None
+
+    def __post_init__(self):
+        if (
+            type(self.completeness) is not str
+            or self.completeness not in {"complete", "partial", "unknown"}
+            or type(self.outcome) is not str
+            or self.outcome
+            not in {"completed", "refused", "cancelled", "failed", "unknown"}
+            or type(self.request_issued) is not bool
+        ):
+            raise InferenceRefused("accounting")
+        for value in (self.normalized_input_tokens, self.normalized_output_tokens):
+            if value is not None and (type(value) is not int or value < 0):
+                raise InferenceRefused("accounting")
+        if type(self.raw_usage) is not tuple:
+            raise InferenceRefused("accounting")
+        names = set()
+        for pair in self.raw_usage:
+            if type(pair) is not tuple or len(pair) != 2:
+                raise InferenceRefused("accounting")
+            name, value = pair
+            if type(name) is not str or name not in _RAW_USAGE_FIELDS or name in names:
+                raise InferenceRefused("accounting")
+            names.add(name)
+            if name == "cache_ttl":
+                if type(value) is not str or value not in {"5m", "1h"}:
+                    raise InferenceRefused("accounting")
+            elif type(value) is not int or value < 0:
+                raise InferenceRefused("accounting")
+        for value in (self.finish_reason, self.actual_model_id):
+            if value is not None and (
+                type(value) is not str or not value or len(value) > 512
+            ):
+                raise InferenceRefused("accounting")
+
+
+def _freeze_native_value(value, depth=0):
+    if depth > 64:
+        raise InferenceRefused("context")
+    if isinstance(value, Mapping):
+        if any(type(key) is not str for key in value):
+            raise InferenceRefused("context")
+        return MappingProxyType(
+            {
+                key: _freeze_native_value(child, depth + 1)
+                for key, child in value.items()
+            }
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_native_value(child, depth + 1) for child in value)
+    if value is None or type(value) in (str, bytes, bool, int):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise InferenceRefused("context")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class NativeRequestView:
+    """Ephemeral native parameters for validation; never logged or serialized."""
+
+    operation: str
+    endpoint: str
+    parameters: Mapping[str, Any]
+
+    def __post_init__(self):
+        if (
+            type(self.operation) is not str
+            or not self.operation
+            or type(self.endpoint) is not str
+            or not self.endpoint
+            or not isinstance(self.parameters, Mapping)
+        ):
+            raise InferenceRefused("context")
+        object.__setattr__(self, "parameters", _freeze_native_value(self.parameters))
+
+    def __repr__(self):
+        return "NativeRequestView(<ephemeral>)"
+
+    def __reduce__(self):
+        raise TypeError("Native request views cannot be serialized")
 
 
 class BoundModelFactory(Protocol):
