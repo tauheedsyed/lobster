@@ -303,6 +303,85 @@ async def test_native_hook_covers_every_execution_mode(native_model, operation):
         assert request.headers["x-api-key"] == "fake-anthropic-key"
 
 
+@pytest.mark.no_auto_config
+@pytest.mark.parametrize("cap", [None, 1, 8192], ids=["unset", "one", "large"])
+@pytest.mark.parametrize("operation", ["invoke", "ainvoke", "stream", "astream"])
+@pytest.mark.asyncio
+async def test_bound_cap_and_unconfigured_default_reach_native_request(
+    cap, operation, monkeypatch
+):
+    """Bound caps survive native construction; unbound defaults add no limit."""
+    from lobster.config.inference_context import InferenceContext
+    from lobster.config.llm_factory import LLMFactory
+    from tests.unit.config.test_bedrock_output_limit import _create_llm
+    from tests.unit.config.test_generation_path_inventory import NativeFactory
+
+    factory = None
+    if cap is None:
+        from lobster.config.providers.bedrock_provider import BedrockProvider
+
+        monkeypatch.setattr(
+            "lobster.config.providers.get_provider", lambda _: BedrockProvider()
+        )
+        monkeypatch.setenv("AWS_BEDROCK_ACCESS_KEY", "fake-access-key")
+        monkeypatch.setenv("AWS_BEDROCK_SECRET_ACCESS_KEY", "fake-secret-key")
+        probe = HookProbe()
+        native = bedrock_model(probe)
+        # Keep real factory/provider/builder serialization, replacing only IO.
+        model = _create_llm(
+            {
+                "model_id": BEDROCK_MODEL,
+                "additional_model_request_fields": {
+                    "client": native.client,
+                    "bedrock_client": StubBedrockControlClient(),
+                    "cache": False,
+                },
+            },
+            "bedrock",
+        )
+        assert model.max_tokens is None
+    else:
+        context = InferenceContext(
+            "bedrock", BEDROCK_MODEL, "synthetic-binding", "version-a", 200000, cap
+        )
+        factory = NativeFactory()
+        # An ambient profile cap must not override the authoritative run binding.
+        model = LLMFactory.create_llm(
+            {"max_tokens": 4096},
+            agent_name="test-component",
+            inference_context=context,
+            model_factory=factory,
+        )
+        _, actual_context, _, probe, authorizer, _ = factory.records[0]
+        assert actual_context is context
+        assert model.max_tokens == cap
+
+    try:
+        if operation == "invoke":
+            model.invoke("hello")
+        elif operation == "ainvoke":
+            await model.ainvoke("hello")
+        elif operation == "stream":
+            list(model.stream("hello"))
+        else:
+            _ = [chunk async for chunk in model.astream("hello")]
+        assert len(probe.hooks) == len(probe.sent) == 1
+        payload = json.loads(probe.sent[0].body)
+        if cap is None:
+            assert "maxTokens" not in payload.get("inferenceConfig", {})
+            assert "max_tokens" not in payload
+        else:
+            assert payload["inferenceConfig"]["maxTokens"] == cap
+            assert len(authorizer.descriptors) == len(authorizer.outcomes) == 1
+            assert authorizer.descriptors[0].max_output_tokens == cap
+            assert authorizer.outcomes[0][1].completeness == "complete"
+        if "stream" in operation:
+            assert probe.closed == 1
+    finally:
+        if factory is not None:
+            await factory.aclose()
+
+
 @pytest.mark.parametrize("operation", ["invoke", "ainvoke", "stream", "astream"])
 @pytest.mark.asyncio
 async def test_native_hook_refuses_before_transport(native_model, operation):
