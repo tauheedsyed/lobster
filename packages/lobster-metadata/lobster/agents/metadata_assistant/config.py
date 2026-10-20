@@ -14,6 +14,7 @@ This module contains:
 
 import json
 import logging
+import re
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
@@ -197,6 +198,28 @@ Return ONLY valid JSON, no additional text or formatting.
 """
 
 
+# Only a whole-value (confidence 1.0) match is written as a sample's disease.
+AUTO_APPLY_CONFIDENCE = 1.0
+
+# Fields written by the enrichment itself. They are never scanned as input, so a
+# re-run (or a re-imported export) cannot promote its own output, e.g. turn a
+# non-applied ``disease_candidate`` into an applied disease.
+DERIVED_DISEASE_FIELDS = frozenset(
+    {
+        "disease",
+        "disease_original",
+        "disease_source",
+        "disease_confidence",
+        "disease_match_type",
+        "disease_evidence",
+        "disease_candidate",
+        "disease_candidate_confidence",
+        "disease_candidate_source",
+        "enrichment_timestamp",
+    }
+)
+
+
 def phase1_column_rescan(samples: List[Dict]) -> tuple:
     """
     Re-scan ALL columns in sample metadata for disease keywords.
@@ -220,32 +243,44 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 continue  # Already has disease, skip
 
             # Check ALL columns (not just standard ones)
-            for col_name, col_value in sample.items():
-                if not col_value:
+            for col_name, col_value in list(sample.items()):
+                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
                     continue
 
                 col_str = str(col_value)
 
                 # Use match_disease() API (Phase 2 compatible)
                 matches = ontology.match_disease(col_str, k=1, min_confidence=0.7)
-                if matches:
-                    best_match = matches[0]
-                    sample["disease"] = best_match.disease_id
-                    sample["disease_original"] = col_str
-                    sample["disease_source"] = f"column_remapped:{col_name}"
-                    sample["disease_confidence"] = best_match.confidence
-                    sample["disease_match_type"] = best_match.match_type
-                    sample["enrichment_timestamp"] = datetime.now().isoformat()
+                if not matches:
+                    continue
+                best_match = matches[0]
+                if best_match.confidence < AUTO_APPLY_CONFIDENCE:
+                    # Partial / in-text hit: keep as a candidate for review,
+                    # never write it as the sample's disease.
+                    if "disease_candidate" not in sample:
+                        sample["disease_candidate"] = best_match.disease_id
+                        sample["disease_candidate_confidence"] = best_match.confidence
+                        sample["disease_candidate_source"] = f"column:{col_name}"
+                    continue
 
-                    enriched_count += 1
-                    log.append(
-                        f"  - Sample {sample.get('run_accession', 'unknown')}: "
-                        f"Found '{best_match.disease_id}' ({best_match.name}) "
-                        f"in column '{col_name}' (value: {col_value})"
-                    )
-                    break  # Found disease, move to next sample
+                sample["disease"] = best_match.disease_id
+                sample["disease_original"] = col_str
+                sample["disease_source"] = f"column_remapped:{col_name}"
+                sample["disease_confidence"] = best_match.confidence
+                sample["disease_match_type"] = best_match.match_type
+                sample["enrichment_timestamp"] = datetime.now().isoformat()
+
+                enriched_count += 1
+                log.append(
+                    f"  - Sample {sample.get('run_accession', 'unknown')}: "
+                    f"Found '{best_match.disease_id}' ({best_match.name}) "
+                    f"in column '{col_name}' (value: {col_value})"
+                )
+                break  # Found disease, move to next sample
     else:
         # Public version (lobster-local): Use hardcoded fallback
+        # Whole-token keywords only; no bare "control" (negative/technical controls
+        # are not healthy samples).
         disease_keywords = {
             "crc": [
                 "colorectal",
@@ -253,45 +288,132 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
                 "colon cancer",
                 "rectal_cancer",
                 "crc",
+                "colorectal cancer",
+                "rectal cancer",
+                "colorectal carcinoma",
+                "colon carcinoma",
+                "rectal carcinoma",
+                "colorectal adenocarcinoma",
+                "colon adenocarcinoma",
+                "rectal adenocarcinoma",
             ],
-            "uc": ["ulcerative", "uc_", "colitis_ulcerosa", "ulcerative_colitis"],
-            "cd": ["crohn", "cd_", "crohns", "crohns_disease"],
-            "healthy": ["healthy", "control", "non_ibd", "non-ibd", "non_diseased"],
+            "uc": [
+                "ulcerative",
+                "uc_",
+                "colitis_ulcerosa",
+                "ulcerative_colitis",
+                "ulcerative colitis",
+                "colitis ulcerosa",
+            ],
+            "cd": [
+                "crohn",
+                "cd_",
+                "crohns",
+                "crohns_disease",
+                "crohn's disease",
+                "crohns disease",
+                "crohn disease",
+                "crohn's",
+            ],
+            "healthy": [
+                "healthy",
+                "healthy control",
+                "healthy volunteer",
+                "healthy donor",
+                "healthy subject",
+                "non_ibd",
+                "non-ibd",
+                "non ibd",
+                "non_diseased",
+                "non-diseased",
+                "non diseased",
+                "disease-free",
+                "disease free",
+            ],
         }
+        negation_before = re.compile(
+            r"\b(?:no|not|non|without|negative for|free of|absent)\b[\s\-:_]*$"
+        )
+        negative_after = re.compile(
+            r"^\s*[:=\-]?\s*(?:0|no|false|n|negative|neg|absent|none)\b"
+        )
+        neg_token = (
+            r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"  # nosec B105 # regex of negative values, not a credential
+            r"not applicable|missing|null|nan)"
+        )
+        after_separator = re.compile(r"[:=]\s*" + neg_token + r"(?![^\W_])")
+        paren_negative = re.compile(
+            r"\(\s*(?:negative|neg|no|absent|none|false|0)\s*\)"
+        )
+        bare_leading = re.compile(r"^(?:negative|neg|no|not|without|absent)\b")
+
+        def _positive_text(text: str) -> str:
+            kept = []
+            for segment in re.split(r"[;|]", text):
+                segment = segment.strip()
+                if segment and not (
+                    bare_leading.search(segment)
+                    or after_separator.search(segment)
+                    or paren_negative.search(segment)
+                ):
+                    kept.append(segment)
+            return "; ".join(kept)
+
+        def _hit(text: str, keyword: str) -> bool:
+            pattern = r"(?<![^\W_])" + re.escape(keyword)
+            if keyword[-1].isalnum():
+                pattern += r"(?![^\W_])"
+            for found in re.finditer(pattern, text):
+                if negation_before.search(text[: found.start()]):
+                    continue
+                if negative_after.search(text[found.end() :]):
+                    continue
+                return True
+            return False
 
         for sample in samples:
             if sample.get("disease"):
                 continue  # Already has disease, skip
 
             # Check ALL columns (not just standard ones)
-            for col_name, col_value in sample.items():
-                if not col_value:
+            for col_name, col_value in list(sample.items()):
+                if not col_value or col_name in DERIVED_DISEASE_FIELDS:
                     continue
 
-                col_str = str(col_value).lower()
+                full_text = " ".join(str(col_value).lower().split())
+                col_str = _positive_text(full_text)
+                if not col_str:
+                    continue  # negative / unknown as a whole value
+                found_diseases = [
+                    disease
+                    for disease, keywords in disease_keywords.items()
+                    if any(_hit(col_str, keyword) for keyword in keywords)
+                ]
+                if len(found_diseases) != 1:
+                    continue  # no hit, or ambiguous: leave unresolved
 
-                # Try each disease mapping
-                for disease, keywords in disease_keywords.items():
-                    for keyword in keywords:
-                        if keyword in col_str:
-                            sample["disease"] = disease
-                            sample["disease_original"] = str(col_value)
-                            sample["disease_source"] = f"column_remapped:{col_name}"
-                            sample["disease_confidence"] = 1.0
-                            sample["enrichment_timestamp"] = datetime.now().isoformat()
+                disease = found_diseases[0]
+                # Only a whole-value match is applied; health only ever from a
+                # whole value. Other in-text hits are kept as candidates.
+                if not (col_str == full_text and col_str in disease_keywords[disease]):
+                    if disease != "healthy" and "disease_candidate" not in sample:
+                        sample["disease_candidate"] = disease
+                        sample["disease_candidate_confidence"] = 0.85
+                        sample["disease_candidate_source"] = f"column:{col_name}"
+                    continue
 
-                            enriched_count += 1
-                            log.append(
-                                f"  - Sample {sample.get('run_accession', 'unknown')}: "
-                                f"Found '{disease}' in column '{col_name}' (value: {col_value})"
-                            )
-                            break
+                sample["disease"] = disease
+                sample["disease_original"] = str(col_value)
+                sample["disease_source"] = f"column_remapped:{col_name}"
+                sample["disease_confidence"] = 1.0
+                sample["enrichment_timestamp"] = datetime.now().isoformat()
 
-                    if sample.get("disease"):
-                        break  # Found disease, move to next sample
-
-                if sample.get("disease"):
-                    break  # Found disease, move to next sample
+                enriched_count += 1
+                log.append(
+                    f"  - Sample {sample.get('run_accession', 'unknown')}: "
+                    f"Found '{disease}' in column '{col_name}' (value: {col_value})"
+                )
+                break  # Found disease, move to next sample
 
     return enriched_count, log
 
