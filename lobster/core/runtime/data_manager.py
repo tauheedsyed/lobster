@@ -344,8 +344,13 @@ def _read_h5ad_smart(
             logger.info(f"Loading '{path.name}' in backed mode ({size_gb:.1f} GB)")
         except OSError:
             logger.info(f"Loading '{path.name}' in backed mode")
-        return anndata_mod.read_h5ad(path, backed="r")
-    return anndata_mod.read_h5ad(path)
+        adata = anndata_mod.read_h5ad(path, backed="r")
+    else:
+        adata = anndata_mod.read_h5ad(path)
+    from lobster.core.utils.h5ad_utils import repair_log1p_base
+
+    repair_log1p_base(adata)
+    return adata
 
 
 class MetadataEntry(TypedDict, total=False):
