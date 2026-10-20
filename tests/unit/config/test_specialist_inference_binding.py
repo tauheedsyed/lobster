@@ -2,6 +2,7 @@
 
 import ast
 import importlib
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -47,17 +48,21 @@ class Factory:
         )
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "research_agent",
-        "data_expert_agent",
-        "metadata_assistant",
-        "transcriptomics_expert",
-        "annotation_expert",
-        "de_analysis_expert",
-    ],
-)
+def pytest_generate_tests(metafunc):
+    if "name" in metafunc.fixturenames:
+        root = Path(__file__).resolve().parents[3]
+        names = []
+        for path in sorted((root / "packages").glob("*/pyproject.toml")):
+            metadata = tomllib.loads(path.read_text())
+            names.extend(
+                metadata.get("project", {})
+                .get("entry-points", {})
+                .get("lobster.agents", {})
+            )
+        assert len(names) == 22
+        metafunc.parametrize("name", sorted(names))
+
+
 def test_installed_factory_uses_supplied_binding_without_settings(
     name, tmp_path, monkeypatch
 ):
@@ -116,3 +121,46 @@ def test_all_repository_specialist_signatures_support_explicit_pair():
             assert {"inference_context", "model_factory"} <= arguments, str(path)
             found.append((path, function.name))
     assert len(found) == 22
+
+
+def test_all_official_installed_factories_build_in_one_real_graph(
+    tmp_path, monkeypatch
+):
+    from langgraph.store.memory import InMemoryStore
+
+    from lobster.agents import graph
+    from lobster.config.agent_registry import get_worker_agents
+
+    configs = get_worker_agents()
+    assert len(configs) == 22
+
+    def no_settings():
+        raise AssertionError("Strict graph consulted ambient generation settings")
+
+    monkeypatch.setattr(graph, "get_settings", no_settings)
+    for config in configs.values():
+        function = import_agent_factory(config.factory_function)
+        monkeypatch.setattr(
+            importlib.import_module(function.__module__), "get_settings", no_settings
+        )
+    context = InferenceContext(
+        "bedrock",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "synthetic-binding",
+        "version-a",
+        200000,
+        4096,
+    )
+    bound = Factory()
+    compiled, metadata = graph.create_bioinformatics_graph(
+        DataManagerV2(workspace_path=tmp_path),
+        store=InMemoryStore(),
+        subscription_tier="enterprise",
+        enabled_agents=sorted(configs),
+        inference_context=context,
+        model_factory=bound,
+    )
+    assert compiled is not None
+    assert metadata.agent_count == 22
+    assert {component for component, _ in bound.calls} == {"supervisor", *configs}
+    assert all(captured is context for _, captured in bound.calls)
