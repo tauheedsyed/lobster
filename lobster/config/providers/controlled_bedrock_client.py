@@ -215,6 +215,8 @@ class ControlledBedrockClient:
             self._attempt_ids.add(descriptor.attempt_id)
         attempt.permit = self._authorizer.before_request(descriptor)
         attempt.admitted = True
+        if descriptor.deadline_at <= time.time():
+            raise InferenceRefused("context")
         # Transport may fail after this hook. Conservatively treat the request as
         # possibly issued; no SDK receipt can prove it was not accepted remotely.
         attempt.issued = True
