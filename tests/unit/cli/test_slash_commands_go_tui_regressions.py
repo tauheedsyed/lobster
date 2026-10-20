@@ -2454,9 +2454,9 @@ def test_pipeline_export_protocol_mode_renders_structured_output(tmp_path):
     client = _DummyClient(tmp_path)
 
     summary = slash_commands._execute_command(
-        "/pipeline export analysis_workflow Demo notebook",
+        "/pipeline export analysis_workflow Demo notebook --force",
         client,
-        original_command="/pipeline export analysis_workflow Demo notebook",
+        original_command="/pipeline export analysis_workflow Demo notebook --force",
         output=output,
     )
 
