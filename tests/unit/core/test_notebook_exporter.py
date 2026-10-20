@@ -345,7 +345,9 @@ class TestNotebookExporter:
         assert cell.cell_type == "code"
         assert "parameters" in cell.metadata["tags"]
         assert "input_data" in cell.source
-        assert "random_seed" in cell.source
+        assert "output_prefix" in cell.source
+        # Nothing reads random_seed, so it is not offered as a parameter.
+        assert "random_seed" not in cell.source
 
     def test_create_doc_cell(self, provenance_tracker, data_manager):
         """Test documentation cell creation."""
@@ -415,61 +417,6 @@ class TestNotebookExporter:
 
         # None of the fixture activities have IR
         assert len(irs) == 0
-
-    def test_activity_to_code_with_ir(self, data_manager):
-        """Test activity to code conversion with IR present."""
-        from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
-
-        # Create IR with correct signature
-        ir = AnalysisStep(
-            operation="scanpy.pp.filter_cells",
-            tool_name="filter_cells",
-            description="Filter cells by gene count",
-            library="scanpy",
-            code_template="sc.pp.filter_cells(adata, min_genes={{min_genes}})",
-            imports=["import scanpy as sc"],
-            parameters={"min_genes": 200},
-            parameter_schema={
-                "min_genes": ParameterSpec(
-                    param_type="int",
-                    papermill_injectable=True,
-                    default_value=200,
-                    required=False,
-                    description="Minimum genes per cell",
-                )
-            },
-        )
-
-        # Create activity with IR
-        activity = {
-            "type": "filter_cells",
-            "parameters": {"min_genes": 200},
-            "ir": ir.to_dict(),
-        }
-
-        tracker = ProvenanceTracker()
-        exporter = NotebookExporter(tracker, data_manager)
-        cell = exporter._activity_to_code(activity, validate=False)
-
-        assert cell is not None
-        assert cell.cell_type == "code"
-        assert "sc.pp.filter_cells" in cell.source
-        assert "min_genes=200" in cell.source
-
-    def test_activity_to_code_without_ir(self, provenance_tracker, data_manager):
-        """Test activity to code conversion without IR (fallback)."""
-        activity = {
-            "type": "unknown_tool",
-            "parameters": {"test_param": "value"},
-        }
-
-        exporter = NotebookExporter(provenance_tracker, data_manager)
-        cell = exporter._activity_to_code(activity)
-
-        assert cell is not None
-        assert cell.cell_type == "code"
-        assert "TODO" in cell.source  # Placeholder for missing IR
-        assert "No IR available" in cell.source
 
     def test_create_imports_cell_with_irs(self, data_manager):
         """Test imports cell creation with IRs."""
@@ -552,12 +499,14 @@ class TestNotebookExporter:
 
         tracker = ProvenanceTracker()
         exporter = NotebookExporter(tracker, data_manager)
-        cell = exporter._create_parameters_cell([ir])
+        cell = exporter._create_parameters_cell([ir], read_names={"target_sum"})
 
         assert cell.cell_type == "code"
         assert "parameters" in cell.metadata.get("tags", [])
         assert "input_data" in cell.source
-        assert "random_seed" in cell.source
+        # Offered only when the notebook code reads the name.
+        assert "target_sum = 10000" in cell.source
+        assert "min_genes" not in cell.source
 
     def test_create_metadata(self, provenance_tracker, data_manager):
         """Test notebook metadata creation with IR counts."""

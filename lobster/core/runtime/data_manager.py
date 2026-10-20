@@ -4329,7 +4329,7 @@ https://github.com/OmicsOS/lobster
         Args:
             name: Notebook filename (no extension)
             description: Human-readable description
-            filter_strategy: "successful" | "all" | "manual"
+            filter_strategy: "successful" | "all" | "manual" | "replay"
 
         Returns:
             Path to generated .ipynb file
