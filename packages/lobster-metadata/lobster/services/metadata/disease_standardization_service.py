@@ -231,7 +231,7 @@ class DiseaseStandardizationService:
             "exact_matches": 0,
             "contains_matches": 0,
             "reverse_contains_matches": 0,
-            "token_matches": 0,
+            "token_matches": 0,  # nosec B105 # counter name, not a credential
             "unmapped": 0,
         }
         unique_mappings = {}
@@ -459,7 +459,7 @@ class DiseaseStandardizationService:
         return value, "unmapped"
 
     _NEG_TOKEN = (
-        r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"
+        r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"  # nosec B105 # regex of negative values, not a credential
         r"not applicable|missing|null|nan)"
     )
     _AFTER_SEPARATOR = re.compile(r"[:=]\s*" + _NEG_TOKEN + r"(?![^\W_])")
