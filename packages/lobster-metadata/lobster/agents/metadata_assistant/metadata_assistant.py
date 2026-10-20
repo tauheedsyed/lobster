@@ -1146,27 +1146,8 @@ def metadata_assistant(
                     # If multiple diseases, join with semicolon
                     return ";".join(active_diseases)
 
-                # Check for negative controls (all flags FALSE)
-                all_false = all(
-                    row.get(flag_col)
-                    in [
-                        "No",
-                        "NO",
-                        "no",
-                        "N",
-                        "n",
-                        "FALSE",
-                        "False",
-                        "false",
-                        False,
-                        0,
-                        "0",
-                    ]
-                    for flag_col in disease_flag_cols
-                )
-                if all_false:
-                    return "healthy"
-
+                # All flags negative (or unrecognised) is NOT evidence of health:
+                # the sample may simply be unannotated for other conditions.
                 return "unknown"
 
             # Apply extraction

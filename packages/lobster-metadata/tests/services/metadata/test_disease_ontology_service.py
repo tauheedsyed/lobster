@@ -225,12 +225,9 @@ class TestEdgeCases:
         assert matches[0].disease_id == "crc"
 
     def test_multiple_keywords_in_query(self, service):
-        """Test query with multiple disease keywords."""
-        # First match wins in Phase 1
+        """Several diseases in one query is ambiguous: no guess is returned."""
         matches = service.match_disease("colorectal cancer and crohn's disease")
-        assert len(matches) >= 1
-        # Should match one of them (order depends on disease iteration)
-        assert matches[0].disease_id in ["crc", "cd"]
+        assert matches == []
 
     def test_healthy_control_variants(self, service):
         """Test healthy control keyword variants."""

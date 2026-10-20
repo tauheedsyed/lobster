@@ -78,43 +78,41 @@ class TestDiseaseStandardization:
         assert result["disease"].tolist() == ["crc", "uc", "cd"]
         assert stats["mapping_stats"]["contains_matches"] >= 1
 
-    def test_reverse_contains_match(self, service):
-        """Test reverse contains matching (variant contains value)."""
+    def test_partial_generic_terms_are_not_mapped(self, service):
+        """Generic or partial terms (variant contains value) stay unmapped."""
         metadata = pd.DataFrame({"disease": ["cancer", "colitis", "tumor"]})
 
         result, stats, ir = service.standardize_disease_terms(metadata, "disease")
 
-        # "cancer" should match CRC (reverse contains: "colon cancer" contains "cancer")
-        # "colitis" should match UC (reverse contains: "ulcerative colitis" contains "colitis")
-        # "tumor" is UNMAPPED (generic term removed and no variant contains "tumor")
-        assert "crc" in result["disease"].tolist()
-        assert "uc" in result["disease"].tolist()
-        assert result["disease"].tolist().count("crc") == 1
-        assert result["disease"].tolist().count("uc") == 1
-        assert stats["mapping_stats"]["unmapped"] == 1  # Only "tumor" unmapped
-        assert stats["mapping_stats"]["reverse_contains_matches"] == 2
+        assert result["disease"].tolist() == ["cancer", "colitis", "tumor"]
+        assert stats["mapping_stats"]["unmapped"] == 3
+        assert stats["mapping_stats"]["reverse_contains_matches"] == 0
 
-    def test_token_match(self, service):
-        """Test token-based matching."""
+    def test_single_token_overlap_is_not_mapped(self, service):
+        """A shared token alone (e.g. "colon") is not enough to pick a category."""
+        metadata = pd.DataFrame({"disease": ["colon tumor", "rectal lesion"]})
+
+        result, stats, ir = service.standardize_disease_terms(metadata, "disease")
+
+        assert result["disease"].tolist() == ["colon tumor", "rectal lesion"]
+        assert stats["mapping_stats"]["token_matches"] == 0
+        assert stats["mapping_stats"]["unmapped"] == 2
+
+    def test_adenocarcinoma_variants_map_to_crc(self, service):
+        """Explicit colorectal adenocarcinoma wording is a CRC variant."""
         metadata = pd.DataFrame(
             {
                 "disease": [
-                    "rectal adenocarcinoma",  # Should match CRC (token: rectal)
-                    "colon tumor",  # Should match CRC (token: colon from "colon cancer")
+                    "rectal adenocarcinoma",
+                    "colon adenocarcinoma",
+                    "colorectal adenocarcinoma",
                 ]
             }
         )
 
-        result, stats, ir = service.standardize_disease_terms(metadata, "disease")
+        result, _, _ = service.standardize_disease_terms(metadata, "disease")
 
-        # Both should map to CRC via anatomical tokens (rectal, colon)
-        # "rectal" appears in "rectal cancer" variant
-        # "colon" appears in "colon cancer" variant
-        assert result["disease"].iloc[0] == "crc"
-        assert result["disease"].iloc[1] == "crc"
-        assert all(d == "crc" for d in result["disease"])
-        assert stats["mapping_stats"]["token_matches"] == 2
-        assert stats["mapping_stats"]["unmapped"] == 0
+        assert result["disease"].tolist() == ["crc", "crc", "crc"]
 
     def test_lung_cancer_not_mapped_to_crc(self, service):
         """Regression test: lung cancer should NOT map to CRC after generic term removal."""
@@ -214,7 +212,6 @@ class TestDiseaseStandardization:
                     "healthy control",  # ✓ Should map to healthy
                     "healthy volunteer",  # ✓ Should map to healthy
                     "healthy donor",  # ✓ Should map to healthy
-                    "normal control",  # ✓ Should map to healthy (compound term)
                     "non-diseased",  # ✓ Should map to healthy
                     "disease-free",  # ✓ Should map to healthy
                 ]
@@ -226,6 +223,14 @@ class TestDiseaseStandardization:
         # All should map to "healthy"
         assert all(d == "healthy" for d in result["disease"])
         assert stats["mapping_stats"]["unmapped"] == 0
+
+    def test_normal_control_is_not_healthy(self, service):
+        """The words normal and control alone never establish health."""
+        metadata = pd.DataFrame({"disease": ["normal control", "normal", "control"]})
+
+        result, _, _ = service.standardize_disease_terms(metadata, "disease")
+
+        assert "healthy" not in result["disease"].tolist()
 
     def test_unmapped_terms(self, service):
         """Test handling of unmapped terms."""
@@ -459,11 +464,18 @@ class TestHelperMethods:
         assert match == "crc"
         assert match_type == "exact"
 
-        # Token match (note: "disease" is a token in CRC mappings)
+        # A shared generic token ("disease") never maps
         match, match_type = service._fuzzy_match(
             "completely unknown disease", service.DISEASE_MAPPINGS
         )
-        assert match_type == "token"  # "disease" token matches CRC
+        assert match_type == "unmapped"
+        assert match == "completely unknown disease"
+
+        # Whole-phrase containment still maps
+        match, match_type = service._fuzzy_match(
+            "colorectal cancer patient", service.DISEASE_MAPPINGS
+        )
+        assert (match, match_type) == ("crc", "contains")
 
         # Truly unmapped
         match, match_type = service._fuzzy_match("xyz123", service.DISEASE_MAPPINGS)
