@@ -96,7 +96,7 @@ properties = (
     "MolecularFormula,MolecularWeight,XLogP,TPSA,"
     "HBondDonorCount,HBondAcceptorCount,RotatableBondCount,HeavyAtomCount"
 )
-url = f"{{ base_url }}/compound/{{ id_type }}/{{ identifier }}/property/{properties}/JSON"
+url = f"{ {{ base_url | repr }} }/compound/{ {{ id_type | repr }} }/{ {{ identifier | repr }} }/property/{properties}/JSON"
 response = httpx.get(url, timeout={{ timeout }})
 response.raise_for_status()
 data = response.json()
@@ -148,7 +148,7 @@ from urllib.parse import quote
 
 # Step 1: Initiate async search (URL-encode SMILES for safety)
 smiles_encoded = quote({{ smiles | tojson }}, safe='')
-url = f"{{ base_url }}/compound/similarity/smiles/{smiles_encoded}/JSON"
+url = f"{ {{ base_url | repr }} }/compound/similarity/smiles/{smiles_encoded}/JSON"
 params = {"Threshold": {{ threshold }}, "MaxRecords": {{ limit }}}
 response = httpx.post(url, params=params, timeout={{ timeout }})
 response.raise_for_status()
@@ -159,7 +159,7 @@ properties = (
     "MolecularFormula,MolecularWeight,XLogP,TPSA,"
     "HBondDonorCount,HBondAcceptorCount,RotatableBondCount,HeavyAtomCount"
 )
-poll_url = f"{{ base_url }}/compound/listkey/{list_key}/property/{properties}/JSON"
+poll_url = f"{ {{ base_url | repr }} }/compound/listkey/{list_key}/property/{properties}/JSON"
 for attempt in range(15):
     time.sleep(2)
     poll = httpx.get(poll_url, timeout={{ timeout }})
@@ -220,12 +220,12 @@ for attempt in range(15):
             code_template="""# Get compound synonyms from PubChem
 import httpx
 
-url = f"{{ base_url }}/compound/{{ id_type }}/{{ identifier }}/synonyms/JSON"
+url = f"{ {{ base_url | repr }} }/compound/{ {{ id_type | repr }} }/{ {{ identifier | repr }} }/synonyms/JSON"
 response = httpx.get(url, timeout={{ timeout }})
 response.raise_for_status()
 data = response.json()
 synonyms = data["InformationList"]["Information"][0]["Synonym"]
-print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
+print(f"Found {len(synonyms)} synonyms for '{ {{ identifier | repr }} }'")""",
             imports=["import httpx"],
             parameters={
                 "identifier": identifier,
@@ -357,9 +357,7 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
         """
         self._validate_id_type(id_type)
 
-        logger.info(
-            f"Getting PubChem properties: {id_type}='{identifier}'"
-        )
+        logger.info(f"Getting PubChem properties: {id_type}='{identifier}'")
 
         ir = self._create_ir_get_compound_properties(identifier, id_type)
 
@@ -493,9 +491,7 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
             # Sometimes PubChem returns results directly for small searches
             properties_table = init_data.get("PropertyTable", {}) if init_data else {}
             if properties_table.get("Properties"):
-                compounds = self._parse_property_list(
-                    properties_table["Properties"]
-                )
+                compounds = self._parse_property_list(properties_table["Properties"])
                 stats = {
                     "smiles": smiles,
                     "threshold": threshold,
@@ -539,17 +535,13 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
                     try:
                         poll_data = poll_response.json()
                     except (ValueError, json.JSONDecodeError) as exc:
-                        poll_error = (
-                            f"PubChem poll returned invalid JSON: {exc}"
-                        )
+                        poll_error = f"PubChem poll returned invalid JSON: {exc}"
                         logger.warning(poll_error)
                         continue
                     properties_table = poll_data.get("PropertyTable", {})
                     properties_list = properties_table.get("Properties", [])
                     compounds = self._parse_property_list(properties_list)
-                    logger.info(
-                        f"Similarity search complete: {len(compounds)} results"
-                    )
+                    logger.info(f"Similarity search complete: {len(compounds)} results")
                     break
 
                 elif poll_response.status_code == 202:
@@ -568,9 +560,7 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
                     continue
 
             except httpx.TimeoutException:
-                logger.warning(
-                    f"PubChem poll timeout on attempt {attempt}"
-                )
+                logger.warning(f"PubChem poll timeout on attempt {attempt}")
                 continue
             except httpx.RequestError as exc:
                 poll_error = f"PubChem poll request error: {exc}"
@@ -628,9 +618,7 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
         """
         self._validate_id_type(id_type)
 
-        logger.info(
-            f"Getting PubChem synonyms: {id_type}='{identifier}'"
-        )
+        logger.info(f"Getting PubChem synonyms: {id_type}='{identifier}'")
 
         ir = self._create_ir_get_compound_synonyms(identifier, id_type)
 
@@ -640,9 +628,7 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
         from urllib.parse import quote
 
         safe_id = quote(identifier, safe="")
-        url = (
-            f"{PUBCHEM_API_BASE}/compound/{id_type}/{safe_id}/synonyms/JSON"
-        )
+        url = f"{PUBCHEM_API_BASE}/compound/{id_type}/{safe_id}/synonyms/JSON"
 
         data, error = self._get_json(url)
 
@@ -691,10 +677,10 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
                 and syn_stripped.replace("-", "").isdigit()
             ):
                 registry_numbers.append(syn_stripped)
-            elif any(
-                c in syn_stripped
-                for c in ["(", ")", "[", "]", ","]
-            ) and len(syn_stripped) > 30:
+            elif (
+                any(c in syn_stripped for c in ["(", ")", "[", "]", ","])
+                and len(syn_stripped) > 30
+            ):
                 iupac_names.append(syn_stripped)
             elif syn_stripped[0].isupper() and " " not in syn_stripped:
                 trade_names.append(syn_stripped)
@@ -735,16 +721,18 @@ print(f"Found {len(synonyms)} synonyms for '{{ identifier }}'")""",
         compounds: List[Dict[str, Any]] = []
         for props in properties_list:
             lipinski = self._evaluate_lipinski(props)
-            compounds.append({
-                "cid": props.get("CID"),
-                "molecular_formula": props.get("MolecularFormula", ""),
-                "molecular_weight": props.get("MolecularWeight"),
-                "xlogp": props.get("XLogP"),
-                "tpsa": props.get("TPSA"),
-                "hbond_donor_count": props.get("HBondDonorCount"),
-                "hbond_acceptor_count": props.get("HBondAcceptorCount"),
-                "rotatable_bond_count": props.get("RotatableBondCount"),
-                "heavy_atom_count": props.get("HeavyAtomCount"),
-                "lipinski": lipinski,
-            })
+            compounds.append(
+                {
+                    "cid": props.get("CID"),
+                    "molecular_formula": props.get("MolecularFormula", ""),
+                    "molecular_weight": props.get("MolecularWeight"),
+                    "xlogp": props.get("XLogP"),
+                    "tpsa": props.get("TPSA"),
+                    "hbond_donor_count": props.get("HBondDonorCount"),
+                    "hbond_acceptor_count": props.get("HBondAcceptorCount"),
+                    "rotatable_bond_count": props.get("RotatableBondCount"),
+                    "heavy_atom_count": props.get("HeavyAtomCount"),
+                    "lipinski": lipinski,
+                }
+            )
         return compounds

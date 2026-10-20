@@ -85,7 +85,7 @@ query TargetDiseaseEvidence($ensemblId: String!, $size: Int!) {
 \"\"\"
 variables = {"ensemblId": {{ ensembl_id | tojson }}, "size": {{ limit }}}
 response = httpx.post(
-    "{{ graphql_url }}",
+    {{ graphql_url | string | repr }},
     json={"query": query, "variables": variables},
     timeout={{ timeout }},
 )
@@ -153,7 +153,7 @@ query TargetScore($ensemblId: String!) {
 }
 \"\"\"
 response = httpx.post(
-    "{{ graphql_url }}",
+    {{ graphql_url | string | repr }},
     json={"query": query, "variables": {"ensemblId": {{ ensembl_id | tojson }}}},
     timeout={{ timeout }},
 )
@@ -205,7 +205,7 @@ query DrugIndications($chemblId: String!) {
 \"\"\"
 variables = {"chemblId": {{ chembl_id | tojson }}}
 response = httpx.post(
-    "{{ graphql_url }}",
+    {{ graphql_url | string | repr }},
     json={"query": query, "variables": variables},
     timeout={{ timeout }},
 )
@@ -267,7 +267,7 @@ query TargetSafety($ensemblId: String!) {
 }
 \"\"\"
 response = httpx.post(
-    "{{ graphql_url }}",
+    {{ graphql_url | string | repr }},
     json={"query": query, "variables": {"ensemblId": {{ target_id | tojson }}}},
     timeout={{ timeout }},
 )
@@ -312,7 +312,7 @@ query TargetTractability($ensemblId: String!) {
 }
 \"\"\"
 response = httpx.post(
-    "{{ graphql_url }}",
+    {{ graphql_url | string | repr }},
     json={"query": query, "variables": {"ensemblId": {{ target_id | tojson }}}},
     timeout={{ timeout }},
 )
@@ -367,9 +367,7 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
 
         # Check for GraphQL-level errors
         if body and "errors" in body:
-            error_msgs = [
-                e.get("message", "Unknown error") for e in body["errors"]
-            ]
+            error_msgs = [e.get("message", "Unknown error") for e in body["errors"]]
             msg = f"Open Targets GraphQL errors: {'; '.join(error_msgs)}"
             logger.error(msg)
             return None, msg
@@ -405,9 +403,7 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
             + (f", disease={disease_id}" if disease_id else "")
         )
 
-        ir = self._create_ir_get_target_disease_evidence(
-            ensembl_id, disease_id, limit
-        )
+        ir = self._create_ir_get_target_disease_evidence(ensembl_id, disease_id, limit)
 
         query = """
         query TargetDiseaseEvidence($ensemblId: String!, $size: Int!) {
@@ -462,10 +458,7 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
 
         # Filter to specific disease if requested
         if disease_id:
-            rows = [
-                r for r in rows
-                if r.get("disease", {}).get("id", "") == disease_id
-            ]
+            rows = [r for r in rows if r.get("disease", {}).get("id", "") == disease_id]
 
         # Parse associations
         associations: List[Dict[str, Any]] = []
@@ -475,12 +468,14 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
                 ds.get("id", ""): ds.get("score", 0.0)
                 for ds in row.get("datatypeScores", [])
             }
-            associations.append({
-                "disease_id": disease_info.get("id", ""),
-                "disease_name": disease_info.get("name", ""),
-                "overall_score": row.get("score", 0.0),
-                "datatype_scores": datatype_scores,
-            })
+            associations.append(
+                {
+                    "disease_id": disease_info.get("id", ""),
+                    "disease_name": disease_info.get("name", ""),
+                    "overall_score": row.get("score", 0.0),
+                    "datatype_scores": datatype_scores,
+                }
+            )
 
         stats = {
             "ensembl_id": ensembl_id,
@@ -580,9 +575,7 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
         # ---- Compute component scores ----
 
         # 1. Genetic association: best overall disease association score
-        assoc_rows = (
-            target_data.get("associatedDiseases", {}).get("rows", [])
-        )
+        assoc_rows = target_data.get("associatedDiseases", {}).get("rows", [])
         genetic_score = 0.0
         if assoc_rows:
             genetic_score = max(r.get("score", 0.0) for r in assoc_rows)
@@ -613,9 +606,7 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
             pathogenicity_score = 0.1
 
         # 5. Literature: disease count as evidence density proxy
-        total_diseases = (
-            target_data.get("associatedDiseases", {}).get("count", 0)
-        )
+        total_diseases = target_data.get("associatedDiseases", {}).get("count", 0)
         # Normalize: 50+ diseases = max score
         literature_score = min(total_diseases / 50.0, 1.0)
 
@@ -641,10 +632,12 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
             modality = t.get("modality", "unknown")
             if modality not in tractability_summary:
                 tractability_summary[modality] = []
-            tractability_summary[modality].append({
-                "label": t.get("label", ""),
-                "value": t.get("value", False),
-            })
+            tractability_summary[modality].append(
+                {
+                    "label": t.get("label", ""),
+                    "value": t.get("value", False),
+                }
+            )
 
         stats = {
             "ensembl_id": ensembl_id,
@@ -758,22 +751,24 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
             refs = row.get("references", [])
             reference_list = []
             for ref in refs:
-                reference_list.append({
-                    "source": ref.get("source", ""),
-                    "ids": ref.get("ids", []),
-                })
+                reference_list.append(
+                    {
+                        "source": ref.get("source", ""),
+                        "ids": ref.get("ids", []),
+                    }
+                )
 
-            indications.append({
-                "disease_id": disease.get("id", ""),
-                "disease_name": disease.get("name", ""),
-                "max_phase": phase_int,
-                "references": reference_list,
-            })
+            indications.append(
+                {
+                    "disease_id": disease.get("id", ""),
+                    "disease_name": disease.get("name", ""),
+                    "max_phase": phase_int,
+                    "references": reference_list,
+                }
+            )
 
         # Parse mechanisms of action
-        moa_rows = (
-            drug_data.get("mechanismsOfAction", {}).get("rows", [])
-        )
+        moa_rows = drug_data.get("mechanismsOfAction", {}).get("rows", [])
         mechanisms: List[Dict[str, Any]] = []
         for moa in moa_rows:
             targets = [
@@ -783,18 +778,18 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
                 }
                 for t in moa.get("targets", [])
             ]
-            mechanisms.append({
-                "mechanism": moa.get("mechanismOfAction", ""),
-                "targets": targets,
-            })
+            mechanisms.append(
+                {
+                    "mechanism": moa.get("mechanismOfAction", ""),
+                    "targets": targets,
+                }
+            )
 
         stats = {
             "chembl_id": chembl_id,
             "drug_name": drug_data.get("name", ""),
             "drug_type": drug_data.get("drugType", ""),
-            "max_clinical_trial_phase": drug_data.get(
-                "maximumClinicalTrialPhase", 0
-            ),
+            "max_clinical_trial_phase": drug_data.get("maximumClinicalTrialPhase", 0),
             "total_indications": indications_data.get("count", 0),
             "n_indications": len(indications),
             "indications": indications,
@@ -921,16 +916,18 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
                 for e in effects_raw
             ]
 
-            events.append({
-                "event": event_name,
-                "datasource": liability.get("datasource", ""),
-                "effects": effects,
-                "tissues": tissues,
-                "biosamples_from_source": liability.get("biosamplesFromSource", ""),
-                "literature": liability.get("literature", ""),
-                "url": liability.get("url", ""),
-                "studies": studies,
-            })
+            events.append(
+                {
+                    "event": event_name,
+                    "datasource": liability.get("datasource", ""),
+                    "effects": effects,
+                    "tissues": tissues,
+                    "biosamples_from_source": liability.get("biosamplesFromSource", ""),
+                    "literature": liability.get("literature", ""),
+                    "url": liability.get("url", ""),
+                    "studies": studies,
+                }
+            )
 
         # Risk assessment
         n_events = len(events)
@@ -1025,10 +1022,12 @@ print(f"Tractability for {data['approvedSymbol']}: {len(data.get('tractability',
             modality = entry.get("modality", "unknown")
             if modality not in modality_map:
                 modality_map[modality] = []
-            modality_map[modality].append({
-                "label": entry.get("label", ""),
-                "value": entry.get("value", False),
-            })
+            modality_map[modality].append(
+                {
+                    "label": entry.get("label", ""),
+                    "value": entry.get("value", False),
+                }
+            )
 
         # Compute per-modality verdicts
         modality_verdicts: Dict[str, Dict[str, Any]] = {}

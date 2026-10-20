@@ -26,9 +26,9 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
-from lobster.core.interfaces.validator import ValidationResult
 
 # Graceful fallback: Import premium DiseaseOntologyService if available
 # Public version (lobster-local) will use hardcoded fallback
@@ -784,7 +784,10 @@ def metadata_assistant(
             logger.error(f"Unexpected standardization error: {e}", exc_info=True)
             return f"❌ Unexpected error during standardization: {str(e)}"
 
-    standardize_sample_metadata.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    standardize_sample_metadata.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     standardize_sample_metadata.tags = ["ANNOTATE"]
 
     # =========================================================================
@@ -1509,7 +1512,10 @@ Which approach would you prefer?"""
     )
     write_to_workspace = create_write_to_workspace_tool(data_manager)
 
-    get_content_from_workspace.metadata = {"categories": ["UTILITY"], "provenance": False}
+    get_content_from_workspace.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     get_content_from_workspace.tags = ["UTILITY"]
     write_to_workspace.metadata = {"categories": ["UTILITY"], "provenance": False}
     write_to_workspace.tags = ["UTILITY"]
@@ -2923,7 +2929,10 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
 
         return "\n".join(report)
 
-    enrich_samples_with_disease.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    enrich_samples_with_disease.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     enrich_samples_with_disease.tags = ["ANNOTATE"]
 
     # Helper functions for queue processing
@@ -3371,10 +3380,10 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
                 library="lobster.services.vector",
                 description="Semantic tissue term standardization via Uberon ontology",
                 code_template=(
-                    'from lobster.vector.service import VectorSearchService\n'
-                    'service = VectorSearchService()\n'
-                    'matches = service.match_ontology("{{ term }}", "uberon", k={{ k }})\n'
-                    'filtered = [m for m in matches if m.score >= {{ min_confidence }}]'
+                    "from lobster.vector.service import VectorSearchService\n"
+                    "service = VectorSearchService()\n"
+                    'matches = service.match_ontology({{ term | string | repr }}, "uberon", k={{ k }})\n'
+                    "filtered = [m for m in matches if m.score >= {{ min_confidence }}]"
                 ),
                 imports=["from lobster.vector.service import VectorSearchService"],
                 parameters={"term": term, "k": k, "min_confidence": min_confidence},
@@ -3391,11 +3400,15 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
             )
 
             if not filtered:
-                return f"No matches found above confidence {min_confidence} for '{term}'."
+                return (
+                    f"No matches found above confidence {min_confidence} for '{term}'."
+                )
 
             lines = [f"Tissue standardization for '{term}':"]
             for i, m in enumerate(filtered, 1):
-                lines.append(f"  {i}. {m.term} ({m.ontology_id}) - score: {m.score:.4f}")
+                lines.append(
+                    f"  {i}. {m.term} ({m.ontology_id}) - score: {m.score:.4f}"
+                )
             return "\n".join(lines)
 
         except Exception as e:
@@ -3459,11 +3472,13 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
                 library="lobster.services.metadata.disease_ontology_service",
                 description="Disease term standardization via MONDO ontology",
                 code_template=(
-                    'from lobster.services.metadata.disease_ontology_service import DiseaseOntologyService\n'
-                    'service = DiseaseOntologyService.get_instance()\n'
-                    'matches = service.match_disease("{{ term }}", k={{ k }}, min_confidence={{ min_confidence }})'
+                    "from lobster.services.metadata.disease_ontology_service import DiseaseOntologyService\n"
+                    "service = DiseaseOntologyService.get_instance()\n"
+                    "matches = service.match_disease({{ term | string | repr }}, k={{ k }}, min_confidence={{ min_confidence }})"
                 ),
-                imports=["from lobster.services.metadata.disease_ontology_service import DiseaseOntologyService"],
+                imports=[
+                    "from lobster.services.metadata.disease_ontology_service import DiseaseOntologyService"
+                ],
                 parameters={"term": term, "k": k, "min_confidence": min_confidence},
                 parameter_schema={},
             )
@@ -3474,7 +3489,9 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
             )
 
             if not matches:
-                return f"No matches found above confidence {min_confidence} for '{term}'."
+                return (
+                    f"No matches found above confidence {min_confidence} for '{term}'."
+                )
 
             lines = [f"Disease standardization for '{term}':"]
             for i, m in enumerate(matches, 1):

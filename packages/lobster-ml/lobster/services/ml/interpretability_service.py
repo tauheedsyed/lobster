@@ -178,7 +178,7 @@ from lobster.services.ml.sparse_utils import (
 # Prepare data
 {% if feature_space_key %}
 # Use alternate feature space (e.g., integrated factors from MOFA)
-feature_space_key = "{{ feature_space_key }}"
+feature_space_key = {{ feature_space_key | string | repr }}
 if feature_space_key not in adata.obsm:
     available_keys = list(adata.obsm.keys())
     raise KeyError(
@@ -205,7 +205,7 @@ feature_names = adata.var_names.tolist()
 X_df = pd.DataFrame(X, index=adata.obs_names, columns=feature_names)
 
 # Create appropriate SHAP explainer based on model type
-model_type = "{{ model_type }}"
+model_type = {{ model_type | string | repr }}
 print(f"Extracting SHAP values using {model_type} explainer")
 
 {% if model_type == "tree" %}

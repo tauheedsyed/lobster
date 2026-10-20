@@ -253,7 +253,7 @@ class TestClusteringServiceIRWorkflow:
         assert (
             "leiden" in ir.code_template
             or "sc.tl.leiden" in ir.code_template
-            or "sc.tl.{{ algorithm }}" in ir.code_template
+            or "sc.tl.{{ algorithm | lower }}" in ir.code_template
         )
         assert "umap" in ir.code_template or "sc.tl.umap" in ir.code_template
 

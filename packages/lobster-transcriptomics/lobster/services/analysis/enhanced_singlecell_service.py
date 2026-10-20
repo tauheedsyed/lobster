@@ -591,14 +591,14 @@ adata.obsm['X_pca_harmony'] = corrected
 integrated_key = 'X_pca_harmony'
 {% else %}
 # ComBat batch correction
-sc.pp.combat(adata, key='{{ batch_key }}')
+sc.pp.combat(adata, key={{ batch_key | string | repr }})
 sc.tl.pca(adata, n_comps={{ n_pcs }})
 integrated_key = 'X_pca'
 {% endif %}
 
 # Compute batch silhouette score (lower = better mixing)
 X_int = adata.obsm[integrated_key][:, :{{ n_pcs }}]
-batch_labels = adata.obs['{{ batch_key }}'].values
+batch_labels = adata.obs[{{ batch_key | string | repr }}].values
 sil = silhouette_score(X_int, batch_labels)
 print(f"Batch silhouette: {sil:.3f}")
 
@@ -813,7 +813,7 @@ sc.tl.diffmap(adata, n_comps={{ n_dcs }})
 {% if root_cell is not none %}
 adata.uns['iroot'] = {{ root_cell }}
 {% elif root_group is not none %}
-group_mask = adata.obs['{{ cluster_key }}'].astype(str) == '{{ root_group }}'
+group_mask = adata.obs[{{ cluster_key | string | repr }}].astype(str) == {{ root_group | string | repr }}
 group_indices = np.where(group_mask)[0]
 dc1_values = adata.obsm['X_diffmap'][group_indices, 0]
 adata.uns['iroot'] = int(group_indices[np.argmin(dc1_values)])
@@ -825,7 +825,7 @@ adata.uns['iroot'] = int(np.argmin(adata.obsm['X_diffmap'][:, 0]))
 sc.tl.dpt(adata)
 
 # Compute PAGA graph
-sc.tl.paga(adata, groups='{{ cluster_key }}')
+sc.tl.paga(adata, groups={{ cluster_key | string | repr }})
 
 # Results stored in:
 # - adata.obs['dpt_pseudotime']: Pseudotime values
@@ -1626,8 +1626,8 @@ import scanpy as sc
 # Step 1: Rank genes by differential expression
 sc.tl.rank_genes_groups(
     adata,
-    groupby='{{ groupby }}',
-    method='{{ method }}',
+    groupby={{ groupby | string | repr }},
+    method={{ method | string | repr }},
     n_genes={{ n_genes }},
 )
 

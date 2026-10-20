@@ -6,7 +6,7 @@ structure visualizations using PyMOL open-source, following the Lobster
 3-tuple pattern (Dict, stats, IR).
 """
 
-import subprocess
+import subprocess  # nosec B404 - subprocess used with fixed argument lists
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -244,15 +244,21 @@ class PyMOLVisualizationService:
 
         # Check if pymol is in PATH (command-line)
         try:
-            result = subprocess.run(
-                ["pymol", "-c", "-Q"],  # -c = command-line mode, -Q = quit immediately
-                capture_output=True,
-                text=True,
-                timeout=5,
+            result = (
+                subprocess.run(  # nosec B603 B607 - tool resolved from PATH by design
+                    [
+                        "pymol",
+                        "-c",
+                        "-Q",
+                    ],  # -c = command-line mode, -Q = quit immediately
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
             )
             if result.returncode == 0:
                 # Try to get version
-                subprocess.run(
+                subprocess.run(  # nosec B603 B607 - tool resolved from PATH by design
                     ["pymol", "-c", "-Q"],
                     capture_output=True,
                     text=True,
@@ -281,7 +287,7 @@ class PyMOLVisualizationService:
         for path in potential_paths:
             if Path(path).exists():
                 try:
-                    result = subprocess.run(
+                    result = subprocess.run(  # nosec B603 - argument list, no shell
                         [path, "-c", "-Q"],
                         capture_output=True,
                         text=True,
@@ -296,7 +302,7 @@ class PyMOLVisualizationService:
                             "message": f"PyMOL found at {path}: {version}",
                         }
                         return self._pymol_available
-                except Exception:
+                except Exception:  # nosec B112 - best-effort probe
                     continue
 
         # Try Python module import (embedded PyMOL)
@@ -550,7 +556,7 @@ class PyMOLVisualizationService:
     def _execute_pymol_batch(self, script_file: Path, pymol_path: str):
         """Execute PyMOL command script in batch mode (headless, blocking)."""
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 - argument list, no shell
                 [pymol_path, "-c", str(script_file)],  # -c = command-line (no GUI)
                 capture_output=True,
                 text=True,
@@ -588,7 +594,7 @@ class PyMOLVisualizationService:
         try:
             # Launch PyMOL with GUI (opens GUI window)
             # Use Popen for non-blocking execution
-            process = subprocess.Popen(
+            process = subprocess.Popen(  # nosec B603 - argument list, no shell
                 [pymol_path, str(script_file)],  # PyMOL runs script on launch
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -710,15 +716,15 @@ class PyMOLVisualizationService:
 import subprocess
 from pathlib import Path
 
-structure_file = "{{ structure_file }}"
-style = "{{ style }}"
-color_by = "{{ color_by }}"
+structure_file = {{ structure_file | string | repr }}
+style = {{ style | string | repr }}
+color_by = {{ color_by | string | repr }}
 width = {{ width }}
 height = {{ height }}
-highlight_residues = "{{ highlight_residues }}"
-highlight_color = "{{ highlight_color }}"
-highlight_style = "{{ highlight_style }}"
-highlight_groups = "{{ highlight_groups }}"
+highlight_residues = {{ highlight_residues | string | repr }}
+highlight_color = {{ highlight_color | string | repr }}
+highlight_style = {{ highlight_style | string | repr }}
+highlight_groups = {{ highlight_groups | string | repr }}
 
 # Generate PyMOL commands
 commands = [

@@ -537,14 +537,14 @@ class DiseaseStandardizationService:
             imports=[],
             code_template="""
 # Disease standardization (manual implementation)
-metadata['{{ original_column }}'] = metadata['{{ disease_column }}']
+metadata[{{ original_column | string | repr }}] = metadata[{{ disease_column | string | repr }}]
 
 # Map disease terms using standardized categories
 disease_mappings = {{ disease_mappings }}
-for idx, value in metadata['{{ disease_column }}'].items():
+for idx, value in metadata[{{ disease_column | string | repr }}].items():
     # Apply fuzzy matching logic (5 levels)
     standardized = fuzzy_match(value, disease_mappings)
-    metadata.at[idx, '{{ disease_column }}'] = standardized
+    metadata.at[idx, {{ disease_column | string | repr }}] = standardized
 """,
             parameters={
                 "disease_column": disease_column,

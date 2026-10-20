@@ -46,9 +46,7 @@ class ChEMBLService(BaseAPIService):
     # IR builders
     # =========================================================================
 
-    def _create_ir_search_compounds(
-        self, query: str, limit: int
-    ) -> AnalysisStep:
+    def _create_ir_search_compounds(self, query: str, limit: int) -> AnalysisStep:
         """Create IR for compound search."""
         return AnalysisStep(
             operation="chembl.molecule.search",
@@ -59,14 +57,14 @@ class ChEMBLService(BaseAPIService):
 import httpx
 
 response = httpx.get(
-    "{{ base_url }}/molecule/search",
+    {{ (base_url ~ '/molecule/search') | repr }},
     params={"q": {{ query | tojson }}, "format": "json", "limit": {{ limit }}},
     timeout={{ timeout }},
 )
 response.raise_for_status()
 data = response.json()
 molecules = data.get("molecules", [])
-print(f"Found {len(molecules)} compounds matching '{{ query }}'")""",
+print(f"Found {len(molecules)} compounds matching '{ {{ query | repr }} }'")""",
             imports=["import httpx"],
             parameters={
                 "query": query,
@@ -118,11 +116,11 @@ params = {
     "limit": 100,
 }
 {% if target_chembl_id %}"params["target_chembl_id"] = {{ target_chembl_id | tojson }}{% endif %}
-response = httpx.get("{{ base_url }}/activity", params=params, timeout={{ timeout }})
+response = httpx.get({{ (base_url ~ '/activity') | repr }}, params=params, timeout={{ timeout }})
 response.raise_for_status()
 data = response.json()
 activities = data.get("activities", [])
-print(f"Found {len(activities)} bioactivity records for {{ chembl_id }}")""",
+print(f"Found {len(activities)} bioactivity records for { {{ chembl_id | repr }} }")""",
             imports=["import httpx"],
             parameters={
                 "chembl_id": chembl_id,
@@ -174,11 +172,11 @@ params = {
     "format": "json",
     "limit": {{ limit }},
 }
-response = httpx.get("{{ base_url }}/activity", params=params, timeout={{ timeout }})
+response = httpx.get({{ (base_url ~ '/activity') | repr }}, params=params, timeout={{ timeout }})
 response.raise_for_status()
 data = response.json()
 activities = data.get("activities", [])
-print(f"Found {len(activities)} {{{ activity_type | tojson }}} records for target {{ target_chembl_id }}")""",
+print(f"Found {len(activities)} { {{ activity_type | repr }} } records for target { {{ target_chembl_id | repr }} }")""",
             imports=["import httpx"],
             parameters={
                 "target_chembl_id": target_chembl_id,
@@ -274,9 +272,9 @@ print(f"Found {len(activities)} {{{ activity_type | tojson }}} records for targe
                 "hbd": props.get("hbd"),
                 "psa": props.get("psa"),
                 "ro5_violations": props.get("num_ro5_violations"),
-                "canonical_smiles": (
-                    mol.get("molecule_structures", {}) or {}
-                ).get("canonical_smiles", ""),
+                "canonical_smiles": (mol.get("molecule_structures", {}) or {}).get(
+                    "canonical_smiles", ""
+                ),
             }
             compounds.append(compound)
 
@@ -470,9 +468,7 @@ print(f"Found {len(activities)} {{{ activity_type | tojson }}} records for targe
                     existing is None or numeric_value < existing
                 ):
                     compound_map[mol_id]["best_value"] = numeric_value
-                    compound_map[mol_id]["best_units"] = act.get(
-                        "standard_units", ""
-                    )
+                    compound_map[mol_id]["best_units"] = act.get("standard_units", "")
                 # Keep the highest pChEMBL (more potent)
                 existing_p = compound_map[mol_id]["best_pchembl"]
                 if pchembl_float is not None and (
