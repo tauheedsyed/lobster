@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "scenarios": {
+    "s1-successful": {
+      "capture": "s1",
+      "mode": "successful",
+      "claim": "C-HIST",
+      "policy": "s1",
+      "stage_root": "roots",
+      "lanes": ["container", "unisolated"],
+      "expect": {
+        "verdict": "MATCH",
+        "execution": "OK",
+        "binding_differences": [],
+        "outputs": ["results_s1_quality_assessed_filtered_normalized.h5ad"],
+        "claim_achieved": "C-HIST"
+      }
+    },
+    "s1-replay": {
+      "capture": "s1",
+      "mode": "replay",
+      "claim": "C-HIST",
+      "policy": "s1",
+      "stage_root": "roots",
+      "lanes": ["container", "unisolated"],
+      "expect": {
+        "verdict": "MATCH",
+        "execution": "OK",
+        "binding_differences": [],
+        "outputs": ["results_s1_quality_assessed_filtered_normalized.h5ad"],
+        "claim_achieved": "C-HIST"
+      }
+    },
+    "s1-incorrect-root": {
+      "capture": "s1",
+      "mode": "replay",
+      "claim": "C-HIST",
+      "policy": "s1",
+      "stage_root": "roots_perturbed",
+      "lanes": ["container", "unisolated"],
+      "expect": {
+        "verdict": "MISMATCH",
+        "execution": "OK",
+        "binding_differences": ["root_sha256"],
+        "outputs": ["results_s1_quality_assessed_filtered_normalized.h5ad"],
+        "claim_achieved": "C-EXEC"
+      }
+    },
+    "s1-isolation-probe": {
+      "capture": "s1",
+      "mode": "replay",
+      "claim": "C-EXEC",
+      "policy": "s1",
+      "stage_root": "roots",
+      "probe": true,
+      "lanes": ["container"],
+      "expect": {
+        "verdict": "NOT_COMPARED",
+        "execution": "OK",
+        "binding_differences": [],
+        "outputs": [
+          "results_s1_quality_assessed_filtered_normalized.h5ad",
+          "results_visibility.json"
+        ],
+        "claim_achieved": "C-EXEC"
+      }
+    }
+  }
+}

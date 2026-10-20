@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "required": ["files"],
+  "excluded": [
+    {
+      "path": "files/results_s1_quality_assessed_filtered_normalized.h5ad/uns/provenance",
+      "rationale": "The session's provenance record, written by the data manager and not by any analysis step. A notebook does not reproduce its own provenance record."
+    },
+    {
+      "path": "files/results_s1_quality_assessed_filtered_normalized.h5ad/uns/lineage",
+      "rationale": "The session's record of which modality each object was derived from (session bookkeeping, not analysis output). A notebook has no modality names."
+    }
+  ],
+  "tolerances": [],
+  "sparse": "semantic"
+}
