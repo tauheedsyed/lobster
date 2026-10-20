@@ -399,6 +399,7 @@ NOTEBOOK_FIDELITY_FILES = (
     "tests/unit/core/test_ir_coverage.py",
     "tests/unit/core/test_replay_compare.py",
     "tests/unit/core/test_ir_load_fidelity.py",
+    "tests/unit/core/test_notebook_replay_checker.py",
 )
 NOTEBOOK_FIDELITY_LIST = "tests/unit/core/notebook_fidelity_tests.txt"
 
@@ -456,6 +457,74 @@ def test_notebook_fidelity_gate_rejects_weakened_selection(mutation):
         fidelity["continue-on-error"] = "true"
     with pytest.raises(AssertionError):
         assert_notebook_fidelity_tests_are_required(document)
+
+
+NOTEBOOK_REPLAY_LANE = "tests/integration/notebook_replay/run_lane.py"
+
+
+def assert_notebook_replay_lane_is_required(document):
+    job = document["jobs"]["notebook-replay"]
+    assert job.get("continue-on-error", "false") == "false"
+    assert job["if"] == "${{ !cancelled() }}"
+    assert "needs" not in job, "the replay lane must not be skipped with another job"
+    assert job["permissions"] == {"contents": "read"}
+    checkout = step(job, name="Checkout code")
+    assert str(checkout["with"]["persist-credentials"]).lower() == "false"
+    lane = step(job, name="Run notebook replay lane")
+    assert lane.get("continue-on-error", "false") == "false"
+    assert "if" not in lane
+    command = " ".join(lane["run"].replace("\\\n", " ").split())
+    assert f"python3 {NOTEBOOK_REPLAY_LANE} --lane container" in command
+    assert "--scenario" not in command and "unisolated" not in command
+    assert "||" not in command and "; true" not in command
+    assert (ROOT / NOTEBOOK_REPLAY_LANE).is_file()
+    diagnostics = step(job, name="Upload replay diagnostics")["with"]["path"]
+    for private in ("venv", "src", "capture", "uv-cache", "wheels"):
+        assert f"notebook-replay/{private}" not in diagnostics, private
+    summary = document["jobs"]["test-summary"]
+    assert "notebook-replay" in summary["needs"]
+    check = step(summary, name="Check job results")["run"]
+    assert 'REPLAY_RESULT="${{ needs.notebook-replay.result }}"' in check
+    assert '[ "$REPLAY_RESULT" != "success" ]' in check
+
+
+def test_testing_ci_runs_the_notebook_replay_lane():
+    assert_notebook_replay_lane_is_required(workflow("ci-testing"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "drop-job",
+        "unisolated",
+        "subset",
+        "ignore-failure",
+        "skip-with-needs",
+        "upload-capture",
+        "not-in-summary",
+    ],
+)
+def test_notebook_replay_gate_rejects_weakened_lane(mutation):
+    document = workflow("ci-testing")
+    job = document["jobs"]["notebook-replay"]
+    lane = step(job, name="Run notebook replay lane")
+    if mutation == "drop-job":
+        del document["jobs"]["notebook-replay"]
+    elif mutation == "unisolated":
+        lane["run"] = lane["run"].replace("--lane container", "--lane unisolated")
+    elif mutation == "subset":
+        lane["run"] += " --scenario s1-replay"
+    elif mutation == "ignore-failure":
+        lane["continue-on-error"] = "true"
+    elif mutation == "skip-with-needs":
+        job["needs"] = ["package-tests"]
+    elif mutation == "upload-capture":
+        upload = step(job, name="Upload replay diagnostics")
+        upload["with"]["path"] += "\n${{ runner.temp }}/notebook-replay/capture"
+    else:
+        document["jobs"]["test-summary"]["needs"].remove("notebook-replay")
+    with pytest.raises((AssertionError, KeyError)):
+        assert_notebook_replay_lane_is_required(document)
 
 
 @pytest.mark.parametrize("job_name", ["fast-validation", "extended-tests"])
