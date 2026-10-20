@@ -3,9 +3,10 @@
 import asyncio
 import json
 import time
+from concurrent.futures import Future
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from threading import RLock
+from threading import Event, RLock
 
 import anthropic
 from langchain_anthropic import ChatAnthropic
@@ -17,6 +18,7 @@ from lobster.config.inference_context import (
     RequestDescriptor,
     UsageOutcome,
 )
+from lobster.config.providers.request_auth import canonical_refusal
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 
 
@@ -26,6 +28,8 @@ class _Attempt:
         self.admitted = False
         self.issued = False
         self.finalized = False
+        self.final_kind = None
+        self.final_result = Future()
         self.raw = None
         self.stream = None
         self.counts = {}
@@ -107,11 +111,76 @@ class _Attempt:
         )
 
 
-def _provider_error(error):
-    if isinstance(error, Exception):
+def _raise_cleanup_errors(errors):
+    # Finalization refusal has precedence, but every owner must be drained first.
+    for error in errors:
+        try:
+            reraise_inference_refusal(error)
+        except InferenceRefused as refusal:
+            if refusal.category == "accounting":
+                raise refusal from None
+    for error in errors:
+        reraise_inference_refusal(error)
+    for error in errors:
+        if not isinstance(error, Exception):
+            raise error
+    if errors:
+        raise InferenceRefused("provider") from None
+
+
+def _raise_clean(category, retryable=False):
+    # Suppressing display alone leaves __context__ reachable. Reraise after
+    # explicitly severing the source error chain; arguments are safe facts only.
+    try:
+        raise InferenceRefused(category, retryable=retryable) from None
+    except InferenceRefused as safe:
+        safe.__context__ = None
+        safe.__cause__ = None
+        raise
+
+
+def _provider_error(error, owner=None):
+    if not isinstance(error, Exception):
+        raise error
+    if owner is None or (owner._request_auth is None and owner._error_decoder is None):
+        # Preserve the established direct-client typed-refusal identity contract.
         reraise_inference_refusal(error)
         raise InferenceRefused("provider") from None
-    raise error
+    facts = None
+    try:
+        reraise_inference_refusal(error)
+    except InferenceRefused as refusal:
+        facts = canonical_refusal(refusal.category, refusal.retryable, "provider")
+    body = view = decoded = None
+    if (
+        facts is None
+        and owner._error_decoder is not None
+        and isinstance(error, anthropic.APIError)
+    ):
+        body = getattr(error, "body", None)
+        try:
+            bounded = len(json.dumps(body, allow_nan=False).encode()) <= 8192
+        except (TypeError, ValueError):
+            bounded = False
+        if bounded:
+            try:
+                view = NativeRequestView(
+                    "MessagesError",
+                    owner.endpoint,
+                    {"status_code": getattr(error, "status_code", 200), "body": body},
+                )
+                decoded = owner._error_decoder(view)
+                if isinstance(decoded, InferenceRefused):
+                    facts = canonical_refusal(
+                        decoded.category, decoded.retryable, "provider"
+                    )
+            except Exception as caught:
+                from lobster.config.providers.request_auth import refusal_spec
+
+                facts = refusal_spec(caught, "provider")
+    # No raw SDK exception/body/view is retained in the outward refusal frame.
+    error = body = view = decoded = None
+    _raise_clean(*(facts or ("provider", False)))
 
 
 class _Messages:
@@ -164,6 +233,10 @@ class ControlledAnthropicClient:
         base_url,
         http_client,
         http_async_client,
+        request_auth=None,
+        error_decoder=None,
+        request_headers=None,
+        before_issue=None,
     ):
         if (
             not isinstance(context, InferenceContext)
@@ -180,11 +253,27 @@ class ControlledAnthropicClient:
         )
         self.endpoint = base_url.rstrip("/") + "/v1/messages"
         self._api_key = api_key
+        self._request_auth = request_auth
+        self._error_decoder = error_decoder
+        self._request_headers = request_headers
+        self._before_issue = before_issue
+        if request_auth is not None and (
+            not callable(getattr(request_auth, "get", None))
+            or not callable(getattr(request_auth, "aget", None))
+        ):
+            raise InferenceRefused("context")
+        if any(
+            callback is not None and not callable(callback)
+            for callback in (error_decoder, request_headers, before_issue)
+        ):
+            raise InferenceRefused("context")
         self._attempt = ContextVar(f"native-attempt-{id(self)}", default=None)
         self._scope = ContextVar(f"native-scope-{id(self)}", default=None)
         self._lock = RLock()
         self._attempt_ids = set()
         self._pending = set()
+        self._idle = Event()
+        self._idle.set()
         self._closed = False
         http_client.event_hooks.setdefault("request", []).append(self._before_http)
         http_async_client.event_hooks.setdefault("request", []).append(
@@ -204,6 +293,30 @@ class ControlledAnthropicClient:
     def __repr__(self):
         return "ControlledAnthropicClient(<owned>)"
 
+    def _prepare_headers(self, request, descriptor):
+        if self._request_headers is None:
+            return
+        headers = self._request_headers(descriptor)
+        if not isinstance(headers, dict) or any(
+            type(key) is not str
+            or not key.lower().startswith("x-")
+            or key.lower() in {"x-api-key", "x-stainless-retry-count"}
+            or type(value) is not str
+            or not value
+            or len(value) > 512
+            or any(not 0x20 <= ord(char) <= 0x7E for char in value)
+            for key, value in headers.items()
+        ):
+            raise InferenceRefused("context")
+        request.headers.update(headers)
+
+    def _apply_auth(self, request, auth):
+        from lobster.config.providers.request_auth import RequestAuth
+
+        if not isinstance(auth, RequestAuth) or auth.expires_at <= time.time():
+            raise InferenceRefused("auth")
+        request.headers["x-api-key"] = auth.value
+
     def _descriptor(self, request):
         attempt = self._attempt.get()
         if self._closed or attempt is None or attempt.admitted:
@@ -213,6 +326,8 @@ class ControlledAnthropicClient:
             str(request.url) != expected_endpoint
             or request.method != "POST"
             or request.headers.get("x-api-key") != self._api_key
+            or "authorization" in request.headers
+            or "cookie" in request.headers
         ):
             raise InferenceRefused("context")
         payload = json.loads(request.content)
@@ -255,26 +370,45 @@ class ControlledAnthropicClient:
         ):
             raise InferenceRefused("context")
         with self._lock:
-            if descriptor.attempt_id in self._attempt_ids:
+            if (
+                descriptor.attempt_id in self._attempt_ids
+                or len(self._attempt_ids) >= 8192
+            ):
+                # Rebuild this owner rather than erase replay evidence or retain
+                # an unbounded set for a long-lived host.
                 raise InferenceRefused("context")
             self._attempt_ids.add(descriptor.attempt_id)
         return attempt, descriptor
+
+    def _issue(self, attempt, descriptor):
+        def mark():
+            with self._lock:
+                if self._closed or descriptor.deadline_at <= time.time():
+                    raise InferenceRefused("context")
+                attempt.issued = True
+
+        if self._before_issue is None:
+            mark()
+        else:
+            self._before_issue(mark)
 
     def _before_http(self, request):
         attempt, descriptor = self._descriptor(request)
         attempt.permit = self.authorizer.before_request(descriptor)
         attempt.admitted = True
-        if descriptor.deadline_at <= time.time():
-            raise InferenceRefused("context")
-        attempt.issued = True
+        self._prepare_headers(request, descriptor)
+        if self._request_auth is not None:
+            self._apply_auth(request, self._request_auth.get())
+        self._issue(attempt, descriptor)
 
     async def _abefore_http(self, request):
         attempt, descriptor = self._descriptor(request)
         attempt.permit = await self.authorizer.abefore_request(descriptor)
         attempt.admitted = True
-        if descriptor.deadline_at <= time.time():
-            raise InferenceRefused("context")
-        attempt.issued = True
+        self._prepare_headers(request, descriptor)
+        if self._request_auth is not None:
+            self._apply_auth(request, await self._request_auth.aget())
+        self._issue(attempt, descriptor)
 
     def _start(self, asynchronous=False):
         with self._lock:
@@ -283,6 +417,7 @@ class ControlledAnthropicClient:
             attempt = _Attempt()
             attempt.asynchronous = asynchronous
             self._pending.add(attempt)
+            self._idle.clear()
         scope = self._scope.get()
         if scope is not None:
             scope.append(attempt)
@@ -291,40 +426,77 @@ class ControlledAnthropicClient:
     def finalize(self, attempt, kind):
         with attempt.lock:
             if attempt.finalized:
+                result = attempt.final_result.result()
+                if result is not None:
+                    _raise_clean(*result)
                 return
             attempt.finalized = True
+            attempt.final_kind = kind
+        facts = None
         try:
-            if attempt.stream is not None:
-                attempt.stream.close()
-            elif attempt.raw is not None:
-                attempt.raw.close()
+            try:
+                if attempt.stream is not None:
+                    attempt.stream.close()
+                elif attempt.raw is not None:
+                    attempt.raw.close()
+            finally:
+                if attempt.admitted:
+                    self.authorizer.after_request(attempt.permit, attempt.outcome(kind))
+        except BaseException as error:
+            if self._request_auth is None and self._error_decoder is None:
+                attempt.final_result.set_exception(error)
+                raise
+            from lobster.config.providers.request_auth import refusal_spec
+
+            facts = refusal_spec(error, "accounting")
+            attempt.final_result.set_result(facts)
+        else:
+            attempt.final_result.set_result(None)
         finally:
-            with self._lock:
-                self._pending.discard(attempt)
-            if attempt.admitted:
-                self.authorizer.after_request(attempt.permit, attempt.outcome(kind))
+            self._finish_pending(attempt)
+        if facts is not None:
+            _raise_clean(*facts)
 
     async def afinalize(self, attempt, kind):
         with attempt.lock:
-            if attempt.finalized:
-                return
+            leader = not attempt.finalized
+            if leader:
+                attempt.final_kind = kind
             attempt.finalized = True
 
         async def finish():
+            facts = None
             try:
-                if attempt.stream is not None:
-                    await attempt.stream.close()
-                elif attempt.raw is not None:
-                    await attempt.raw.close()
-            finally:
-                with self._lock:
-                    self._pending.discard(attempt)
-                if attempt.admitted:
-                    await self.authorizer.aafter_request(
-                        attempt.permit, attempt.outcome(kind)
-                    )
+                try:
+                    if attempt.stream is not None:
+                        await attempt.stream.close()
+                    elif attempt.raw is not None:
+                        await attempt.raw.close()
+                finally:
+                    if attempt.admitted:
+                        await self.authorizer.aafter_request(
+                            attempt.permit, attempt.outcome(kind)
+                        )
+            except BaseException as error:
+                if self._request_auth is None and self._error_decoder is None:
+                    attempt.final_result.set_exception(error)
+                    raise
+                from lobster.config.providers.request_auth import refusal_spec
 
-        task = asyncio.create_task(finish())
+                facts = refusal_spec(error, "accounting")
+                attempt.final_result.set_result(facts)
+            else:
+                attempt.final_result.set_result(None)
+            finally:
+                self._finish_pending(attempt)
+            if facts is not None:
+                _raise_clean(*facts)
+
+        task = (
+            asyncio.create_task(finish())
+            if leader
+            else asyncio.ensure_future(asyncio.wrap_future(attempt.final_result))
+        )
         cancelled = False
         while True:
             try:
@@ -335,6 +507,8 @@ class ControlledAnthropicClient:
                 if task.done():
                     result = task.result()
                     break
+        if result is not None:
+            _raise_clean(*result)
         if cancelled:
             raise asyncio.CancelledError
         return result
@@ -346,12 +520,15 @@ class ControlledAnthropicClient:
         try:
             client = self._sync.beta if beta else self._sync
             attempt.raw = client.messages.with_raw_response.create(**payload)
+            if self._closed:
+                self.finalize(attempt, "cancelled")
+                raise InferenceRefused("context")
             return _RawResponse(self, attempt, bool(payload.get("stream")))
         except BaseException as error:
             self.finalize(
                 attempt, "refused" if isinstance(error, InferenceRefused) else "failed"
             )
-            _provider_error(error)
+            _provider_error(error, self)
         finally:
             self._attempt.reset(token)
 
@@ -362,6 +539,9 @@ class ControlledAnthropicClient:
         try:
             client = self._async.beta if beta else self._async
             attempt.raw = await client.messages.with_raw_response.create(**payload)
+            if self._closed:
+                await self.afinalize(attempt, "cancelled")
+                raise InferenceRefused("context")
             return _AsyncRawResponse(self, attempt, bool(payload.get("stream")))
         except BaseException as error:
             kind = (
@@ -370,7 +550,7 @@ class ControlledAnthropicClient:
                 else "refused" if isinstance(error, InferenceRefused) else "failed"
             )
             await self.afinalize(attempt, kind)
-            _provider_error(error)
+            _provider_error(error, self)
         finally:
             self._attempt.reset(token)
 
@@ -387,8 +567,13 @@ class ControlledAnthropicClient:
                 # An abandoned generator may be closed in another task/context.
                 # Ownership cleanup must still run, irrespective of token reset.
                 self._scope.set(None)
+            errors = []
             for attempt in attempts:
-                self.finalize(attempt, "cancelled")
+                try:
+                    self.finalize(attempt, "cancelled")
+                except BaseException as error:
+                    errors.append(error)
+            _raise_cleanup_errors(errors)
 
     @asynccontextmanager
     async def astream_scope(self):
@@ -401,8 +586,53 @@ class ControlledAnthropicClient:
                 self._scope.reset(token)
             except ValueError:
                 self._scope.set(None)
+            errors = []
             for attempt in attempts:
-                await self.afinalize(attempt, "cancelled")
+                try:
+                    await self.afinalize(attempt, "cancelled")
+                except BaseException as error:
+                    errors.append(error)
+            _raise_cleanup_errors(errors)
+
+    def _finish_pending(self, attempt):
+        with self._lock:
+            self._pending.discard(attempt)
+            if not self._pending:
+                self._idle.set()
+
+    def stop(self):
+        """Reject new requests while allowing already owned work to finalize."""
+        with self._lock:
+            self._closed = True
+
+    async def drain(self):
+        """Close retained streams and await requests plus their finalizers."""
+        self.stop()
+        with self._lock:
+            attempts = list(self._pending)
+        errors = []
+        for attempt in attempts:
+            if attempt.raw is not None:
+                try:
+                    if attempt.asynchronous:
+                        await self.afinalize(attempt, "cancelled")
+                    else:
+                        self.finalize(attempt, "cancelled")
+                except BaseException as error:
+                    errors.append(error)
+        if not self._idle.is_set():
+            await asyncio.to_thread(self._idle.wait)
+        # A response may have arrived after our snapshot. Observe every once
+        # result, including a late finalizer failure, before declaring drain done.
+        for attempt in attempts:
+            try:
+                if attempt.asynchronous:
+                    await self.afinalize(attempt, "cancelled")
+                else:
+                    self.finalize(attempt, "cancelled")
+            except BaseException as error:
+                errors.append(error)
+        _raise_cleanup_errors(errors)
 
     def close(self):
         with self._lock:
@@ -450,6 +680,10 @@ class _RawResponse:
         return getattr(self.attempt.raw, name)
 
     def parse(self, **kwargs):
+        if self.attempt.finalized:
+            self.owner.finalize(self.attempt, self.attempt.final_kind)
+            if self.attempt.final_kind != "completed" or self.parsed is None:
+                raise InferenceRefused("context")
         if self.parsed is not None:
             return self.parsed
         try:
@@ -460,11 +694,13 @@ class _RawResponse:
             else:
                 self.attempt.observe_message(value)
                 self.owner.finalize(self.attempt, "completed")
+                if self.attempt.final_kind != "completed":
+                    raise InferenceRefused("context")
                 self.parsed = value
             return self.parsed
         except BaseException as error:
             self.owner.finalize(self.attempt, "failed")
-            _provider_error(error)
+            _provider_error(error, self.owner)
 
     def close(self):
         self.owner.finalize(self.attempt, "cancelled")
@@ -472,6 +708,10 @@ class _RawResponse:
 
 class _AsyncRawResponse(_RawResponse):
     async def parse(self, **kwargs):
+        if self.attempt.finalized:
+            await self.owner.afinalize(self.attempt, self.attempt.final_kind)
+            if self.attempt.final_kind != "completed" or self.parsed is None:
+                raise InferenceRefused("context")
         if self.parsed is not None:
             return self.parsed
         try:
@@ -482,11 +722,16 @@ class _AsyncRawResponse(_RawResponse):
             else:
                 self.attempt.observe_message(value)
                 await self.owner.afinalize(self.attempt, "completed")
+                if self.attempt.final_kind != "completed":
+                    raise InferenceRefused("context")
                 self.parsed = value
             return self.parsed
         except BaseException as error:
-            await self.owner.afinalize(self.attempt, "failed")
-            _provider_error(error)
+            await self.owner.afinalize(
+                self.attempt,
+                "cancelled" if isinstance(error, asyncio.CancelledError) else "failed",
+            )
+            _provider_error(error, self.owner)
 
     async def close(self):
         await self.owner.afinalize(self.attempt, "cancelled")
@@ -516,7 +761,7 @@ class _Stream:
             raise
         except BaseException as error:
             self.owner.finalize(self.attempt, "failed")
-            _provider_error(error)
+            _provider_error(error, self.owner)
 
     def close(self):
         self.owner.finalize(self.attempt, "cancelled")
@@ -549,7 +794,7 @@ class _AsyncStream(_Stream):
                 "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
             )
             await self.owner.afinalize(self.attempt, kind)
-            _provider_error(error)
+            _provider_error(error, self.owner)
 
     async def close(self):
         await self.owner.afinalize(self.attempt, "cancelled")
