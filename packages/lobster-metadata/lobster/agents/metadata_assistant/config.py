@@ -338,7 +338,7 @@ def phase1_column_rescan(samples: List[Dict]) -> tuple:
             r"^\s*[:=\-]?\s*(?:0|no|false|n|negative|neg|absent|none)\b"
         )
         neg_token = (
-            r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"
+            r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"  # nosec B105 # regex of negative values, not a credential
             r"not applicable|missing|null|nan)"
         )
         after_separator = re.compile(r"[:=]\s*" + neg_token + r"(?![^\W_])")

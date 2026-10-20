@@ -38,7 +38,7 @@ _NEGATIVE_AFTER = re.compile(
 # Whole-value negation: a negative / unknown value after a key separator
 # ("healthy control: no", "crc_status=0"), "(negative)", or a leading "negative".
 _NEGATIVE_TOKEN = (
-    r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"
+    r"(?:0|no|false|n|negative|neg|absent|none|unknown|unk|n/?a|na|"  # nosec B105 # regex of negative values, not a credential
     r"not applicable|missing|null|nan)"
 )
 _AFTER_SEPARATOR = re.compile(r"[:=]\s*" + _NEGATIVE_TOKEN + r"(?![^\W_])")
