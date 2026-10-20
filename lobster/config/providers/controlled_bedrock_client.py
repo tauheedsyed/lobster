@@ -5,10 +5,16 @@ nonsecret descriptor builder. No credentials, endpoints or policy are resolved
 from the environment. Other SDK operations are deliberately unavailable.
 """
 
+import asyncio
 import json
 import time
+from contextvars import ContextVar
 from threading import RLock, local
 from urllib.parse import quote
+
+from langchain_aws import ChatBedrockConverse
+from langchain_core.runnables.config import run_in_executor
+from pydantic import PrivateAttr
 
 from lobster.config.inference_context import (
     InferenceContext,
@@ -371,3 +377,89 @@ class _ControlledStream:
 
     def close(self):
         self._finish("cancelled")
+
+
+async def _drain_operation(awaitable):
+    """Wait for a protected provider/finalizer operation before reporting cancel."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.done():
+                result = task.result()
+                break
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+class ControlledChatBedrockConverse(ChatBedrockConverse):
+    """Real native model whose async executor work drains before cancellation."""
+
+    _async_stream_scope = PrivateAttr(
+        default_factory=lambda: ContextVar("native-bedrock-stream", default=None)
+    )
+
+    def _check_owner(self):
+        if (
+            not isinstance(self.client, ControlledBedrockClient)
+            or self.client._context.model_id != self.model_id
+            or self.cache is not False
+        ):
+            raise InferenceRefused("context")
+
+    def _generate(self, *args, **kwargs):
+        self._check_owner()
+        return super()._generate(*args, **kwargs)
+
+    def _stream(self, *args, **kwargs):
+        self._check_owner()
+        yield from super()._stream(*args, **kwargs)
+
+    async def agenerate(self, *args, **kwargs):
+        self._check_owner()
+        return await _drain_operation(super().agenerate(*args, **kwargs))
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        # The base async implementation never closes its sync iterator and can
+        # leave next() running in an executor. Close only after that work drains.
+        iterator = self._stream(
+            messages, stop, run_manager.get_sync() if run_manager else None, **kwargs
+        )
+        scope = self._async_stream_scope.get()
+        if scope is not None:
+            scope.append(iterator)
+        done = object()
+        try:
+            while True:
+                item = await _drain_operation(
+                    run_in_executor(None, next, iterator, done)
+                )
+                if item is done:
+                    break
+                yield item
+        finally:
+            await _drain_operation(run_in_executor(None, iterator.close))
+
+    async def astream(self, *args, **kwargs):
+        self._check_owner()
+        stream = super().astream(*args, **kwargs)
+        iterators = []
+        token = self._async_stream_scope.set(iterators)
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                try:
+                    self._async_stream_scope.reset(token)
+                except ValueError:
+                    self._async_stream_scope.set(None)
+                for iterator in iterators:
+                    await _drain_operation(run_in_executor(None, iterator.close))

@@ -1,7 +1,9 @@
 """Controlled clients exercise real native serialization and synthetic HTTP."""
 
+import asyncio
 import json
 import pickle
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -14,7 +16,11 @@ from lobster.config.inference_context import (
     RequestDescriptor,
     UsageOutcome,
 )
-from lobster.config.providers.controlled_bedrock_client import ControlledBedrockClient
+from lobster.config.providers.controlled_bedrock_client import (
+    ControlledBedrockClient,
+    ControlledChatBedrockConverse,
+)
+from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
 from lobster.core.exceptions import InferenceRefused
 from tests.unit.config.test_native_request_hooks import (
     BEDROCK_MODEL,
@@ -80,7 +86,13 @@ def controlled():
         validate_request=validate,
         describe_request=describe,
     )
-    model.client = owner
+    model = ControlledChatBedrockConverse(
+        model_id=BEDROCK_MODEL,
+        max_tokens=context.max_output_tokens,
+        client=owner,
+        bedrock_client=StubBedrockControlClient(),
+        cache=False,
+    )
     yield model, owner, probe, authorizer, views
     owner.close()
 
@@ -364,3 +376,115 @@ def test_descriptor_deadline_is_finite_bounded(deadline):
             1024,
             deadline,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recording_failure", [False, True])
+async def test_async_executor_finalizer_drains_before_cancel_is_reported(
+    controlled, recording_failure
+):
+    model, _, _, authorizer, _ = controlled
+    started, release = threading.Event(), threading.Event()
+    refusal = InferenceRefused("accounting")
+
+    def finish(permit, outcome):
+        authorizer.outcomes.append((permit, outcome))
+        started.set()
+        assert release.wait(2)
+        if recording_failure:
+            raise refusal
+
+    authorizer.after_request = finish
+    task = asyncio.create_task(model.ainvoke("hello"))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    if recording_failure:
+        with pytest.raises(InferenceRefused) as caught:
+            await task
+        assert caught.value is refusal
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert len(authorizer.outcomes) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_executor_request_drains_before_cancel_is_reported(controlled):
+    model, owner, probe, authorizer, _ = controlled
+    started, release = threading.Event(), threading.Event()
+    original = owner._client._endpoint.http_session.send
+
+    def send(request):
+        started.set()
+        assert release.wait(2)
+        return original(request)
+
+    owner._client._endpoint.http_session.send = send
+    task = asyncio.create_task(model.ainvoke("hello"))
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not authorizer.outcomes
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(probe.sent) == len(authorizer.outcomes) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_executor_stream_read_drains_and_closes_before_cancel(controlled):
+    from botocore.awsrequest import AWSResponse
+
+    from tests.unit.config.test_native_request_hooks import (
+        FakeRawResponse,
+        encode_event,
+    )
+
+    model, owner, probe, authorizer, _ = controlled
+    started, release = threading.Event(), threading.Event()
+    original = owner._client._endpoint.http_session.send
+
+    class Body(FakeRawResponse):
+        def stream(self, amt=None, decode_content=False):
+            yield encode_event("messageStart", {"role": "assistant"})
+            yield encode_event(
+                "contentBlockDelta",
+                {"contentBlockIndex": 0, "delta": {"text": "partial"}},
+            )
+            started.set()
+            assert release.wait(2)
+            yield encode_event("messageStop", {"stopReason": "end_turn"})
+            yield encode_event(
+                "metadata",
+                {"usage": {"inputTokens": 4, "outputTokens": 1, "totalTokens": 5}},
+            )
+
+    def send(request):
+        response = original(request)
+        return AWSResponse(
+            request.url, response.status_code, response.headers, Body(b"", probe)
+        )
+
+    owner._client._endpoint.http_session.send = send
+
+    async def consume():
+        return [chunk async for chunk in model.astream("hello")]
+
+    task = asyncio.create_task(consume())
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert not authorizer.outcomes
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert probe.closed == 1
+    assert len(authorizer.outcomes) == 1
+    assert authorizer.outcomes[0][1].outcome == "cancelled"
