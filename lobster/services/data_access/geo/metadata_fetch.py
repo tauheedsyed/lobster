@@ -248,7 +248,11 @@ class MetadataFetcher:
 
             # Make the request with SSL support
             try:
-                response = urllib.request.urlopen(url, context=ssl_context, timeout=30)
+                if urllib.parse.urlsplit(url).scheme != "https":
+                    raise ValueError("NCBI metadata URL must use HTTPS")
+                response = urllib.request.urlopen(  # nosec B310 # Scheme validated to HTTPS above.
+                    url, context=ssl_context, timeout=30
+                )
                 response_data = response.read().decode("utf-8")
             except Exception as e:
                 error_str = str(e)
@@ -443,7 +447,11 @@ class MetadataFetcher:
 
             # Make the request with SSL support (timeout: 30s)
             try:
-                response = urllib.request.urlopen(url, context=ssl_context, timeout=30)
+                if urllib.parse.urlsplit(url).scheme != "https":
+                    raise ValueError("NCBI metadata URL must use HTTPS")
+                response = urllib.request.urlopen(  # nosec B310 # Scheme validated to HTTPS above.
+                    url, context=ssl_context, timeout=30
+                )
                 response_data = response.read().decode("utf-8")
             except Exception as e:
                 error_str = str(e)

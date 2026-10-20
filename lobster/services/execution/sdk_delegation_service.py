@@ -149,8 +149,11 @@ class SDKDelegationService:
                             k: v
                             for k, v in list(metrics.items())[:5]  # First 5 metrics
                         }
-                except Exception:
-                    pass
+                except Exception as error:
+                    logger.debug(
+                        "Optional quality metrics unavailable (%s)",
+                        type(error).__name__,
+                    )
 
                 return {
                     "content": [

@@ -331,7 +331,13 @@ class GEOQueuePreparer(IQueuePreparer):
         except Exception:
             ssl_ctx = None
 
-        response = urllib.request.urlopen(url, context=ssl_ctx, timeout=30)
+        if urllib.parse.urlsplit(url).scheme != "https":
+            raise ValueError("NCBI metadata URL must use HTTPS")
+        response = (
+            urllib.request.urlopen(  # nosec B310 # Scheme validated to HTTPS above.
+                url, context=ssl_ctx, timeout=30
+            )
+        )
         data = json.loads(response.read().decode("utf-8"))
 
         if "result" not in data or gds_number not in data["result"]:
