@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from lobster.config.inference_context import INFERENCE_BINDING_VERSION, InferenceContext
@@ -64,6 +65,60 @@ def test_geo_download_adapter_preserves_refusal_from_actual_helper_request(
     )
     with pytest.raises(InferenceRefused) as caught:
         service.download_dataset(entry)
+    assert caught.value is refusal
+    assert len(probe.hooks) == 1
+    assert not probe.sent
+    model.client.close()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_sample_worker_future_does_not_turn_native_refusal_into_missing_matrix(
+    tmp_path, monkeypatch, wrapped
+):
+    from lobster.services.data_access.geo import matrix_parsing
+    from lobster.services.data_access.geo_service import GEOService
+
+    refusal = InferenceRefused("budget")
+    error = RuntimeError("Synthetic request wrapper") if wrapped else refusal
+    if wrapped:
+        error.__cause__ = refusal
+    probe = HookProbe()
+    probe.error = error
+    model = bedrock_model(probe)
+    context = InferenceContext(
+        "bedrock", BEDROCK_MODEL, "synthetic-binding", "version-a", 200000, 137
+    )
+
+    class Factory:
+        capability_version = INFERENCE_BINDING_VERSION
+
+        def create(self, *, context, component):
+            return model
+
+    manager = DataManagerV2(workspace_path=tmp_path)
+    manager.metadata_store["GSE1"] = {"data_type": "bulk_rna_seq"}
+    capture_inference_binding(manager, context, Factory())
+
+    class PartialRemoteSample:
+        """Synthetic SOFT object with a transient metadata-read failure."""
+
+        table = pd.DataFrame([[1, 2], [3, 4]])
+        reads = 0
+
+        @property
+        def metadata(self):
+            self.reads += 1
+            if self.reads == 1:
+                raise ValueError("Synthetic partial SOFT metadata")
+            return {"title": "synthetic sample"}
+
+    monkeypatch.setattr(matrix_parsing, "pre_download_soft_file", lambda *a, **k: None)
+    monkeypatch.setattr(
+        matrix_parsing.GEOparse, "get_GEO", lambda **k: PartialRemoteSample()
+    )
+    service = GEOService(manager)
+    with pytest.raises(InferenceRefused) as caught:
+        service._download_sample_matrices({"GSM1": {}}, "GSE1")
     assert caught.value is refusal
     assert len(probe.hooks) == 1
     assert not probe.sent

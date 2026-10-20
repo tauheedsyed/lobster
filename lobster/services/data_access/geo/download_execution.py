@@ -544,6 +544,7 @@ Multi-Modal Dataset Detected:
                 except InferenceRefused:
                     raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.debug(f"Pipeline step {pipeline_func.__name__} failed: {e}")
                     continue
 

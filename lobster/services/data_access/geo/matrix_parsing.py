@@ -22,6 +22,7 @@ try:
 except ImportError:
     GEOparse = None
 
+from lobster.core.exceptions import reraise_inference_refusal
 from lobster.services.data_access.geo.parser import ParseResult
 from lobster.services.data_access.geo.soft_download import pre_download_soft_file
 from lobster.utils.logger import get_logger
@@ -155,6 +156,7 @@ class MatrixParser:
                     else:
                         logger.debug(f"No matrix data found for {gsm_id}")
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.error(f"Error downloading {gsm_id}: {e}")
                     sample_matrices[gsm_id] = None
 
@@ -191,6 +193,7 @@ class MatrixParser:
                 return df
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.debug(f"Single-cell download attempt failed for {gsm_id}: {e}")
 
             is_single_cell = False
