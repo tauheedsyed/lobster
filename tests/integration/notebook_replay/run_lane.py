@@ -44,6 +44,8 @@ import sys
 import time
 from pathlib import Path
 
+from staging import PROBE_HEADER, with_appended_cells
+
 HARNESS = Path(__file__).resolve().parent
 REPO = HARNESS.parents[2]
 IMAGE = (
@@ -153,15 +155,22 @@ class Runner:
         )
         cmd += [IMAGE, "sh", "-c", wrapper, "sh", *argv]
         with open(log, "w") as handle:
+            proc = subprocess.Popen(  # nosec B603
+                cmd, stdout=handle, stderr=subprocess.STDOUT
+            )
+            code = 124
             try:
-                proc = subprocess.run(  # nosec B603
-                    cmd, stdout=handle, stderr=subprocess.STDOUT,
-                    timeout=TIMEOUTS[phase],
-                )  # fmt: skip
-                code = proc.returncode
+                code = proc.wait(timeout=TIMEOUTS[phase])
             except subprocess.TimeoutExpired:
-                subprocess.run(["docker", "kill", name], capture_output=True)  # nosec
-                code = 124
+                pass
+            finally:
+                # Every exit (success, timeout, interrupt, cancellation) ends
+                # with the container verified gone, so nothing keeps running
+                # after this phase, or after the caller releases a lock.
+                remove_container(name)
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
         peak = None
         for line in log.read_text(errors="replace").splitlines():
             if line.startswith("REPLAY_MEMORY_PEAK "):
@@ -180,15 +189,46 @@ class Runner:
                 argv, stdout=handle, stderr=subprocess.STDOUT, env=env,
                 cwd=str(home), start_new_session=True,
             )  # fmt: skip
+            code = 124
             try:
                 code = proc.wait(timeout=TIMEOUTS[phase])
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-                code = 124
+                pass
+            finally:
+                # The phase ran in its own session: end every process left in
+                # it (including descendants of a successful run).
+                kill_group(proc.pid)
+                if proc.poll() is None:
+                    proc.wait()
         peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
         peak = peak if sys.platform == "darwin" else peak * 1024
         return code, peak
+
+
+def remove_container(name, attempts=60):
+    """Force-remove ``name`` and confirm it no longer exists."""
+    subprocess.run(  # nosec B603 B607
+        ["docker", "rm", "--force", name], capture_output=True
+    )
+    for _ in range(attempts):
+        gone = subprocess.run(  # nosec B603 B607
+            ["docker", "container", "inspect", name], capture_output=True
+        )
+        if gone.returncode != 0:
+            return
+        time.sleep(1)
+    raise LaneError(f"container {name} is still present after removal")
+
+
+def kill_group(pid):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
 
 
 # --------------------------------------------------------------------------
@@ -272,6 +312,7 @@ def setup(runner, work):
         "source_dirty": dirty,
         "image": IMAGE if runner.lane == "container" else None,
         "venv_python": runner.venv_python,
+        "source_packages": list(SOURCE_PACKAGES) if runner.lane == "container" else [],
     }
     (run_dir / "run.json").write_text(json.dumps(run, sort_keys=True, indent=1))
     return harness, checker
@@ -303,8 +344,7 @@ def capture(runner, work, harness, cap, policy):
     return out
 
 
-PROBE_CELL = """# Isolation probe (test harness only, not part of any export)
-import json as _json
+PROBE_CELL = PROBE_HEADER + """import json as _json
 import os as _os
 
 _forbidden = {forbidden}
@@ -328,7 +368,7 @@ def stage(runner, work, sid, spec, cap_dir):
         shutil.copy2(root, stage_dir / "roots" / root.name)
     notebook = stage_dir / "notebook.ipynb"
     shutil.copyfile(cap_dir / cap["notebooks"][spec["mode"]]["file"], notebook)
-    notebook_sha = cap["notebooks"][spec["mode"]]["sha256"]
+    appended = []
     outputs = work / "outputs" / sid
     outputs.mkdir(parents=True)
     in_stage = runner.path(stage_dir, "/stage")
@@ -347,16 +387,11 @@ def stage(runner, work, sid, spec, cap_dir):
             }
         )
         control = [f"{in_stage}/roots/input.h5ad"]
-        data = json.loads(notebook.read_text())
         source = PROBE_CELL.format(
             forbidden=json.dumps(forbidden), control=json.dumps(control)
         )
-        data["cells"].append(
-            {"cell_type": "code", "execution_count": None, "metadata": {},
-             "outputs": [], "source": source}
-        )  # fmt: skip
-        notebook.write_text(json.dumps(data, indent=1))
-        notebook_sha = _sha256(notebook)
+        appended = [source]
+        notebook.write_text(with_appended_cells(notebook.read_text(), appended))
     parameters = {
         "input_data": f"{in_stage}/roots/input.h5ad",
         "output_prefix": f"{runner.path(outputs, '/outputs')}/{OUTPUT_BASENAME}",
@@ -366,7 +401,7 @@ def stage(runner, work, sid, spec, cap_dir):
         "capture": spec["capture"],
         "mode": spec["mode"],
         "stage_root": spec["stage_root"],
-        "notebook_sha256": notebook_sha,
+        "appended_cells": appended,
         "parameters": parameters,
         "output_basename": OUTPUT_BASENAME,
     }
@@ -374,12 +409,6 @@ def stage(runner, work, sid, spec, cap_dir):
     for path in [*stage_dir.rglob("*"), stage_dir]:
         path.chmod(path.stat().st_mode & ~0o222)
     return stage_dir, outputs, parameters
-
-
-def _sha256(path):
-    import hashlib
-
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def execute(runner, work, sid, harness, stage_dir, outputs, parameters):
@@ -490,6 +519,9 @@ def main(argv=None):
         if args.lane in spec["lanes"] and (not args.scenario or sid in args.scenario)
     }
     runner = Runner(args.lane, work, args.python)
+    # CI cancellation sends SIGTERM: turn it into an interrupt so every
+    # phase's teardown runs before the driver exits.
+    signal.signal(signal.SIGTERM, _interrupt)
     started = time.monotonic()
     code = 1
     try:

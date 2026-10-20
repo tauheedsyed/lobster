@@ -100,11 +100,53 @@ def environment_digest(receipt):
     return digest(receipt)
 
 
-def receipt_problems(kernel, env, run):
-    """Ways the kernel's environment differs from the verified environment."""
-    from receipt import THREAD_ENV
+ENV_FIELDS = {
+    "verified_against_lock",
+    "receipt",
+    "distributions",
+    "source_distributions",
+    "memory_peak_bytes",
+}
 
+
+def _normalize(name):
+    import re
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def receipt_problems(kernel, env, run, execution):
+    """Ways the executing kernel differs from the verified environment.
+
+    ``kernel`` is the receipt printed by the first cell of the kernel that ran
+    the export; ``env`` is the setup record of the environment verified
+    against the lock.
+    """
+    from receipt import THREAD_ENV, environment_digest
+
+    if set(env) != ENV_FIELDS:
+        return [f"environment record has fields {sorted(env)}"]
     problems = []
+    if run["lane"] == "container":
+        if env["verified_against_lock"] is not True:
+            problems.append("environment was not verified against the lock")
+        wanted = {_normalize(name) for name in run["source_packages"]}
+        if not wanted or set(env["source_distributions"]) != wanted:
+            problems.append(
+                f"source packages {sorted(env['source_distributions'])}, "
+                f"expected {sorted(wanted)}"
+            )
+    if environment_digest(kernel) != environment_digest(env["receipt"]):
+        problems.append("kernel environment differs from the verified environment")
+    if execution["status"] == "OK" and execution["kernel_pid_after"] != kernel.get(
+        "pid"
+    ):
+        problems.append("the receipted kernel did not run the whole notebook")
+    if execution["unexpected_receipt_entries"]:
+        problems.append(
+            f"receipt directory has foreign files: "
+            f"{execution['unexpected_receipt_entries']}"
+        )
     if kernel["executable"] != run["venv_python"]:
         problems.append(
             f"kernel interpreter {kernel['executable']} is not {run['venv_python']}"
@@ -147,6 +189,68 @@ def _inventory(outputs):
 # --------------------------------------------------------------------------
 
 
+def _check_identity(sid, spec, cap, staged):
+    """The stage and capture are the ones the approved scenario names."""
+    for field in ("capture", "mode", "stage_root"):
+        if staged.get(field) != spec[field]:
+            raise CheckError(
+                f"{sid}: staged {field} {staged.get(field)!r} is not {spec[field]!r}"
+            )
+    if cap.get("scenario") != spec["capture"]:
+        raise CheckError(
+            f"{sid}: capture is {cap.get('scenario')!r}, not {spec['capture']!r}"
+        )
+    if spec["mode"] not in cap["notebooks"]:
+        raise CheckError(f"{sid}: no captured export for mode {spec['mode']!r}")
+    if bool(staged.get("appended_cells")) != bool(spec.get("probe")):
+        raise CheckError(f"{sid}: only the probe scenario may append a cell")
+
+
+def _confined(capture, relative):
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise CheckError(f"reference path escapes the capture: {relative!r}")
+    full = Path(capture) / path
+    current = Path(capture)
+    for part in path.parts:
+        current = current / part
+        if current.is_symlink():
+            raise CheckError(f"reference path goes through a link: {relative!r}")
+    return full
+
+
+def expected_notebook_sha256(capture, cap, spec, staged):
+    """SHA-256 the staged notebook must have, derived from the captured export.
+
+    An ordinary scenario executes the captured export unchanged. The probe
+    executes it with the approved probe cell appended, derived here
+    independently of the driver.
+    """
+    from staging import with_appended_cells
+
+    entry = cap["notebooks"][spec["mode"]]
+    export = _confined(capture, entry["file"])
+    if sha256_file(export) != entry["sha256"]:
+        raise CheckError("captured export changed since capture")
+    if not staged["appended_cells"]:
+        return entry["sha256"]
+    try:
+        text = with_appended_cells(export.read_text(), staged["appended_cells"])
+    except ValueError as exc:
+        raise CheckError(str(exc)) from None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def load_reference(capture, entry):
+    """Unpickle a reference copy only after its bytes match the capture record."""
+    if not isinstance(entry, dict) or set(entry) != {"file", "sha256"}:
+        raise CheckError(f"malformed reference entry: {entry!r}")
+    data = _confined(capture, entry["file"]).read_bytes()
+    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        raise CheckError(f"reference copy {entry['file']} changed since capture")
+    return pickle.loads(data)  # nosec B301 # verified harness-owned bytes
+
+
 def build_report(sid, spec, *, harness, capture, stage, outputs, receipt_dir, run_dir):
     """The report for one executed scenario, recomputed from files only."""
     from lobster.testing.replay_compare import compare
@@ -176,13 +280,18 @@ def build_report(sid, spec, *, harness, capture, stage, outputs, receipt_dir, ru
         raise CheckError(f"stage belongs to {staged['scenario_id']!r}, not {sid!r}")
     if execution["status"] not in EXECUTION_STATES:
         raise CheckError(f"execution did not complete normally: {execution}")
-    if execution["pre_run_entries"]:
+    if execution["pre_run_entries"] or execution["pre_run_receipt_entries"]:
         raise CheckError(
-            f"outputs were not empty before the run: {execution['pre_run_entries']}"
+            f"outputs or receipts existed before the run: "
+            f"{execution['pre_run_entries'] + execution['pre_run_receipt_entries']}"
         )
+    _check_identity(sid, spec, cap, staged)
 
     kernel = read_json(receipt_dir / "kernel_receipt.json")
     roots = {p.name: sha256_file(p) for p in sorted((stage / "roots").iterdir())}
+    approved_roots = {"roots": cap["roots"], "roots_perturbed": cap["perturbed_roots"]}
+    if roots != approved_roots[spec["stage_root"]]:
+        raise CheckError(f"stage does not hold the approved {spec['stage_root']!r}")
     tools = cap["tool_parameters"]
     recomputed = {
         "notebook_sha256": sha256_file(stage / "notebook.ipynb"),
@@ -197,7 +306,7 @@ def build_report(sid, spec, *, harness, capture, stage, outputs, receipt_dir, ru
         "env_receipt_sha256": environment_digest(kernel),
     }
     declared = {
-        "notebook_sha256": staged["notebook_sha256"],
+        "notebook_sha256": expected_notebook_sha256(capture, cap, spec, staged),
         "recipe_sha256": cap["recipe_sha256"],
         "root_sha256": cap["roots"],
         "policy_sha256": policy.digest(),
@@ -211,7 +320,7 @@ def build_report(sid, spec, *, harness, capture, stage, outputs, receipt_dir, ru
     if set(recomputed) != set(BINDING_KEYS):
         raise CheckError("the checker does not recompute every binding")
     differences = binding_differences(declared, recomputed)
-    problems = receipt_problems(kernel, env, run)
+    problems = receipt_problems(kernel, env, run, execution)
 
     state = Execution(EXECUTION_STATES[execution["status"]])
     claim = Claim(spec["claim"])
@@ -219,9 +328,8 @@ def build_report(sid, spec, *, harness, capture, stage, outputs, receipt_dir, ru
     probe = None
     if state is Execution.OK and claim is not Claim.EXEC:
         expected = {}
-        for name, oracle in cap["declared_outputs"].items():
-            with open(capture / oracle, "rb") as handle:
-                expected[name] = pickle.load(handle)  # nosec B301
+        for name, entry in cap["declared_outputs"].items():
+            expected[name] = load_reference(capture, entry)
         slots = compare({"files": expected}, {"files": _load_outputs(outputs)}, policy)
     if spec.get("probe") and state is Execution.OK:
         probe = read_json(outputs / f"{staged['output_basename']}_visibility.json")

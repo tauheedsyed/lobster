@@ -9,6 +9,7 @@ checker must never conclude MATCH or a claim from a run that does not earn it.
 import importlib.util
 import json
 import pickle  # nosec B403 # Writes and reads this test's own fixtures.
+import shutil
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ SCRIPT = REPO / "scripts" / "check_notebook_replay_results.py"
 sys.path.insert(0, str(HARNESS))
 import receipt as harness_receipt  # noqa: E402
 import setup_env  # noqa: E402
+import staging  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location("check_notebook_replay_results", SCRIPT)
 checker = importlib.util.module_from_spec(_SPEC)
@@ -50,6 +52,12 @@ def _kernel_receipt():
     receipt["pythonhome"] = None
     receipt["user_site"] = False
     return receipt
+
+
+def _sha(data):
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
 
 
 def _write(path, value):
@@ -97,9 +105,26 @@ class FakeRun:
         with open(self.capture / "oracle" / "final.pkl", "wb") as handle:
             pickle.dump(_adata(), handle)
         (self.capture / "provenance.json").write_text("[]")
+        notebooks = {}
+        for mode in ("successful", "replay"):
+            path = self.capture / "notebooks" / f"{mode}.ipynb"
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"cells": [], "mode": mode}))
+            notebooks[mode] = {
+                "file": f"notebooks/{mode}.ipynb",
+                "sha256": checker.sha256_file(path),
+            }
         (self.stage / "roots").mkdir(parents=True)
         (self.stage / "roots" / "input.h5ad").write_bytes(b"root")
-        (self.stage / "notebook.ipynb").write_text("{}")
+        mode = self.spec["mode"]
+        appended = [staging.PROBE_HEADER + "pass\n"] if self.spec.get("probe") else []
+        (self.stage / "notebook.ipynb").write_text(
+            staging.with_appended_cells(
+                (self.capture / "notebooks" / f"{mode}.ipynb").read_text(), appended
+            )
+            if appended
+            else (self.capture / "notebooks" / f"{mode}.ipynb").read_text()
+        )
         tools = [{"tool": "t", "arguments": {"a": 1}}]
         self.parameters = {
             "input_data": "/stage/roots/input.h5ad",
@@ -108,14 +133,20 @@ class FakeRun:
         _write(
             self.capture / "capture.json",
             {
-                "roots": {
-                    "input.h5ad": checker.sha256_file(
-                        self.stage / "roots" / "input.h5ad"
-                    )
-                },
+                "scenario": "t",
+                "roots": {"input.h5ad": _sha(b"root")},
+                "perturbed_roots": {"input.h5ad": _sha(b"perturbed")},
                 "tool_parameters": tools,
+                "notebooks": notebooks,
                 "recipe_sha256": checker.sha256_file(self.capture / "provenance.json"),
-                "declared_outputs": {OUTPUT: "oracle/final.pkl"},
+                "declared_outputs": {
+                    OUTPUT: {
+                        "file": "oracle/final.pkl",
+                        "sha256": checker.sha256_file(
+                            self.capture / "oracle" / "final.pkl"
+                        ),
+                    }
+                },
                 "receipt": receipt,
             },
         )
@@ -123,20 +154,27 @@ class FakeRun:
             self.stage / "stage.json",
             {
                 "scenario_id": sid,
-                "notebook_sha256": checker.sha256_file(self.stage / "notebook.ipynb"),
+                "capture": "t",
+                "mode": mode,
+                "stage_root": self.spec["stage_root"],
+                "appended_cells": appended,
                 "parameters": self.parameters,
                 "output_basename": "results",
             },
         )
         _adata().write_h5ad(self.outputs / OUTPUT)
+        kernel = dict(receipt, pid=4242)
         self.execution = {
             "status": "OK",
             "error": None,
             "pre_run_entries": [],
+            "pre_run_receipt_entries": [],
+            "unexpected_receipt_entries": [],
+            "kernel_pid_after": 4242,
             "parameters": self.parameters,
         }
         _write(self.receipts / "execution.json", self.execution)
-        _write(self.receipts / "kernel_receipt.json", receipt)
+        _write(self.receipts / "kernel_receipt.json", kernel)
         _write(
             self.run_dir / "run.json",
             {
@@ -144,14 +182,31 @@ class FakeRun:
                 "source_revision": "a" * 40,
                 "source_dirty": False,
                 "venv_python": receipt["executable"],
+                "source_packages": ["lobster-ai"] if lane == "container" else [],
             },
         )
-        _write(self.run_dir / "env.json", {"receipt": receipt})
+        _write(
+            self.run_dir / "env.json",
+            {
+                "verified_against_lock": lane == "container",
+                "receipt": receipt,
+                "distributions": [],
+                "source_distributions": (
+                    {"lobster-ai": "1.0.0"} if lane == "container" else {}
+                ),
+                "memory_peak_bytes": None,
+            },
+        )
 
     def update(self, path, **changes):
         data = json.loads(path.read_text())
         data.update(changes)
         _write(path, data)
+
+    def set_kernel(self, **changes):
+        kernel = json.loads((self.receipts / "kernel_receipt.json").read_text())
+        kernel.update(changes)
+        _write(self.receipts / "kernel_receipt.json", kernel)
 
     def build(self):
         return checker.build_report(
@@ -233,7 +288,7 @@ def test_linked_output_is_never_followed(run):
 
 def test_stale_outputs_are_refused(run):
     run.update(run.receipts / "execution.json", pre_run_entries=[OUTPUT])
-    with pytest.raises(checker.CheckError, match="not empty before the run"):
+    with pytest.raises(checker.CheckError, match="existed before the run"):
         run.build()
 
 
@@ -258,8 +313,33 @@ def test_failed_execution_is_not_compared(run, status):
     assert _report(wrapper)["claim_achieved"] is None
 
 
-def test_changed_root_is_a_binding_difference(run):
+def test_stage_holding_other_roots_than_approved_is_refused(run):
     (run.stage / "roots" / "input.h5ad").write_bytes(b"other root")
+    with pytest.raises(checker.CheckError, match="approved 'roots'"):
+        run.build()
+
+
+def _negative_spec():
+    return {
+        "capture": "t",
+        "mode": "replay",
+        "claim": "C-HIST",
+        "policy": "t",
+        "stage_root": "roots_perturbed",
+        "lanes": ["container"],
+        "expect": {
+            "verdict": "MISMATCH",
+            "execution": "OK",
+            "binding_differences": ["root_sha256"],
+            "outputs": [OUTPUT],
+            "claim_achieved": "C-EXEC",
+        },
+    }
+
+
+def test_perturbed_root_is_a_binding_difference(tmp_path):
+    run = FakeRun(tmp_path, spec=_negative_spec())
+    (run.stage / "roots" / "input.h5ad").write_bytes(b"perturbed")
     wrapper = run.build()
     assert wrapper["binding_differences"] == ["root_sha256"]
     assert _report(wrapper)["verdict"] == "MATCH"  # the outputs alone still agree
@@ -268,6 +348,13 @@ def test_changed_root_is_a_binding_difference(run):
 
 def test_changed_notebook_is_a_binding_difference(run):
     (run.stage / "notebook.ipynb").write_text('{"changed": true}')
+    assert run.build()["binding_differences"] == ["notebook_sha256"]
+
+
+def test_export_of_another_mode_is_a_binding_difference(run):
+    shutil.copyfile(
+        run.capture / "notebooks" / "successful.ipynb", run.stage / "notebook.ipynb"
+    )
     assert run.build()["binding_differences"] == ["notebook_sha256"]
 
 
@@ -283,9 +370,7 @@ def test_changed_parameters_are_a_binding_difference(run):
 
 
 def test_kernel_from_another_environment_is_a_binding_difference(run):
-    kernel = _kernel_receipt()
-    kernel["distributions_sha256"] = "0" * 64
-    _write(run.receipts / "kernel_receipt.json", kernel)
+    run.set_kernel(distributions_sha256="0" * 64)
     wrapper = run.build()
     assert "env_receipt_sha256" in wrapper["binding_differences"]
     assert wrapper["receipt_problems"]
@@ -334,24 +419,9 @@ def test_capture_refuses_a_reference_copy_it_cannot_fully_compare(tmp_path, valu
 
 
 def test_expected_negative_passes_and_unexpected_verdict_fails(tmp_path):
-    spec = {
-        "capture": "t",
-        "mode": "replay",
-        "claim": "C-HIST",
-        "policy": "t",
-        "stage_root": "roots",
-        "lanes": ["container"],
-        "expect": {
-            "verdict": "MISMATCH",
-            "execution": "OK",
-            "binding_differences": ["root_sha256"],
-            "outputs": [OUTPUT],
-            "claim_achieved": "C-EXEC",
-        },
-    }
-    run = FakeRun(tmp_path, spec=spec)
-    assert run.check()["t1"]  # a matching run is not the expected negative
+    run = FakeRun(tmp_path, spec=_negative_spec())
     (run.stage / "roots" / "input.h5ad").write_bytes(b"perturbed")
+    assert run.check()["t1"]  # equal outputs are not the expected negative
     _adata(shift=1.0).write_h5ad(run.outputs / OUTPUT)
     assert run.check() == {"t1": []}
 
@@ -522,3 +592,320 @@ def test_receipt_code_matches_the_harness_receipt():
 def test_harness_scripts_are_not_collected_as_tests():
     names = sorted(p.name for p in HARNESS.glob("*.py"))
     assert not [n for n in names if n.startswith("test_")]
+
+
+# --------------------------------------------------------------------------
+# Review findings (R7)
+# --------------------------------------------------------------------------
+
+
+def test_replaced_reference_copy_is_refused_before_unpickling(run):
+    """The same wrong result in the reference and the output must not MATCH."""
+    wrong = _adata(shift=0.5)
+    with open(run.capture / "oracle" / "final.pkl", "wb") as handle:
+        pickle.dump(wrong, handle)
+    wrong.write_h5ad(run.outputs / OUTPUT)
+    with pytest.raises(checker.CheckError, match="changed since capture"):
+        run.build()
+
+
+def test_reference_bytes_are_checked_before_pickle_runs(run, monkeypatch):
+    (run.capture / "oracle" / "final.pkl").write_bytes(b"not the sealed bytes")
+    monkeypatch.setattr(checker.pickle, "loads", lambda data: pytest.fail("unpickled"))
+    with pytest.raises(checker.CheckError, match="changed since capture"):
+        run.build()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"file": "../outside.pkl", "sha256": "0" * 64},
+        {"file": "/etc/passwd", "sha256": "0" * 64},
+        {"file": "oracle/final.pkl"},
+        "oracle/final.pkl",
+    ],
+)
+def test_malformed_or_escaping_reference_entries_are_refused(run, entry):
+    run.update(run.capture / "capture.json", declared_outputs={OUTPUT: entry})
+    with pytest.raises(checker.CheckError):
+        run.build()
+
+
+def test_linked_reference_path_is_refused(run):
+    real = run.root / "elsewhere.pkl"
+    shutil.move(run.capture / "oracle" / "final.pkl", real)
+    (run.capture / "oracle" / "final.pkl").symlink_to(real)
+    with pytest.raises(checker.CheckError, match="link"):
+        run.build()
+
+
+def test_capture_detects_an_export_that_changes_the_live_object(tmp_path):
+    import capture
+
+    policy = tmp_path / "policy.json"
+    _write(policy, POLICY)
+    live = _adata()
+    frozen = capture.freeze(live)
+    assert capture._oracle_problems(live, policy, OUTPUT, frozen) == []
+    live.X[0, 0] = -1.0  # what a mutating exporter would do
+    assert capture._oracle_problems(live, policy, OUTPUT, frozen)
+    sealed = pickle.loads(frozen)  # nosec B301 # bytes this test just produced
+    assert sealed.X[0, 0] == 0.0  # the sealed copy is unchanged
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("capture", "other"), ("mode", "successful"), ("stage_root", "roots_perturbed")],
+)
+def test_stage_must_be_the_approved_capture_mode_and_root(run, field, value):
+    run.update(run.stage / "stage.json", **{field: value})
+    with pytest.raises(checker.CheckError, match=f"staged {field}"):
+        run.build()
+
+
+def test_capture_of_another_scenario_is_refused(run):
+    run.update(run.capture / "capture.json", scenario="other")
+    with pytest.raises(checker.CheckError, match="capture is 'other'"):
+        run.build()
+
+
+def test_changed_captured_export_is_refused(run):
+    (run.capture / "notebooks" / "replay.ipynb").write_text('{"cells": [1]}')
+    with pytest.raises(checker.CheckError, match="captured export changed"):
+        run.build()
+
+
+def test_only_the_probe_may_append_a_cell(run):
+    run.update(run.stage / "stage.json", appended_cells=[staging.PROBE_HEADER])
+    with pytest.raises(checker.CheckError, match="only the probe"):
+        run.build()
+
+
+def test_probe_cell_must_be_the_approved_kind(tmp_path):
+    run = FakeRun(tmp_path, spec=_probe_spec())
+    run.update(run.stage / "stage.json", appended_cells=["import os\n"])
+    with pytest.raises(checker.CheckError, match="approved probe cell"):
+        run.build()
+
+
+def test_probe_notebook_must_be_the_export_plus_its_cell(tmp_path):
+    run = FakeRun(tmp_path, spec=_probe_spec())
+    _write(
+        run.outputs / "results_visibility.json",
+        {"forbidden_visible": [], "control_visible": True},
+    )
+    assert run.build()["binding_differences"] == []
+    data = json.loads((run.stage / "notebook.ipynb").read_text())
+    data["cells"].insert(0, data["cells"][-1])  # an extra cell elsewhere
+    (run.stage / "notebook.ipynb").write_text(json.dumps(data, indent=1))
+    assert run.build()["binding_differences"] == ["notebook_sha256"]
+
+
+def test_receipt_from_another_kernel_blocks_the_claim(run):
+    run.update(run.receipts / "execution.json", kernel_pid_after=999)
+    wrapper = run.build()
+    assert (
+        "the receipted kernel did not run the whole notebook"
+        in wrapper["receipt_problems"]
+    )
+    assert _report(wrapper)["claim_achieved"] is None
+
+
+def test_foreign_files_in_the_receipt_directory_block_the_claim(run):
+    run.update(
+        run.receipts / "execution.json", unexpected_receipt_entries=["forged.json"]
+    )
+    assert run.build()["receipt_problems"]
+
+
+def test_receipts_present_before_the_run_are_refused(run):
+    run.update(
+        run.receipts / "execution.json", pre_run_receipt_entries=["kernel_receipt.json"]
+    )
+    with pytest.raises(checker.CheckError, match="existed before the run"):
+        run.build()
+
+
+@pytest.mark.parametrize(
+    "changes,problem",
+    [
+        ({"verified_against_lock": False}, "not verified against the lock"),
+        ({"source_distributions": {}}, "source packages"),
+        (
+            {"source_distributions": {"lobster-ai": "1", "other": "1"}},
+            "source packages",
+        ),
+    ],
+)
+def test_unverified_environment_earns_no_claim(run, changes, problem):
+    run.update(run.run_dir / "env.json", **changes)
+    wrapper = run.build()
+    assert any(problem in p for p in wrapper["receipt_problems"]), wrapper[
+        "receipt_problems"
+    ]
+    assert _report(wrapper)["claim_achieved"] is None
+
+
+def test_environment_record_without_its_verification_field_fails(run):
+    env = json.loads((run.run_dir / "env.json").read_text())
+    del env["verified_against_lock"]
+    _write(run.run_dir / "env.json", env)
+    assert run.build()["receipt_problems"]
+
+
+def test_kernel_and_capture_agreeing_against_the_setup_environment_fails(run):
+    run.set_kernel(version="3.0.0 (other)")
+    kernel = json.loads((run.receipts / "kernel_receipt.json").read_text())
+    kernel.pop("pid")
+    run.update(run.capture / "capture.json", receipt=kernel)
+    wrapper = run.build()
+    assert wrapper["binding_differences"] == []
+    assert (
+        "kernel environment differs from the verified environment"
+        in wrapper["receipt_problems"]
+    )
+
+
+def test_unisolated_lane_does_not_need_a_lock_verified_environment(tmp_path):
+    run = FakeRun(tmp_path, lane="unisolated")
+    assert run.build()["receipt_problems"] == []
+
+
+# -- executing in one kernel ---------------------------------------------
+
+
+def test_harness_cells_wrap_the_export_without_changing_it(tmp_path):
+    import in_boundary
+    import nbformat
+
+    notebook = nbformat.v4.new_notebook()
+    notebook.cells = [
+        nbformat.v4.new_code_cell("x = 1"),
+        nbformat.v4.new_markdown_cell("m"),
+    ]
+    path = tmp_path / "n.ipynb"
+    nbformat.write(notebook, str(path))
+    before = path.read_bytes()
+    wrapped = in_boundary.instrumented(path)
+    assert [c.source for c in wrapped.cells[1:-1]] == ["x = 1", "m"]
+    assert all(
+        "replay-harness" in c.metadata["tags"]
+        for c in (wrapped.cells[0], wrapped.cells[-1])
+    )
+    assert path.read_bytes() == before
+
+
+def test_receipt_cell_reports_its_own_process(capsys):
+    import os
+
+    import in_boundary
+
+    exec(in_boundary.RECEIPT_CELL, {})  # nosec B102 # harness constant
+    exec(in_boundary.FINAL_CELL, {})  # nosec B102 # harness constant
+    printed = capsys.readouterr().out
+    cell = {"outputs": [{"output_type": "stream", "name": "stdout", "text": printed}]}
+    first = in_boundary.harness_output(cell)
+    assert first["pid"] == os.getpid()
+    assert set(harness_receipt.ENVIRONMENT_FIELDS) <= set(first)
+    assert in_boundary.harness_output({"outputs": []}) is None
+
+
+# -- teardown on every exit ----------------------------------------------
+
+
+class _Proc:
+    def __init__(self, wait):
+        self._wait = wait
+        self.pid = 4321
+        self.killed = False
+
+    def wait(self, timeout=None):
+        if isinstance(self._wait, BaseException):
+            raise self._wait
+        return self._wait
+
+    def poll(self):
+        return None if isinstance(self._wait, BaseException) and not self.killed else 0
+
+    def kill(self):
+        self.killed = True
+        self._wait = 0
+
+
+def _lane(monkeypatch, tmp_path, proc, inspect_codes=(1,)):
+    import run_lane
+
+    calls = []
+    codes = list(inspect_codes)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        code = (
+            codes.pop(0)
+            if cmd[:3] == ["docker", "container", "inspect"] and codes
+            else 0
+        )
+        return type("Done", (), {"returncode": code})()
+
+    monkeypatch.setattr(run_lane.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(run_lane.subprocess, "run", fake_run)
+    monkeypatch.setattr(run_lane.time, "sleep", lambda s: None)
+    (tmp_path / "logs").mkdir()
+    return run_lane, run_lane.Runner("container", tmp_path), calls
+
+
+@pytest.mark.parametrize("outcome", [0, 3, KeyboardInterrupt("cancelled")])
+def test_container_is_removed_and_confirmed_gone_on_every_exit(
+    monkeypatch, tmp_path, outcome
+):
+    proc = _Proc(outcome)
+    run_lane, runner, calls = _lane(monkeypatch, tmp_path, proc)
+    if isinstance(outcome, BaseException):
+        with pytest.raises(KeyboardInterrupt):
+            runner.run("capture", ["true"], [], check=False)
+        assert proc.killed
+    else:
+        assert runner.run("capture", ["true"], [], check=False) == outcome
+    assert ["docker", "rm", "--force"] == calls[0][:3]
+    assert calls[1][:3] == ["docker", "container", "inspect"]
+
+
+def test_timeout_removes_the_container_and_fails(monkeypatch, tmp_path):
+    proc = _Proc(subprocess_timeout())
+    run_lane, runner, calls = _lane(monkeypatch, tmp_path, proc)
+    with pytest.raises(run_lane.LaneError, match="exit code 124"):
+        runner.run("capture", ["true"], [])
+    assert ["docker", "rm", "--force"] == calls[0][:3]
+
+
+def test_container_that_will_not_go_away_fails_the_lane(monkeypatch, tmp_path):
+    proc = _Proc(0)
+    run_lane, runner, calls = _lane(
+        monkeypatch, tmp_path, proc, inspect_codes=[0] * 100
+    )
+    with pytest.raises(run_lane.LaneError, match="still present"):
+        runner.run("capture", ["true"], [], check=False)
+
+
+@pytest.mark.parametrize("outcome", [0, KeyboardInterrupt("cancelled")])
+def test_host_phase_kills_its_whole_process_group(monkeypatch, tmp_path, outcome):
+    import run_lane
+
+    killed = []
+    proc = _Proc(outcome)
+    monkeypatch.setattr(run_lane.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(run_lane.os, "killpg", lambda pid, sig: killed.append(pid))
+    (tmp_path / "logs").mkdir()
+    runner = run_lane.Runner("unisolated", tmp_path, python=sys.executable)
+    if isinstance(outcome, BaseException):
+        with pytest.raises(KeyboardInterrupt):
+            runner.run("capture", ["true"], [], check=False)
+    else:
+        runner.run("capture", ["true"], [], check=False)
+    assert killed == [proc.pid]
+
+
+def subprocess_timeout():
+    import subprocess  # nosec B404 # only the exception type
+
+    return subprocess.TimeoutExpired("docker", 1)

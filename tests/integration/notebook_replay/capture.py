@@ -7,8 +7,10 @@ will later run in. For one scenario it:
 2. runs real Lobster tools on a real ``DataManagerV2`` (only the agent's LLM is
    replaced, through ``factory_tools``);
 3. exports notebooks through the public export path, once per export mode;
-4. keeps the session's final object as the reference copy, before anything
-   lossy (such as an H5AD write) touches it;
+4. freezes the session's final object as the reference copy as soon as the
+   analysis finishes, before the exporter runs and before anything lossy
+   (such as an H5AD write) touches it, and fails if exporting changed the live
+   object afterwards;
 5. records hashes, tool parameters and an environment receipt in
    ``capture.json``.
 
@@ -120,6 +122,8 @@ def capture_s1(out):
     if dm.list_modalities()[-1] != final_name:
         raise RuntimeError(f"unexpected modalities: {dm.list_modalities()}")
     final = dm.get_modality(final_name)
+    declared = f"{OUTPUT_BASENAME}_{final_name}.h5ad"
+    frozen = freeze(final)  # before the exporter can touch anything
 
     notebooks = {}
     for mode in ("successful", "replay"):
@@ -134,7 +138,8 @@ def capture_s1(out):
 
     return {
         "final": final,
-        "final_name": final_name,
+        "frozen": frozen,
+        "declared": declared,
         "tool_parameters": [{"tool": name, "arguments": args} for name, args in calls],
         "notebooks": notebooks,
         "roots": {"input.h5ad": sha256_file(root)},
@@ -148,15 +153,27 @@ def capture_s1(out):
 SCENARIOS = {"s1": capture_s1}
 
 
-def _oracle_problems(final, policy_path, declared):
-    """Paths of the reference copy the comparator could not fully compare."""
+def freeze(value):
+    """The reference copy's bytes, taken from the live object right now."""
+    return pickle.dumps(value, protocol=5)
+
+
+def _oracle_problems(final, policy_path, declared, frozen=None):
+    """Ways the frozen copy fails to equal ``final`` under the policy.
+
+    Anything the comparator cannot compare counts as a problem, so an
+    unsupported type stops the capture. Called right after freezing (is the
+    copy faithful?) and again after exporting (did exporting change the live
+    object the copy was taken from?).
+    """
     from lobster.testing.replay_compare import compare
     from lobster.testing.replay_contract import ComparisonPolicy, SlotStatus
 
     policy = ComparisonPolicy.from_json(Path(policy_path).read_text())
-    copy = pickle.loads(pickle.dumps(final, protocol=5))  # nosec B301
-    tree = {"files": {declared: final}}
-    results = compare(tree, {"files": {declared: copy}}, policy)
+    frozen = freeze(final) if frozen is None else frozen
+    copy = pickle.loads(frozen)  # nosec B301 # bytes this process just produced
+    tree = {"files": {declared: copy}}
+    results = compare(tree, {"files": {declared: final}}, policy)
     problems = []
     for slot in results:
         if slot.status is not SlotStatus.MATCH:
@@ -178,14 +195,18 @@ def main(argv=None):
     receipt = collect_receipt()
     result = SCENARIOS[args.scenario](out)
 
-    declared = f"{OUTPUT_BASENAME}_{result['final_name']}.h5ad"
-    problems = _oracle_problems(result["final"], args.policy, declared)
+    declared, frozen = result["declared"], result["frozen"]
+    # The live object after exporting must still equal the copy frozen before
+    # it: an exporter that changed the session cannot redefine the reference.
+    problems = _oracle_problems(result["final"], args.policy, declared, frozen)
     if problems:
-        raise SystemExit(f"reference copy is not fully comparable: {problems[:10]}")
+        raise SystemExit(
+            f"reference copy is not comparable, or exporting changed the live "
+            f"object: {problems[:10]}"
+        )
     oracle = out / "oracle" / "final.pkl"
     oracle.parent.mkdir()
-    with open(oracle, "wb") as handle:
-        pickle.dump(result["final"], handle, protocol=5)
+    oracle.write_bytes(frozen)
 
     provenance = out / "provenance.json"
     provenance.write_text(
@@ -198,8 +219,9 @@ def main(argv=None):
         "tool_parameters": result["tool_parameters"],
         "notebooks": result["notebooks"],
         "recipe_sha256": sha256_file(provenance),
-        "declared_outputs": {declared: "oracle/final.pkl"},
-        "oracle_sha256": sha256_file(oracle),
+        "declared_outputs": {
+            declared: {"file": "oracle/final.pkl", "sha256": sha256_file(oracle)}
+        },
         "receipt": receipt,
         "memory_peak_bytes": memory_peak_bytes(),
     }

@@ -3,17 +3,22 @@
 Runs where the notebook runs (the container, or the host for an unisolated
 dev run). It:
 
-1. refuses to start unless the outputs directory is empty, so a stale file
-   can never pass as a new output;
+1. refuses to start unless the outputs and receipt directories are empty,
+   so a stale file can never pass as a new output or receipt;
 2. installs a private kernelspec (in the isolated Jupyter data directory)
    whose kernel gets single-threaded maths libraries and a fixed hash seed;
-3. runs a receipt notebook on that kernel, recording interpreter,
-   installed distributions and thread settings;
-4. runs the notebook with Papermill on the same kernel, with a per-cell
-   timeout, and records how execution ended.
+3. runs the staged notebook with Papermill on that kernel, with a per-cell
+   timeout, in ONE kernel: a harness cell first records the kernel's receipt
+   (interpreter, installed distributions, thread settings, process id), the
+   notebook's own cells follow unchanged, and a last harness cell records the
+   process id again, so the receipt describes the kernel that ran the export;
+4. reads both harness results from the executed cells' outputs and writes
+   ``execution.json``, ``kernel_receipt.json`` and ``executed.ipynb`` to the
+   receipt directory only after the kernel has stopped; any other file found
+   there marks the run as tampered.
 
-Writes ``execution.json``, ``kernel_receipt.json`` and ``executed.ipynb`` to
-the receipt directory, never to the outputs directory.
+The staged notebook itself is never modified; only the in-memory copy that
+executes carries the two harness cells.
 
 Usage: python in_boundary.py --notebook N --outputs O --receipt-dir R
        --parameters JSON [--cell-timeout S]
@@ -29,6 +34,20 @@ from pathlib import Path
 from receipt import RECEIPT_CODE, THREAD_ENV, memory_peak_bytes
 
 KERNEL_NAME = "lobster-replay"
+MARK = "REPLAY-HARNESS-RECEIPT "
+RECEIPT_CELL = (
+    RECEIPT_CODE
+    + "\nimport json as _replay_json\nimport os as _replay_os\n"
+    + "_replay_receipt = collect_receipt()\n"
+    + "_replay_receipt['pid'] = _replay_os.getpid()\n"
+    + f"print({MARK!r} + _replay_json.dumps(_replay_receipt, sort_keys=True))\n"
+    + "del collect_receipt, _replay_receipt, _replay_json, _replay_os\n"
+)
+FINAL_CELL = (
+    "import os as _replay_os\n"
+    + f"print({MARK!r} + '{{\"pid\": ' + str(_replay_os.getpid()) + '}}')\n"
+)
+OWN_FILES = {"execution.json", "kernel_receipt.json", "executed.ipynb"}
 
 
 def install_kernelspec():
@@ -45,22 +64,33 @@ def install_kernelspec():
     return spec_dir
 
 
-def receipt_notebook(path):
+def instrumented(path):
+    """The staged notebook with the two harness cells, in memory only."""
     import nbformat
 
-    code = RECEIPT_CODE + (
-        "\nimport json as _json\n"
-        f"with open({str(path)!r}, 'w') as _handle:\n"
-        "    _json.dump(collect_receipt(), _handle, sort_keys=True)\n"
-    )
-    notebook = nbformat.v4.new_notebook()
-    notebook.cells.append(nbformat.v4.new_code_cell(code))
+    notebook = nbformat.read(str(path), as_version=4)
+    first = nbformat.v4.new_code_cell(RECEIPT_CELL)
+    last = nbformat.v4.new_code_cell(FINAL_CELL)
+    for cell in (first, last):
+        cell.metadata["tags"] = ["replay-harness"]
+    notebook.cells = [first, *notebook.cells, last]
     notebook.metadata["kernelspec"] = {
         "name": KERNEL_NAME,
         "display_name": "Lobster replay",
         "language": "python",
     }
     return notebook
+
+
+def harness_output(cell):
+    """The JSON a harness cell printed, or None."""
+    for output in cell.get("outputs", []):
+        if output.get("output_type") != "stream" or output.get("name") != "stdout":
+            continue
+        for line in "".join(output.get("text", "")).splitlines():
+            if line.startswith(MARK):
+                return json.loads(line[len(MARK) :])
+    return None
 
 
 def _failure(exc):
@@ -83,37 +113,34 @@ def main(argv=None):
     record = {
         "parameters": parameters,
         "pre_run_entries": sorted(os.listdir(args.outputs)),
+        "pre_run_receipt_entries": sorted(os.listdir(args.receipt_dir)),
         "status": None,
         "error": None,
+        "kernel_pid_after": None,
+        "unexpected_receipt_entries": [],
     }
     started = time.monotonic()
+    executed = None
+    receipt = None
     try:
-        if record["pre_run_entries"]:
+        if record["pre_run_entries"] or record["pre_run_receipt_entries"]:
             record["status"] = "HARNESS_ERROR"
-            record["error"] = {"type": "StaleOutputs", "ename": "", "evalue": ""}
+            record["error"] = {"type": "StaleFiles", "ename": "", "evalue": ""}
             return 3
         import papermill
 
         install_kernelspec()
         work = Path(os.environ["TMPDIR"]) / "replay-cwd"  # set by the lane driver
         work.mkdir(parents=True, exist_ok=True)
-        receipt_path = args.receipt_dir / "kernel_receipt.json"
-        probe = args.receipt_dir / "receipt.ipynb"
+        source = Path(os.environ["TMPDIR"]) / "instrumented.ipynb"
         import nbformat
 
-        nbformat.write(receipt_notebook(receipt_path), str(probe))
-        papermill.execute_notebook(
-            str(probe),
-            str(args.receipt_dir / "receipt.executed.ipynb"),
-            kernel_name=KERNEL_NAME,
-            cwd=str(work),
-            execution_timeout=120,
-            progress_bar=False,
-        )
+        nbformat.write(instrumented(args.notebook), str(source))
+        result = Path(os.environ["TMPDIR"]) / "executed.ipynb"
         try:
-            papermill.execute_notebook(
-                str(args.notebook),
-                str(args.receipt_dir / "executed.ipynb"),
+            executed = papermill.execute_notebook(
+                str(source),
+                str(result),
                 parameters=parameters,
                 kernel_name=KERNEL_NAME,
                 cwd=str(work),
@@ -123,10 +150,35 @@ def main(argv=None):
             record["status"] = "OK"
         except Exception as exc:  # any notebook failure is recorded, not raised
             record["status"], record["error"] = _failure(exc)
+            # Papermill writes the partly executed notebook before raising.
+            done = result if result.is_file() else source
+            executed = nbformat.read(str(done), as_version=4)
+        harness = [
+            c for c in executed.cells if "replay-harness" in c.metadata.get("tags", [])
+        ]
+        receipt = harness_output(harness[0]) if harness else None
+        if record["status"] == "OK":
+            final = harness_output(harness[-1]) if len(harness) == 2 else None
+            record["kernel_pid_after"] = final and final.get("pid")
+        if receipt is None and record["status"] == "OK":
+            record["status"] = "HARNESS_ERROR"
+            record["error"] = {"type": "NoKernelReceipt", "ename": "", "evalue": ""}
         return 0
     finally:
+        # The kernel has stopped by now; nothing the notebook ran can write here.
         record["duration_s"] = round(time.monotonic() - started, 3)
         record["memory_peak_bytes"] = memory_peak_bytes()
+        record["unexpected_receipt_entries"] = sorted(
+            set(os.listdir(args.receipt_dir)) - OWN_FILES
+        )
+        if executed is not None:
+            import nbformat
+
+            nbformat.write(executed, str(args.receipt_dir / "executed.ipynb"))
+        if receipt is not None:
+            (args.receipt_dir / "kernel_receipt.json").write_text(
+                json.dumps(receipt, sort_keys=True, indent=1)
+            )
         (args.receipt_dir / "execution.json").write_text(
             json.dumps(record, sort_keys=True, indent=1)
         )
