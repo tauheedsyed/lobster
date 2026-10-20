@@ -35,6 +35,7 @@ def pipeline_export(
     output: OutputAdapter,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    mode: str = "successful",
 ) -> Optional[str]:
     """
     Export current session as Jupyter notebook.
@@ -44,6 +45,8 @@ def pipeline_export(
         output: OutputAdapter for rendering
         name: Notebook name (without extension). If None, prompts interactively.
         description: Optional notebook description. If None, prompts interactively.
+        mode: "successful" (curated, the default) or "replay" (every step
+            needed to reproduce the result).
 
     Returns:
         Summary string for conversation history, or None
@@ -88,8 +91,12 @@ def pipeline_export(
         if description is None:
             description = output.prompt("Description (optional)", default="")
 
-        _render_blocks(output, [section_block(body="Exporting notebook...")])
-        path = client.data_manager.export_notebook(name, description)
+        _render_blocks(
+            output, [section_block(body=f"Exporting notebook ({mode} mode)...")]
+        )
+        path = client.data_manager.export_notebook(
+            name, description, filter_strategy=mode
+        )
 
         _render_blocks(
             output,
