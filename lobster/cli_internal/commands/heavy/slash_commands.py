@@ -2582,12 +2582,21 @@ when they are started by agents or analysis workflows.
         subcommand = parts[1] if len(parts) > 1 else None
 
         if subcommand == "export":
-            args = parts[2:]
-            mode = "replay" if "--replay" in args else "successful"
-            args = [a for a in args if a != "--replay"]
-            name = args[0] if args else None
-            description = " ".join(args[1:]) if len(args) > 1 else None
-            return pipeline_export(client, output, name, description, mode=mode)
+            from lobster.cli_internal.commands.light.pipeline_commands import (
+                parse_export_args,
+            )
+
+            # Arguments come from the original text, so the name keeps its case.
+            try:
+                name, description, mode, force = parse_export_args(
+                    original_command.split()[2:]
+                )
+            except ValueError as e:
+                _render_structured_output(output, [alert_block(str(e), level="error")])
+                return f"Export failed: {e}"
+            return pipeline_export(
+                client, output, name, description, mode=mode, force=force
+            )
         elif subcommand == "list":
             return pipeline_list(client, output)
         elif subcommand == "run":
@@ -2920,6 +2929,10 @@ def _command_restore(client, output, pattern: str = "recent") -> Optional[str]:
 _UNKNOWN_COMMAND = object()  # Sentinel for unrecognized commands
 
 
+class _CommandFailed(Exception):
+    """A command ran and already reported its own failure; exit nonzero."""
+
+
 def _dispatch_command(cmd_str: str, client, output):
     """Route a command string to the appropriate shared command function.
 
@@ -3085,13 +3098,33 @@ def _dispatch_command(cmd_str: str, client, output):
                             style="info",
                         )
 
-                return None
+                raise _CommandFailed(
+                    "Pipeline export requires a session with analysis history."
+                )
 
-            # Provenance loaded - delegate to existing function
-            # Pass defaults since `lobster command` may run non-interactively
-            return pipeline_export(
-                client, output, name="analysis_workflow", description=""
+            from lobster.cli_internal.commands.light.pipeline_commands import (
+                parse_export_args,
             )
+
+            try:
+                name, description, mode, force = parse_export_args(
+                    args.split() if args else []
+                )
+            except ValueError as e:
+                output.print(str(e), style="error")
+                raise _CommandFailed(str(e)) from e
+            # Defaults instead of prompts: `lobster command` runs non-interactively.
+            result = pipeline_export(
+                client,
+                output,
+                name=name or "analysis_workflow",
+                description=description or "",
+                mode=mode,
+                force=force,
+            )
+            if not (result or "").startswith("Exported notebook:"):
+                raise _CommandFailed(result or "Export failed")
+            return result
 
         elif sub == "run":
             # Similar check for pipeline run
@@ -3410,6 +3443,20 @@ def command_cmd_impl(
 
     except typer.Exit:
         raise
+    except _CommandFailed as e:
+        # The command already printed its error; only JSON needs the envelope.
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "command": cmd_str,
+                        "data": output.to_dict(),
+                        "error": str(e),
+                    }
+                )
+            )
+        raise typer.Exit(1)
     except Exception as e:
         if json_output:
             print(

@@ -282,10 +282,11 @@ def test_cli_passes_requested_mode(command, mode, name, description):
     assert kwargs["mode"] == mode
 
 
-def test_cli_export_calls_data_manager_with_mode():
+def test_cli_export_calls_data_manager_with_mode(tmp_path):
     from lobster.cli_internal.commands.light.pipeline_commands import pipeline_export
 
     client = Mock()
+    client.data_manager.workspace_path = tmp_path
     client.data_manager.export_notebook.return_value = Path("/x/nb.ipynb")
     pipeline_export(client, Mock(), "nb", "", mode="replay")
 
