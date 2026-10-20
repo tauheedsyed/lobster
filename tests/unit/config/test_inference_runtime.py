@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import pickle
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -19,7 +20,11 @@ from lobster.config.agent_registry import (
     get_agent_registry_config,
     import_agent_factory,
 )
-from lobster.config.inference_context import INFERENCE_BINDING_VERSION, InferenceContext
+from lobster.config.inference_context import (
+    INFERENCE_BINDING_VERSION,
+    InferenceContext,
+    InferenceModelSelection,
+)
 from lobster.config.inference_runtime import (
     InferenceBoundGraph,
     capture_inference_binding,
@@ -539,3 +544,119 @@ def test_agent_client_new_identity_does_not_keep_initial_model_override(
     assert client.query("new identity")["success"]
     assert second.runtime.requests[0]["modelId"] == other.model_id
     assert not first.runtime.requests
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_client_model_selection_pins_new_graph_and_helpers(
+    context, no_ambient, tmp_path, explicit
+):
+    from lobster.core.client import AgentClient
+
+    first, second = Factory(), Factory()
+    client = AgentClient(
+        workspace_path=tmp_path,
+        inference_context=context,
+        model_factory=first,
+        provider_override=context.provider,
+        model_override=context.model_id,
+        manual_model_params={"model_id": context.model_id},
+    )
+    other = replace(
+        context,
+        model_id="anthropic.claude-sonnet-4-5-20250929-v1:0",
+        binding_version="version-b",
+    )
+    selection = (
+        InferenceModelSelection(other.provider, other.model_id) if explicit else None
+    )
+    client.bind_inference_run(
+        inference_context=other, model_factory=second, model_selection=selection
+    )
+    assert client.provider_override == other.provider
+    assert client.model_override == other.model_id
+    assert client.query("new resolved run")["success"]
+    for helper_class in helpers():
+        helper_class(data_manager=client.data_manager).llm.invoke("helper input")
+    assert all(captured is other for _, captured in second.calls)
+    assert {component for component, _ in second.calls} >= {
+        "supervisor",
+        "data_expert_assistant",
+        "metadata_validation_service",
+    }
+    assert len(second.runtime.requests) == 3
+    assert all(
+        request["modelId"] == other.model_id for request in second.runtime.requests
+    )
+    assert not first.runtime.requests
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        InferenceModelSelection("anthropic", "claude-sonnet-4-5-20250929"),
+        InferenceModelSelection("bedrock", "claude-sonnet-4-5-20250929"),
+        {"mode": "inherit"},
+        "inherit",
+    ],
+)
+def test_client_rejects_selection_before_mutation_or_model_creation(
+    context, no_ambient, tmp_path, selection
+):
+    from lobster.core.client import AgentClient
+
+    first, second = Factory(), Factory()
+    client = AgentClient(
+        workspace_path=tmp_path,
+        inference_context=context,
+        model_factory=first,
+    )
+    original_graph, original_metadata = client.graph, client.graph_metadata
+    original_binding = client.graph._binding
+    original_overrides = client.provider_override, client.model_override
+    with pytest.raises(InferenceRefused):
+        client.bind_inference_run(
+            inference_context=context, model_factory=second, model_selection=selection
+        )
+    assert not second.calls
+    assert client.graph is original_graph
+    assert client.graph_metadata is original_metadata
+    assert client.graph._binding is original_binding
+    assert client._inference_context is context
+    assert client._model_factory is first
+    assert not client._inference_run_consumed
+    assert (client.provider_override, client.model_override) == original_overrides
+    assert client.query("original unconsumed run remains usable")["success"]
+    assert len(first.runtime.requests) == 1
+    assert not second.runtime.requests
+
+
+@pytest.mark.parametrize("suspended", [False, True])
+def test_matching_selection_does_not_relax_active_or_suspended_guard(
+    context, no_ambient, tmp_path, suspended
+):
+    from lobster.core.client import AgentClient
+
+    first, second = Factory(), Factory()
+    client = AgentClient(
+        workspace_path=tmp_path,
+        inference_context=context,
+        model_factory=first,
+    )
+    original_graph = client.graph
+    binding = original_graph._binding
+    if suspended:
+        binding.suspend(True, "synthetic-interrupted-thread")
+    try:
+        with nullcontext() if suspended else binding.use():
+            with pytest.raises(InferenceRefused):
+                client.bind_inference_run(
+                    inference_context=context,
+                    model_factory=second,
+                    model_selection=InferenceModelSelection(
+                        context.provider, context.model_id
+                    ),
+                )
+        assert client.graph is original_graph
+        assert not second.calls
+    finally:
+        binding.suspend(False, "synthetic-interrupted-thread")

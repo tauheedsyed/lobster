@@ -77,6 +77,8 @@ def _is_main_agent_namespace(namespace: Any) -> bool:
 from lobster.config.inference_context import (
     BoundModelFactory,
     InferenceContext,
+    InferenceModelSelection,
+    resolve_inference_model,
     validate_inference_binding,
 )
 from lobster.config.settings import MODEL_PRICING
@@ -344,10 +346,17 @@ class AgentClient(BaseClient):
         }
 
     def bind_inference_run(
-        self, *, inference_context: InferenceContext, model_factory: BoundModelFactory
+        self,
+        *,
+        inference_context: InferenceContext,
+        model_factory: BoundModelFactory,
+        model_selection: InferenceModelSelection | None = None,
     ) -> None:
         """Rebuild for a new run after prior work drains, even with equal identity.
 
+        No selection inherits the host-resolved context and clears stale initial
+        overrides. Explicit selection must match that canonical pair before any
+        state mutation or model creation; aliases/policy are resolved by the host.
         The host supplies fresh authorization/accounting closures. Data, history,
         callbacks, store and checkpoint objects are retained; active or interrupted
         graphs cannot be replaced. Construction failure never restores an ambient
@@ -355,12 +364,13 @@ class AgentClient(BaseClient):
         """
         if not validate_inference_binding(inference_context, model_factory):
             raise InferenceRefused("context")
+        provider, model_id = resolve_inference_model(inference_context, model_selection)
         with self._inference_client_lock:
             self._inference_run_consumed = True
             options = {
                 **self._graph_options,
-                "provider_override": inference_context.provider,
-                "model_override": inference_context.model_id,
+                "provider_override": provider,
+                "model_override": model_id,
                 "manual_model_params": None,
             }
             graph, metadata = create_bioinformatics_graph(
@@ -371,8 +381,8 @@ class AgentClient(BaseClient):
             self.graph, self.graph_metadata = graph, metadata
             self._inference_context = inference_context
             self._model_factory = model_factory
-            self.provider_override = inference_context.provider
-            self.model_override = inference_context.model_id
+            self.provider_override = provider
+            self.model_override = model_id
             self._inference_run_consumed = False
 
     def query(

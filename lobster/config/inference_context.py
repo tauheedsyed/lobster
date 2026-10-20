@@ -135,6 +135,43 @@ class InferenceContext:
 
 
 @dataclass(frozen=True, slots=True)
+class InferenceModelSelection:
+    """An explicit native model pair already canonicalized by the trusted host.
+
+    Selection is an intent check, never a replacement for a resolved context.
+    Absence means inherit the supplied context, not local/provider defaults.
+    """
+
+    provider: str
+    model_id: str
+
+    def __post_init__(self):
+        for value in (self.provider, self.model_id):
+            if (
+                type(value) is not str
+                or not value
+                or value != value.strip()
+                or len(value) > 512
+            ):
+                raise InferenceRefused("context")
+
+
+def resolve_inference_model(
+    context: InferenceContext, selection: InferenceModelSelection | None = None
+) -> tuple[str, str]:
+    """Inherit or verify an exact explicit pair without ambient resolution."""
+    if not isinstance(context, InferenceContext):
+        raise InferenceRefused("context")
+    pair = context.provider, context.model_id
+    if selection is not None and (
+        not isinstance(selection, InferenceModelSelection)
+        or (selection.provider, selection.model_id) != pair
+    ):
+        raise InferenceRefused("context")
+    return pair
+
+
+@dataclass(frozen=True, slots=True)
 class RequestDescriptor:
     """Nonsecret identity and conservative bounds of one physical request."""
 
