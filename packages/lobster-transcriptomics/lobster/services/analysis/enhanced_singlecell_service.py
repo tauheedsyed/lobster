@@ -1595,6 +1595,7 @@ print(f"Annotated {adata.obs['cell_type'].nunique()} cell types "
             # Create IR for provenance tracking
             ir = self._create_marker_genes_ir(
                 groupby=groupby,
+                groups=groups,
                 method=method,
                 n_genes=n_genes,
                 min_fold_change=min_fold_change,
@@ -1616,8 +1617,13 @@ print(f"Annotated {adata.obs['cell_type'].nunique()} cell types "
         min_fold_change: float,
         min_pct: float,
         max_out_pct: float,
+        groups: Optional[List[str]] = None,
     ) -> AnalysisStep:
-        """Create AnalysisStep IR for marker gene detection with filtering."""
+        """Create AnalysisStep IR for marker gene detection with filtering.
+
+        ``groups`` restricts which groups are compared (and their order); it is
+        passed only when the session passed it, as the service does.
+        """
 
         code_template = """
 # Marker gene detection with specificity filtering
@@ -1629,6 +1635,9 @@ sc.tl.rank_genes_groups(
     groupby={{ groupby | string | repr }},
     method={{ method | string | repr }},
     n_genes={{ n_genes }},
+{%- if groups is not none %}
+    groups={{ groups | repr }},
+{%- endif %}
 )
 
 # Step 2: Filter for marker specificity
@@ -1657,6 +1666,7 @@ sc.tl.filter_rank_genes_groups(
             imports=["import scanpy as sc"],
             parameters={
                 "groupby": groupby,
+                "groups": list(groups) if groups is not None else None,
                 "method": method,
                 "n_genes": n_genes,
                 "min_fold_change": min_fold_change,
