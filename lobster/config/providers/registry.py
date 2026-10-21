@@ -252,9 +252,13 @@ class ProviderRegistry:
                 continue
 
             try:
-                # Use static KNOWN_MODELS attribute if available (avoids unnecessary calls)
+                # Pricing is read at settings import time, so it must never need
+                # the network: use a static catalog. Providers with a live
+                # catalog expose a static fallback via ``static_models()``.
                 if hasattr(provider, "KNOWN_MODELS"):
                     models = provider.KNOWN_MODELS
+                elif callable(getattr(provider, "static_models", None)):
+                    models = provider.static_models()
                 else:
                     models = provider.list_models()
 
