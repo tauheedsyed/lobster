@@ -93,7 +93,7 @@ class Settings:
 
         # Web server settings (for 'lobster serve' FastAPI server)
         self.PORT = int(os.environ.get("PORT", "8000"))
-        self.HOST = os.environ.get("HOST", "0.0.0.0")
+        self.HOST = os.environ.get("HOST", "0.0.0.0")  # nosec B104 # container default; override with HOST
         self.DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
         # Data processing settings
@@ -417,6 +417,30 @@ def reset_model_pricing_cache() -> None:
     """
     global _MODEL_PRICING_CACHE
     _MODEL_PRICING_CACHE = None
+
+
+def register_model_pricing(models) -> int:
+    """Merge priced ``ModelInfo`` entries into the live pricing table, in place.
+
+    Pricing is built from static catalogs at import (no network). Providers with a
+    live catalog call this after an explicit fetch so those models are priced too.
+    ``MODEL_PRICING`` is updated in place, so consumers holding a reference see it.
+    Existing entries are kept. Returns the number of entries added.
+    """
+    table = get_model_pricing()
+    added = 0
+    for model in models:
+        cost = getattr(model, "input_cost_per_million", None)
+        if not cost or cost <= 0 or model.name in table:
+            continue
+        table[model.name] = {
+            "input_per_million": cost,
+            "output_per_million": getattr(model, "output_cost_per_million", None)
+            or 0.0,
+            "display_name": model.display_name,
+        }
+        added += 1
+    return added
 
 
 # Backward compatibility: MODEL_PRICING as module-level dict

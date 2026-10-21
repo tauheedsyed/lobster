@@ -311,6 +311,14 @@ class OpenRouterProvider(ILLMProvider):
         """Get the recommended default model."""
         return _DEFAULT_MODEL
 
+    def static_models(self) -> List[ModelInfo]:
+        """Curated catalog with pricing. Never touches the network.
+
+        Used for import-time pricing; ``list_models()`` fetches the live catalog
+        on first explicit use.
+        """
+        return list(_FALLBACK_MODELS)
+
     def list_models(self) -> List[ModelInfo]:
         """
         List available models from OpenRouter.
@@ -336,6 +344,7 @@ class OpenRouterProvider(ILLMProvider):
             models = [self._parse_model(m) for m in data if m.get("id")]
             OpenRouterProvider._models_cache = models
             logger.debug(f"Fetched {len(models)} models from OpenRouter API")
+            self._merge_live_pricing(models)
             return models
 
         except ImportError:
@@ -345,6 +354,16 @@ class OpenRouterProvider(ILLMProvider):
 
         OpenRouterProvider._models_cache = list(_FALLBACK_MODELS)
         return OpenRouterProvider._models_cache
+
+    @staticmethod
+    def _merge_live_pricing(models: List[ModelInfo]) -> None:
+        """Price live-catalog models in the shared pricing table (best effort)."""
+        try:
+            from lobster.config.settings import register_model_pricing
+
+            register_model_pricing(models)
+        except Exception as e:  # pricing must never break model listing
+            logger.debug(f"Could not merge live OpenRouter pricing ({e})")
 
     def _parse_model(self, data: dict) -> ModelInfo:
         """Parse a single model entry from the OpenRouter API response."""
