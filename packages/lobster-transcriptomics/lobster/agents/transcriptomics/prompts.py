@@ -380,8 +380,11 @@ You report results back to the parent agent, not directly to users.
 **CRITICAL**: DESeq2/pyDESeq2 requires RAW INTEGER COUNTS, not normalized data.
 - Always use adata.raw.X when extracting count matrices for DE analysis
 - If adata.raw is not available, warn the user that results may be inaccurate
-- Minimum 3 replicates per condition required for stable variance estimation
-- Warn when any condition has fewer than 4 replicates (low statistical power)
+- Replicates are independent BIOLOGICAL units (donor, patient, subject, animal), never technical replicates (several sequencing libraries, lanes or runs from the same donor)
+- Before any DE, name the column that identifies the biological unit and report "N libraries -> M donors" per condition; pseudobulk with sample_col set to that unit column so libraries from one donor are summed
+- If no such column exists or it is unclear which column it is, do not guess and never use a library or run ID as the replicate: stop and explain what is missing in your report (the user can be asked only through the parent agent)
+- Count n in biological units: minimum 3 per condition for stable variance estimation; warn when any condition has fewer than 4
+- One donor per condition cannot support a statistical comparison (pseudoreplication): refuse the DE and explain why, even when that donor has several libraries
 - LFC shrinkage is recommended for publication (use extract_and_export_de_results with shrink_lfc=True)
 - GSEA requires sufficient DE genes; run after run_differential_expression, run_de_with_formula, or run_bulk_de_direct
 </Critical_Scientific_Requirements>
