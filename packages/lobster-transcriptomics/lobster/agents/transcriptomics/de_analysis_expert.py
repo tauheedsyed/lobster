@@ -96,6 +96,137 @@ def _plain(value: Any) -> Any:
     return value
 
 
+# Column names that identify an independent biological unit. Matched after
+# lower-casing, mapping spaces/dashes to "_" and removing an "_id"/"id"/"_name" suffix.
+_BIOLOGICAL_UNIT_NAMES = (
+    "donor",
+    "patient",
+    "subject",
+    "individual",
+    "participant",
+    "animal",
+    "mouse",
+)
+
+
+def _unit_name_root(column: Any) -> str:
+    name = str(column).strip().lower().replace(" ", "_").replace("-", "_")
+    for suffix in ("_id", "_name", "id"):
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)].rstrip("_")
+            break
+    return name
+
+
+def _find_biological_unit_column(metadata: pd.DataFrame, groupby: str) -> Optional[str]:
+    """Return the column naming the biological unit (donor, patient, ...), if any.
+
+    If several candidates exist, the one with the fewest distinct values is used:
+    counting fewer units can only make the replicate check stricter.
+    """
+    candidates = [
+        col
+        for col in metadata.columns
+        if col != groupby and _unit_name_root(col) in _BIOLOGICAL_UNIT_NAMES
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda col: metadata[col].nunique(dropna=True))
+
+
+def _count_biological_replicates(
+    metadata: pd.DataFrame,
+    groupby: str,
+    min_replicates: int = 3,
+) -> Dict[str, Any]:
+    """Count replicates per group in independent biological units, not rows.
+
+    Rows are samples or sequencing libraries. Several libraries from one donor are
+    technical replicates: counting them as biological replicates inflates n and
+    the confidence of every downstream test (pseudoreplication). When a donor-like
+    column exists, n is the number of distinct units per group.
+    """
+    unit_col = _find_biological_unit_column(metadata, groupby)
+    row_counts = metadata[groupby].value_counts().to_dict()
+    if unit_col is not None:
+        unit_counts = (
+            metadata.groupby(groupby, observed=True)[unit_col]
+            .nunique(dropna=True)
+            .to_dict()
+        )
+    else:
+        unit_counts = dict(row_counts)
+
+    validation: Dict[str, Any] = {
+        "valid": True,
+        "group_counts": unit_counts,
+        "row_counts": row_counts,
+        "unit_col": unit_col,
+        "summary": [],
+        "warnings": [],
+        "errors": [],
+    }
+    unit_label = f"donor(s) in column '{unit_col}'" if unit_col else "samples"
+    kind = "biological replicates" if unit_col else "replicates"
+
+    if unit_col is None:
+        validation["warnings"].append(
+            "No biological-unit column (donor/patient/subject/individual/animal) "
+            "found, so replicates are counted as rows. Confirm each row is an "
+            "independent biological unit; technical libraries from one donor are "
+            "not biological replicates."
+        )
+
+    for group, n_units in unit_counts.items():
+        n_rows = int(row_counts.get(group, 0))
+        n_units = int(n_units)
+        if unit_col is not None:
+            validation["summary"].append(
+                f"Group '{group}': {n_rows} libraries/samples -> {n_units} {unit_label}"
+            )
+        if n_units < min_replicates:
+            validation["valid"] = False
+            detail = (
+                f" ({n_rows} libraries/samples -> {n_units} {unit_label}; "
+                "libraries from the same donor are technical, not biological, "
+                "replicates)"
+                if unit_col is not None and n_rows != n_units
+                else ""
+            )
+            if unit_col is not None and n_units == 1:
+                detail += (
+                    "; a single donor cannot support a statistical comparison "
+                    "(pseudoreplication)"
+                )
+            validation["errors"].append(
+                f"Group '{group}' has only {n_units} {kind}{detail} "
+                f"(minimum {min_replicates} required for stable variance estimation)"
+            )
+            continue
+        if unit_col is not None and n_rows > n_units:
+            validation["warnings"].append(
+                f"Group '{group}': {n_rows} rows come from {n_units} donor(s). Sum "
+                f"technical libraries per donor first (create_pseudobulk_matrix "
+                f"with sample_col='{unit_col}'), otherwise the test treats "
+                "technical replicates as independent."
+            )
+        if n_units < 4:
+            validation["warnings"].append(
+                f"Group '{group}' has {n_units} {kind}. "
+                f"Statistical power may be limited. 4+ replicates recommended."
+            )
+
+    return validation
+
+
+def _replicate_summary_text(validation: Dict[str, Any]) -> str:
+    """Markdown lines reporting libraries/samples -> donors per group, if known."""
+    if not validation.get("summary"):
+        return ""
+    lines = "".join(f"\n- {line}" for line in validation["summary"])
+    return f"\n\n**Biological replicates (n counted in donors):**{lines}"
+
+
 def _de_result_keys(adata) -> List[str]:
     """Include explicit historical choices, but never infer their chronology."""
     return sorted(
@@ -614,41 +745,12 @@ def de_analysis_expert(
         groupby: str,
         min_replicates: int = 3,  # SCIENTIFIC FIX: Changed from 2 to 3
     ) -> Dict[str, Any]:
+        """Validate replicate counts per condition, in biological units.
+
+        See ``_count_biological_replicates``: n is the number of distinct donors
+        (or patients, subjects, animals) per group when such a column exists.
         """
-        Validate replicate counts per condition.
-
-        Args:
-            metadata: Sample metadata DataFrame
-            groupby: Column name for grouping
-            min_replicates: Minimum required replicates (default: 3)
-
-        Returns:
-            Dict with validation results
-        """
-        group_counts = metadata[groupby].value_counts().to_dict()
-
-        validation = {
-            "valid": True,
-            "group_counts": group_counts,
-            "warnings": [],
-            "errors": [],
-        }
-
-        for group, count in group_counts.items():
-            if count < min_replicates:
-                validation["valid"] = False
-                validation["errors"].append(
-                    f"Group '{group}' has only {count} replicates "
-                    f"(minimum {min_replicates} required for stable variance estimation)"
-                )
-            # SCIENTIFIC FIX: Add warning when n < 4
-            elif count < 4:
-                validation["warnings"].append(
-                    f"Group '{group}' has {count} replicates. "
-                    f"Statistical power may be limited. 4+ replicates recommended."
-                )
-
-        return validation
+        return _count_biological_replicates(metadata, groupby, min_replicates)
 
     # -------------------------
     # PSEUDOBULK TOOLS
@@ -672,7 +774,12 @@ def de_analysis_expert(
 
         Args:
             modality_name: Name of single-cell modality to aggregate
-            sample_col: Column containing sample identifiers
+            sample_col: Column identifying the BIOLOGICAL replicate (donor,
+                patient, animal), NOT the sequencing library or run. All cells
+                and libraries from the same donor are summed into one pseudobulk
+                sample. If no such column exists or it is unclear which one it
+                is, stop and ask (or, when you cannot ask, stop and explain);
+                never pass a library or run ID here.
             celltype_col: Column containing cell type identifiers
             layer: Layer to use for aggregation (default: None, uses raw counts)
             min_cells: Minimum cells per sample-celltype combination
@@ -907,6 +1014,7 @@ def de_analysis_expert(
                     else "LOW POWER" if count >= 3 else "INSUFFICIENT"
                 )
                 response += f"\n- {group}: {count} replicates ({status})"
+            response += _replicate_summary_text(replicate_validation)
 
             if replicate_validation["warnings"]:
                 response += "\n\n**Warnings:**"
@@ -1234,6 +1342,8 @@ def de_analysis_expert(
                     response += f"\n**Saved to**: {save_path}"
 
                 response += f"\n**Access detailed results**: adata.uns['{de_stats['de_results_key']}']\n"
+
+            response += _replicate_summary_text(replicate_validation)
 
             # Add replicate warnings if any
             if replicate_validation["warnings"]:
@@ -1672,6 +1782,7 @@ def de_analysis_expert(
                     else "LOW POWER" if count >= 3 else "INSUFFICIENT"
                 )
                 response += f"- {group}: {count} replicates ({status})\n"
+            response += _replicate_summary_text(replicate_validation)
 
             if suggestions:
                 response += "\n**Alternative Formulas:**\n"
@@ -3025,6 +3136,8 @@ def de_analysis_expert(
 
             if save_result:
                 response += f"\n**Saved to**: {save_path}"
+
+            response += _replicate_summary_text(replicate_validation)
 
             # Add replicate warnings
             if replicate_validation["warnings"]:

@@ -10,6 +10,45 @@ from typing import Union
 import numpy as np
 import scipy.sparse as spr
 
+# Appended to every input-domain rejection. The point of naming the likely upstream
+# cause is that the caller is almost never wrong about deviance -- they are wrong
+# about which matrix they handed it.
+_DOMAIN_HINT = (
+    "calculate_deviance expects RAW COUNTS: non-negative and finite. Values "
+    "outside that domain normally mean the matrix was normalized, "
+    "log-transformed, scaled or batch-corrected upstream. Deviance computed on "
+    "such input returns a finite number that looks valid and means nothing, so "
+    "this is raised rather than warned. Pass the raw counts (e.g. "
+    "``adata.raw.X``, or ``adata.layers['counts']``)."
+)
+
+
+def _reject_non_count_values(values: np.ndarray) -> None:
+    """Raise ``ValueError`` if any stored value is negative or non-finite.
+
+    Called with the *stored* values of one CSR row block, so it costs one boolean
+    temporary per block, never one for the whole matrix. Structural and
+    explicitly-stored zeros are legal: zero is a non-negative, finite count and
+    contributes nothing to the deviance.
+    """
+    if values.size == 0:
+        return
+    finite = np.isfinite(values)
+    if not finite.all():
+        raise ValueError(
+            f"calculate_deviance received {int((~finite).sum())} non-finite "
+            f"value(s) (NaN or +/-inf) in a block of {values.size} stored values. "
+            + _DOMAIN_HINT
+        )
+    smallest = float(values.min())
+    if smallest < 0.0:
+        raise ValueError(
+            f"calculate_deviance received {int((values < 0).sum())} negative "
+            f"value(s) in a block of {values.size} stored values; minimum is "
+            f"{smallest!r}. " + _DOMAIN_HINT
+        )
+
+
 #: Target number of stored values per row block. Peak memory is driven by NONZEROS per
 #: block, not rows, so a fixed row count is the wrong unit: the same number of rows can
 #: have very different densities. Deriving the row count from the input's own density
@@ -56,6 +95,11 @@ def calculate_deviance(
     Returns:
         np.ndarray: Deviance score for each gene (higher = more variable)
                    Shape: (n_genes,)
+
+    Raises:
+        ValueError: if any entry is negative or non-finite (not a raw count
+            matrix). The message names the offending statistic and the expected
+            domain.
 
     Example:
         >>> import scanpy as sc
@@ -117,6 +161,11 @@ def calculate_deviance(
         if block.nnz == 0:
             continue
         values = block.data.astype(np.float64, copy=False)
+        # Count domain is enforced, not assumed: negative or non-finite input means
+        # this is not a count matrix, and dropping those entries would silently change
+        # the returned gene set. Only stored values need checking; absent entries are
+        # zero, which is a legal count.
+        _reject_non_count_values(values)
         cell_totals[start : start + block.shape[0]] += np.bincount(
             block.row, weights=values, minlength=block.shape[0]
         )
@@ -152,9 +201,9 @@ def calculate_deviance(
         # matrix may hold EXPLICIT zeros (routine after filtering or arithmetic), and
         # `0 * log(0/E)` evaluates to `0 * -inf` = NaN rather than 0. Negative values --
         # which reach this function when log-transformed or scaled data is passed by
-        # mistake -- would give `log(negative)` = NaN and inf. The old floor masked both
-        # by clamping to 1e-10; dropping them is exact instead, since an unobserved count
-        # contributes exactly zero to the deviance (x*log(x) -> 0 as x -> 0).
+        # mistake -- are rejected above, before the marginals. Dropping zeros here is
+        # exact, since an unobserved count contributes exactly zero to the deviance
+        # (x*log(x) -> 0 as x -> 0).
         positive = x > 0
         if not positive.all():
             x = x[positive]
