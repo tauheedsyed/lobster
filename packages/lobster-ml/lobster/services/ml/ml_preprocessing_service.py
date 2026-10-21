@@ -15,9 +15,9 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData
 
+from lobster.core.utils.dtype_guards import is_text_dtype
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.ml.sparse_utils import (
-    SparseConversionError,
     check_sparse_conversion_safe,
 )
 from lobster.utils.logger import get_logger
@@ -45,7 +45,7 @@ def infer_task_type(y: np.ndarray) -> Tuple[str, float]:
         ('regression', 0.9)
     """
     # Categorical dtype is definitively classification
-    if y.dtype == object or str(y.dtype) == "category":
+    if is_text_dtype(y) or str(y.dtype) == "category":
         return ("classification", 1.0)
 
     n_unique = len(np.unique(y))
@@ -523,7 +523,7 @@ n_original = X.shape[0]
 
 # Encode target if categorical
 label_encoder_classes = None
-if y.dtype == object or str(y.dtype) == "category":
+if y.dtype.kind in "OSU" or str(y.dtype) == "category":
     le = LabelEncoder()
     y = le.fit_transform(y)
     label_encoder_classes = le.classes_.tolist()
@@ -1116,8 +1116,8 @@ print(f"  Total new columns: {total_new_cols}")
                 )
             else:
                 error_msg = (
-                    f"task_type parameter required for handle_class_imbalance. "
-                    f"Use infer_task_type(y) for guidance."
+                    "task_type parameter required for handle_class_imbalance. "
+                    "Use infer_task_type(y) for guidance."
                 )
             raise ValueError(error_msg)
 
@@ -1152,13 +1152,10 @@ print(f"  Total new columns: {total_new_cols}")
         from sklearn.preprocessing import LabelEncoder
 
         label_encoder_classes = None
-        if y.dtype == object or str(y.dtype) == "category":
+        if is_text_dtype(y) or str(y.dtype) == "category":
             le = LabelEncoder()
             y = le.fit_transform(y)
             label_encoder_classes = le.classes_.tolist()
-            class_names = label_encoder_classes
-        else:
-            class_names = list(map(str, np.unique(y)))
 
         # Calculate class distribution
         unique, counts = np.unique(y, return_counts=True)
@@ -1391,7 +1388,7 @@ print(f"  Total new columns: {total_new_cols}")
             columns = [
                 col
                 for col in adata.obs.columns
-                if adata.obs[col].dtype == object
+                if is_text_dtype(adata.obs[col])
                 or str(adata.obs[col].dtype) == "category"
             ]
 
@@ -1487,7 +1484,7 @@ print(f"  Total new columns: {total_new_cols}")
         }
 
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
 
             result["imblearn_available"] = True
         except ImportError:

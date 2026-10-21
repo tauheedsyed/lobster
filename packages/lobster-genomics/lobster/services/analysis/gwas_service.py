@@ -442,7 +442,7 @@ class GWASService:
             # sgkit's window_by_variant needs both variant_contig indices AND
             # a contig_id variable (or contigs attr) to resolve contig metadata.
             if "CHROM" in adata.var.columns:
-                chroms = adata.var["CHROM"].astype(str).values
+                chroms = adata.var["CHROM"].astype(str).to_numpy()
                 unique_chroms = np.unique(chroms)
                 chrom_to_idx = {c: i for i, c in enumerate(unique_chroms)}
                 variant_contig = np.array([chrom_to_idx[c] for c in chroms], dtype=int)
@@ -891,8 +891,8 @@ class GWASService:
         ds = xr.Dataset(
             {
                 "call_genotype": (["variants", "samples", "ploidy"], gt_diploid),
-                "sample_id": (["samples"], adata.obs.index.values),
-                "variant_id": (["variants"], adata.var.index.values),
+                "sample_id": (["samples"], adata.obs.index.to_numpy()),
+                "variant_id": (["variants"], adata.var.index.to_numpy()),
             },
             # Add the 'alleles' coordinate as required by sgkit
             coords={
@@ -916,12 +916,12 @@ class GWASService:
 
         # Add phenotype if provided
         if phenotype:
-            ds[phenotype] = (["samples"], adata.obs[phenotype].values)
+            ds[phenotype] = (["samples"], adata.obs[phenotype].to_numpy())
 
         # Add covariates if provided
         if covariates:
             for cov in covariates:
-                ds[cov] = (["samples"], adata.obs[cov].values)
+                ds[cov] = (["samples"], adata.obs[cov].to_numpy())
 
         return ds
 
@@ -1128,18 +1128,18 @@ gt_diploid[:, :, 0][mask_missing] = -1; gt_diploid[:, :, 1][mask_missing] = -1
 
 ds = xr.Dataset({
     'call_genotype': (['samples', 'variants', 'ploidy'], gt_diploid),
-    'sample_id': (['samples'], adata.obs.index.values),
-    'variant_id': (['variants'], adata.var.index.values),
+    'sample_id': (['samples'], adata.obs.index.to_numpy()),
+    'variant_id': (['variants'], adata.var.index.to_numpy()),
 })
 
 # Compute dosage (sum of alleles)
 ds['call_dosage'] = ds['call_genotype'].sum(dim='ploidy')
 
 # Add phenotype and covariates
-ds[{{ phenotype | repr }}] = (['samples'], adata.obs[{{ phenotype | repr }}].values)
+ds[{{ phenotype | repr }}] = (['samples'], adata.obs[{{ phenotype | repr }}].to_numpy())
 {% if covariates %}
 {% for cov in covariates %}
-ds[{{ cov | repr }}] = (['samples'], adata.obs[{{ cov | repr }}].values)
+ds[{{ cov | repr }}] = (['samples'], adata.obs[{{ cov | repr }}].to_numpy())
 {% endfor %}
 {% endif %}
 
@@ -1302,8 +1302,8 @@ gt_diploid[:, :, 0][mask_missing] = -1; gt_diploid[:, :, 1][mask_missing] = -1
 
 ds = xr.Dataset({
     'call_genotype': (['samples', 'variants', 'ploidy'], gt_diploid),
-    'sample_id': (['samples'], adata.obs.index.values),
-    'variant_id': (['variants'], adata.var.index.values),
+    'sample_id': (['samples'], adata.obs.index.to_numpy()),
+    'variant_id': (['variants'], adata.var.index.to_numpy()),
 })
 
 {% if ld_prune %}
@@ -1396,7 +1396,7 @@ import numpy as np
 # ... (genotype conversion as in GWAS code template)
 
 # Add variant_contig for windowing
-chroms = adata.var['CHROM'].astype(str).values
+chroms = adata.var['CHROM'].astype(str).to_numpy()
 unique_chroms = np.unique(chroms)
 chrom_to_idx = {c: i for i, c in enumerate(unique_chroms)}
 ds['variant_contig'] = ('variants', np.array([chrom_to_idx[c] for c in chroms], dtype=int))

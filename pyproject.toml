@@ -29,10 +29,8 @@ classifiers = [
 keywords = ["bioinformatics", "RNA-seq", "single-cell", "AI", "machine-learning", "data-analysis", "genomics"]
 dependencies = [
     # Core data
-    # pandas<3: PDEP-14 makes string columns report dtype "str", so `col.dtype == object`
-    # is False and metadata columns get coerced with errors="coerce" into all-NaN.
-    "pandas>=1.5.0,<3",
-    "numpy>=2.2,<2.5",
+    "pandas>=1.5.0",
+    "numpy>=2.2",
     "scipy>=1.10.0",
     "scikit-learn>=1.3.0",
     "anndata>=0.9.0",
@@ -62,7 +60,7 @@ dependencies = [
     # scheme:// strings to it, incl. via allow-listed custom code execution.
     "fsspec>=2026.6.0",
     "xmltodict>=0.13.0",
-    "lxml>=4.9.0",
+    "lxml>=6.1.0",
     # HTTP
     "requests>=2.31.0",
     "httpx>=0.27.0",
@@ -107,7 +105,7 @@ all-providers = [
 # =============================================================================
 # Document Intelligence (optional, installed via `lobster init`)
 # =============================================================================
-docling = ["docling>=2.60.0", "docling-core>=2.50.0"]
+docling = ["docling>=2.94.0", "docling-core>=2.74.1"]
 
 # =============================================================================
 # Legacy HDF5 support via PyTables (pandas read_hdf)
@@ -117,7 +115,7 @@ hdf5 = ["tables>=3.8.0"]
 # =============================================================================
 # Server mode
 # =============================================================================
-server = ["fastapi>=0.100.0", "uvicorn>=0.23.0", "python-multipart>=0.0.20"]
+server = ["fastapi>=0.100.0", "uvicorn>=0.23.0", "python-multipart>=0.0.30"]
 
 # =============================================================================
 # Terminal UI (classic Rich/Textual fallback — Go TUI is in core dependencies)

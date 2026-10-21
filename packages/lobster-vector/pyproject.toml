@@ -36,7 +36,7 @@ dependencies = [
 [project.optional-dependencies]
 chromadb = ["chromadb>=1.0.0"]
 openai = ["openai>=1.0.0"]
-local = ["sentence-transformers>=2.2.0", "torch>=2.0"]
+local = ["sentence-transformers>=5.6.0", "torch>=2.0"]
 cohere = ["cohere>=5.0.0"]
 graph = ["obonet>=0.3.0", "networkx>=3.0"]
 full = ["lobster-vector[chromadb,openai,local,cohere,graph]"]
