@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lobster-ai-tui"
-version = "1.1.429"
+version = "1.1.430"
 description = "Go TUI binary for Lobster AI (Charm/BubbleTea)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
