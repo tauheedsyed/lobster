@@ -245,18 +245,16 @@ class TestDegenerateInputsStayFinite:
         assert np.isfinite(scores).all()
         assert np.allclose(scores, _previous_implementation(X), rtol=1e-6)
 
-    def test_negative_values_do_not_produce_nan(self):
+    def test_negative_values_are_rejected(self):
         """Reached when log-transformed or scaled data is passed by mistake.
 
-        The old floor clamped these to 1e-10; skipping them is the exact analogue, since
-        a non-positive count has no deviance contribution. What matters is that the
-        function does not emit NaN into a gene ranking.
+        Silently skipping negatives would hand back a plausible gene ranking computed
+        on a matrix that is not counts, so the function raises instead.
         """
         X = spr.csr_matrix(np.array([[-1.0, 2.0], [3.0, -4.0]]))
 
-        scores = calculate_deviance(X)
-
-        assert np.isfinite(scores).all()
+        with pytest.raises(ValueError, match="negative"):
+            calculate_deviance(X)
 
     def test_all_zero_matrix_returns_zeros(self):
         """`gene_totals.sum() == 0` would divide by zero without the guard."""
@@ -328,3 +326,17 @@ class TestGeneratedTemplateMatchesLibrary:
         X = _counts(1_000, 600, density=0.02, seed=8)
 
         assert np.allclose(emitted(X), calculate_deviance(X), rtol=1e-12, atol=0.0)
+
+    @pytest.mark.parametrize("bad", [-1.0, np.nan, np.inf])
+    def test_emitted_function_rejects_non_counts_like_the_library(self, bad):
+        namespace: dict = {}
+        helper = self._render().split("# Calculate binomial deviance")[0]
+        exec(
+            helper, namespace
+        )  # nosec B102 # Execute repository-generated code on synthetic fixtures to validate replay. noqa: S102 - executing our own template is the test
+        X = spr.csr_matrix(np.array([[3.0, bad], [2.0, 4.0]]))
+
+        with pytest.raises(ValueError, match="RAW COUNTS"):
+            namespace["calculate_deviance"](X)
+        with pytest.raises(ValueError, match="RAW COUNTS"):
+            calculate_deviance(X)
