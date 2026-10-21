@@ -22,6 +22,11 @@ from lobster.agents.machine_learning.prompts import (
 )
 from lobster.agents.machine_learning.shared_tools import create_feature_selection_tools
 from lobster.agents.machine_learning.state import FeatureSelectionExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -39,6 +44,8 @@ def feature_selection_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Create feature selection expert agent.
@@ -53,14 +60,22 @@ def feature_selection_expert(
         delegation_tools: List of delegation tools for handoffs
         workspace_path: Optional workspace path
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params(agent_name)
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params(agent_name)
     llm = create_llm(
         agent_name,
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks
@@ -73,15 +88,16 @@ def feature_selection_expert(
         llm = llm.with_config(callbacks=callbacks)
 
     # Get feature selection tools
-    fs_tools = create_feature_selection_tools(
-        data_manager, agent_name=agent_name
-    )
+    fs_tools = create_feature_selection_tools(data_manager, agent_name=agent_name)
 
     # Use shared tool from workspace_tool.py (consistent with data_expert and supervisor)
     list_available_modalities = create_list_modalities_tool(
         data_manager, agent_name="feature_selection_expert"
     )
-    list_available_modalities.metadata = {"categories": ["UTILITY"], "provenance": False}
+    list_available_modalities.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     list_available_modalities.tags = ["UTILITY"]
 
     @tool
@@ -116,7 +132,10 @@ def feature_selection_expert(
 
         return response
 
-    get_feature_selection_results.metadata = {"categories": ["UTILITY"], "provenance": False}
+    get_feature_selection_results.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     get_feature_selection_results.tags = ["UTILITY"]
 
     # Combine tools

@@ -32,10 +32,17 @@ from lobster.agents.artifact_manifest import (
 from lobster.agents.state import OverallState
 from lobster.agents.supervisor import create_supervisor_prompt
 from lobster.config.agent_registry import import_agent_factory
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.config.supervisor_config import SupervisorConfig
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.tools.custom_code_tool import create_execute_custom_code_tool
 from lobster.tools.todo_tools import create_todo_tools
 from lobster.tools.workspace_tool import (
@@ -43,6 +50,7 @@ from lobster.tools.workspace_tool import (
     create_get_content_from_workspace_tool,
     create_list_modalities_tool,
 )
+from lobster.utils.llm_response_utils import extract_text_from_llm_response
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -194,7 +202,9 @@ async def _invoke_and_store(
     if final_msg is None:
         return f"Agent {agent_name} returned no response."
 
-    content = final_msg.content if hasattr(final_msg, "content") else str(final_msg)
+    content = extract_text_from_llm_response(final_msg, allow_empty=True)
+    if not content:
+        return f"Agent {agent_name} returned no text response."
     logger.debug(f"Agent {agent_name} completed. Response length: {len(content)}")
 
     # Dual-write: store full result for later retrieval
@@ -435,6 +445,31 @@ def _resolve_worker_agents(
     return worker_agents, filtered_out_agents, child_agent_names
 
 
+def _require_factory_parameters(
+    factory: Any, required_parameters: Tuple[str, ...]
+) -> None:
+    """Reject factories that cannot explicitly accept required runtime bindings.
+
+    A catch-all ``**kwargs`` is not a capability declaration: it may silently
+    discard a supplied binding. Validate before executing an installed plugin.
+    """
+    if inspect.iscoroutinefunction(factory):
+        raise InferenceRefused("context")
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        raise InferenceRefused("context") from None
+    supported_kinds = {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
+    if any(
+        name not in parameters or parameters[name].kind not in supported_kinds
+        for name in required_parameters
+    ):
+        raise InferenceRefused("context")
+
+
 def _create_agents_single_pass(
     worker_agents: Dict,
     created_agents: Dict[str, Any],
@@ -445,6 +480,8 @@ def _create_agents_single_pass(
     provider_override: Optional[str],
     model_override: Optional[str],
     workspace_path: Optional[Path],
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ) -> Dict:
     """Create all agents in a single pass with lazy delegation tools.
 
@@ -466,12 +503,16 @@ def _create_agents_single_pass(
     Returns:
         Pruned worker_agents dict (failed agents removed)
     """
+    strict_binding = validate_inference_binding(inference_context, model_factory)
     failed_agents = set()
 
     for agent_name, agent_config in worker_agents.items():
         try:
             factory_function = import_agent_factory(agent_config.factory_function)
         except (ImportError, ModuleNotFoundError, AttributeError, SyntaxError) as e:
+            reraise_inference_refusal(e)
+            if strict_binding:
+                raise InferenceRefused("context") from None
             from lobster.core.component_registry import AGENT_TO_PACKAGE
 
             package = AGENT_TO_PACKAGE.get(agent_name)
@@ -485,6 +526,12 @@ def _create_agents_single_pass(
                 )
             failed_agents.add(agent_name)
             continue
+
+        # Explicit parameters are required; catch-all kwargs may discard bindings.
+        if strict_binding:
+            _require_factory_parameters(
+                factory_function, ("inference_context", "model_factory")
+            )
 
         # Create delegation tools LAZILY (reference dict, not agent instance)
         delegation_tools = None
@@ -514,6 +561,11 @@ def _create_agents_single_pass(
             "agent_name": agent_config.name,
         }
 
+        if strict_binding:
+            factory_kwargs.update(
+                inference_context=inference_context, model_factory=model_factory
+            )
+
         # Add optional parameters based on factory signature
         sig = inspect.signature(factory_function)
         if "delegation_tools" in sig.parameters:
@@ -533,7 +585,12 @@ def _create_agents_single_pass(
             created_agents[agent_name] = factory_function(**factory_kwargs).with_config(
                 {"recursion_limit": 200}
             )
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
+            if strict_binding:
+                raise InferenceRefused("context") from None
             logger.warning(
                 f"Skipping agent '{agent_name}': factory execution failed: {e}"
             )
@@ -806,6 +863,8 @@ def create_bioinformatics_graph(
     enabled_agents: Optional[List[str]] = None,
     aquadif_monitor=None,
     interactive: bool = True,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ) -> Tuple:
     """Create the bioinformatics multi-agent graph using langgraph_supervisor.
 
@@ -829,6 +888,10 @@ def create_bioinformatics_graph(
         enabled_agents: Optional list of agent names to enable. Takes precedence
             over config.enabled_agents if both are provided.
 
+        inference_context: Optional immutable generation identity supplied by a host.
+        model_factory: Paired host factory with controlled native request clients.
+            Both absent preserves local behavior; a partial pair is refused.
+
     Returns:
         Tuple of (compiled_graph, GraphMetadata):
             - compiled_graph: The compiled LangGraph ready for invocation
@@ -839,6 +902,10 @@ def create_bioinformatics_graph(
         config = {"recursion_limit": 1000, ...}
         graph.invoke(input, config)
     """
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    binding = capture_inference_binding(
+        data_manager, inference_context, model_factory, inherit=False, replace=True
+    )
     _log_dependency_versions()
 
     # Auto-detect subscription tier if not provided
@@ -860,15 +927,12 @@ def create_bioinformatics_graph(
 
     logger.debug("Creating bioinformatics multi-agent graph")
 
-    # Get model configuration for the supervisor
-    settings = get_settings()
-
-    # ensure this for later
-    if manual_model_params:
-        # Use provided manual model parameters if available
-        model_params = manual_model_params
-    else:
-        model_params = settings.get_agent_llm_params("supervisor")
+    # Supplied identity never consults ambient generation defaults.
+    model_params = manual_model_params
+    if model_params is None or (not strict_binding and not model_params):
+        model_params = (
+            {} if strict_binding else get_settings().get_agent_llm_params("supervisor")
+        )
 
     supervisor_model = create_llm(
         "supervisor",
@@ -876,6 +940,11 @@ def create_bioinformatics_graph(
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -908,6 +977,11 @@ def create_bioinformatics_graph(
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Assemble all supervisor tools (handoff + workspace + code + todo)
@@ -946,10 +1020,14 @@ def create_bioinformatics_graph(
         all_supervisor_tools.append(retrieve_tool)
 
         # Resolve context budget from provider config
-        context_window = resolve_context_window(
-            provider_override=provider_override,
-            model_override=model_override,
-            workspace_path=workspace_path,
+        context_window = (
+            inference_context.context_window
+            if strict_binding
+            else resolve_context_window(
+                provider_override=provider_override,
+                model_override=model_override,
+                workspace_path=workspace_path,
+            )
         )
         budget = resolve_context_budget(
             context_window=context_window,
@@ -1036,4 +1114,8 @@ def create_bioinformatics_graph(
 
         logger.debug(f"AQUADIF monitor: {len(tool_metadata_map)} tools mapped")
 
+    if binding is not None:
+        from lobster.config.inference_runtime import InferenceBoundGraph
+
+        graph = InferenceBoundGraph(graph, binding)
     return graph, metadata

@@ -22,8 +22,11 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from lobster.config.inference_context import BoundModelFactory, InferenceContext
+from lobster.config.inference_runtime import InferenceBoundHelper
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.utils.json_extractor import extract_json_from_text
 from lobster.utils.llm_response_utils import extract_text_from_llm_response
 from lobster.utils.logger import get_logger
@@ -116,7 +119,7 @@ class ModalityDetectionResult(BaseModel):
 # =============================================================================
 
 
-class DataExpertAssistant:
+class DataExpertAssistant(InferenceBoundHelper):
     """
     Lightweight LLM orchestrator for data expert agent.
 
@@ -129,22 +132,40 @@ class DataExpertAssistant:
     All rule-based logic has been moved to services.
     """
 
-    def __init__(self):
-        """Initialize the Data Expert Assistant."""
-        self.settings = get_settings()
+    def __init__(
+        self,
+        data_manager=None,
+        *,
+        inference_context: InferenceContext | None = None,
+        model_factory: BoundModelFactory | None = None,
+    ):
+        """Capture the explicit pair or the owner's runtime-only legacy bridge."""
+        self._capture_binding(data_manager, inference_context, model_factory)
+        self.settings = get_settings() if self._inference_binding is None else None
         self._llm = None
 
     @property
     def llm(self):
-        """Lazy initialization of LLM using provider-agnostic factory."""
+        """Lazy initialization; cached models never outlive their run binding."""
+        context, factory = self._check_binding()
         if self._llm is None:
-            from lobster.core.workspace import resolve_workspace
+            if context is not None:
+                self._llm = create_llm(
+                    "data_expert_assistant",
+                    {},
+                    inference_context=context,
+                    model_factory=factory,
+                )
+            else:
+                from lobster.core.workspace import resolve_workspace
 
-            llm_params = self.settings.get_agent_llm_params("data_expert_assistant")
-            workspace_path = resolve_workspace(explicit_path=None, create=False)
-            self._llm = create_llm(
-                "data_expert_assistant", llm_params, workspace_path=workspace_path
-            )
+                llm_params = self.settings.get_agent_llm_params("data_expert_assistant")
+                # The manager is retained for the stale-binding guard only.
+                # Unbound workspace resolution keeps the ordinary assistant policy.
+                workspace_path = resolve_workspace(explicit_path=None, create=False)
+                self._llm = create_llm(
+                    "data_expert_assistant", llm_params, workspace_path=workspace_path
+                )
         return self._llm
 
     def _sanitize_null_values(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -429,12 +450,13 @@ Return only a valid JSON object conforming to the ModalityDetectionResult schema
 
             # Invoke the LLM
             logger.info(f"Invoking LLM for modality detection: {geo_id}")
-            response = self.llm.invoke(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
+            with self._inference_scope():
+                response = self.llm.invoke(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ]
+                )
 
             # Extract text from response (provider-agnostic, skips thinking blocks)
             response_text = extract_text_from_llm_response(response)
@@ -472,7 +494,10 @@ Return only a valid JSON object conforming to the ModalityDetectionResult schema
 
             return modality_result
 
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"Failed to detect modality using LLM for {geo_id}: {e}",
                 exc_info=True,
@@ -545,12 +570,13 @@ Return only valid JSON matching the StrategyConfig schema."""
 Return only a valid JSON object that conforms to the StrategyConfig schema."""
 
             # Invoke the LLM
-            response = self.llm.invoke(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ]
-            )
+            with self._inference_scope():
+                response = self.llm.invoke(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ]
+                )
 
             # Extract text from response (provider-agnostic, skips thinking blocks)
             response_text = extract_text_from_llm_response(response)
@@ -567,7 +593,10 @@ Return only a valid JSON object that conforms to the StrategyConfig schema."""
             logger.info(f"Successfully extracted strategy config for {geo_id}")
             return strategy_config
 
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"Failed to extract strategy config using LLM for {geo_id}: {e}"
             )

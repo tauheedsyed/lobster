@@ -27,6 +27,11 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.proteomics.peptide_prompts import create_peptide_expert_prompt
 from lobster.agents.proteomics.peptide_tools import create_peptide_tools
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -43,6 +48,8 @@ def peptide_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for peptide expert child agent.
@@ -59,14 +66,22 @@ def peptide_expert(
     Returns:
         Configured ReAct agent with peptide analysis capabilities
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("peptide_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("peptide_expert")
     llm = create_llm(
         "peptide_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks

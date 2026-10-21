@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import anndata as ad
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import reraise_inference_refusal
 from lobster.core.interfaces.download_service import IDownloadService
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.schemas.download_queue import DownloadQueueEntry
@@ -319,10 +320,12 @@ class GEODownloadService(IDownloadService):
             )
             logger.info(f"GEOService completed: {download_message[:200]}...")
         except GEOServiceError as e:
+            reraise_inference_refusal(e)
             # GEOServiceError indicates download failed - propagate with context
             logger.error(f"GEO download failed for {geo_id}: {e}")
             raise RuntimeError(f"GEO download failed for {geo_id}: {str(e)}") from e
         except Exception as e:
+            reraise_inference_refusal(e)
             # Unexpected errors - wrap with context
             logger.error(f"Unexpected error downloading {geo_id}: {e}")
             raise RuntimeError(

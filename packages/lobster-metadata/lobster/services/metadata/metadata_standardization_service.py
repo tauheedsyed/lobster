@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
+from lobster.config.inference_context import BoundModelFactory, InferenceContext
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.schemas.transcriptomics import TranscriptomicsMetadataSchema
@@ -148,14 +149,31 @@ class MetadataStandardizationService:
     - Returns Pydantic result models
     """
 
-    def __init__(self, data_manager: DataManagerV2) -> None:
+    def __init__(
+        self,
+        data_manager: DataManagerV2,
+        *,
+        inference_context: InferenceContext | None = None,
+        model_factory: BoundModelFactory | None = None,
+    ) -> None:
         """Initialize MetadataStandardizationService.
 
         Args:
             data_manager: DataManagerV2 instance for modality access
         """
         self.data_manager = data_manager
-        self.metadata_validator = MetadataValidationService(data_manager)
+        binding_kwargs = {
+            name: value
+            for name, value in (
+                ("inference_context", inference_context),
+                ("model_factory", model_factory),
+            )
+            if value is not None
+        }
+        self.metadata_validator = MetadataValidationService(
+            data_manager,
+            **binding_kwargs,
+        )
 
         # Schema registry mapping modality types to Pydantic schemas
         # Base schemas (always available)

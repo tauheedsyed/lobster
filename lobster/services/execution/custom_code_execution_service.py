@@ -15,7 +15,7 @@ SECURITY MODEL:
 
 import ast
 import json
-import subprocess  # nosec B404 - subprocess used with fixed argument lists
+import subprocess  # nosec B404 # Only runs the generated script with the current interpreter; never a shell.
 import sys
 import time
 import uuid
@@ -26,6 +26,7 @@ from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.execution.execution_context_builder import ExecutionContextBuilder
 from lobster.utils.logger import get_logger
+from lobster.utils.subprocess_env import minimal_child_env
 
 logger = get_logger(__name__)
 
@@ -342,6 +343,8 @@ class CustomCodeExecutionService:
             ws = str(self.data_manager.workspace_path)
             alias_map[f"{ws}/modalities/{safe}.h5ad"] = real
             alias_map[f"{ws}/data/{safe}.h5ad"] = real
+            # Alias keys rewrite paths in model-written code; these are never
+            # opened as temporary files.
             alias_map[f"/tmp/workspace/modalities/{safe}.h5ad"] = real  # nosec B108
             alias_map[f"/tmp/workspace/data/{safe}.h5ad"] = real  # nosec B108
             alias_map[f"data/{safe}.h5ad"] = real
@@ -420,7 +423,9 @@ class CustomCodeExecutionService:
                 finally:
                     try:
                         modified_path.unlink(missing_ok=True)
-                    except Exception:  # nosec B110 - best-effort cleanup
+                    except (
+                        Exception
+                    ):  # nosec B110 # Best-effort removal of the temporary write-back file; failure must not mask the result.
                         pass
 
         # Step 4b: Read plot manifest and register captured Plotly figures
@@ -491,7 +496,9 @@ class CustomCodeExecutionService:
             import shutil
 
             shutil.rmtree(exec_cache, ignore_errors=True)
-        except Exception:  # nosec B110 - best-effort cleanup
+        except (
+            Exception
+        ):  # nosec B110 # Best-effort cleanup of the per-execution cache once all reads are done.
             pass
 
         # Step 4b: Save large outputs to files (DeepAgents pattern)
@@ -1317,25 +1324,10 @@ if 'result' in dir() and result is not None:
             timeout_seconds = context.get("timeout", DEFAULT_TIMEOUT)
             logger.debug(f"Executing code in subprocess (timeout={timeout_seconds}s)")
 
-            # SECURITY: Filter environment variables to prevent credential leakage
-            # Only pass safe, necessary variables to subprocess
-            import os as _os
+            # Preserve the established child environment policy shared by tools.
+            safe_env = minimal_child_env()
 
-            safe_env = {
-                "PATH": _os.environ.get("PATH", ""),
-                "HOME": _os.environ.get("HOME", ""),
-                "USER": _os.environ.get("USER", ""),
-                "TMPDIR": _os.environ.get(
-                    "TMPDIR", "/tmp"
-                ),  # nosec B108 - path alias, not a temp file
-                "LANG": _os.environ.get("LANG", "en_US.UTF-8"),
-                "LC_ALL": _os.environ.get("LC_ALL", ""),
-                # Python-specific (empty PYTHONPATH prevents hijacking)
-                "PYTHONPATH": "",
-                "PYTHONHOME": _os.environ.get("PYTHONHOME", ""),
-            }
-
-            proc_result = subprocess.run(  # nosec B603 - argument list, no shell
+            proc_result = subprocess.run(  # nosec B603 # Fixed argv (current interpreter + generated script path); no shell, no caller-supplied command.
                 [sys.executable, str(script_path)],
                 cwd=str(workspace_path),
                 capture_output=True,

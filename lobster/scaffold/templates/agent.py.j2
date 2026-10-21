@@ -32,6 +32,8 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.{{ domain }}.shared_tools import create_shared_tools
 from lobster.agents.{{ domain }}.state import {{ state_class }}
+from lobster.config.inference_context import BoundModelFactory, InferenceContext, validate_inference_binding
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -49,6 +51,8 @@ def {{ agent_name }}(
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
     store=None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for {{ display_name }} agent.
@@ -62,6 +66,8 @@ def {{ agent_name }}(
         provider_override: Optional LLM provider override
         model_override: Optional model override
         store: Optional InMemoryStore for context management (auto-passed by graph)
+        inference_context: Optional immutable generation identity supplied by a host
+        model_factory: Paired host factory; a partial pair refuses instead of falling back
 
     Returns:
         Configured ReAct agent (CompiledGraph from create_react_agent)
@@ -69,14 +75,19 @@ def {{ agent_name }}(
     # Lazy prompt import (allows AGENT_CONFIG discovery before prompt module exists)
     from lobster.agents.{{ domain }}.prompts import create_{{ agent_name }}_prompt
 
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("{{ agent_name }}")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    capture_inference_binding(data_manager, inference_context, model_factory, inherit=False)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("{{ agent_name }}")
     llm = create_llm(
         "{{ agent_name }}",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **({"inference_context": inference_context, "model_factory": model_factory} if strict_binding else {}),
     )
 
     # Normalize callbacks to a flat list

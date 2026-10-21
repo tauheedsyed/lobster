@@ -1,11 +1,7 @@
-"""Utilities for extracting content from LLM responses.
+"""Provider-agnostic public text extraction from LLM message content.
 
-Provides provider-agnostic text extraction from LangChain AIMessage objects,
-handling extended thinking blocks across all supported providers (Anthropic,
-Bedrock, Gemini, Ollama, Azure).
-
-Pattern follows client.py's content_blocks approach — see
-core/client.py:_extract_from_content_blocks for the full reasoning-aware version.
+Reasoning, signatures, tool calls, images and unknown blocks are not answer text.
+The original message and its signed history are never rewritten.
 """
 
 from typing import Any
@@ -15,60 +11,51 @@ from lobster.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def extract_text_from_llm_response(response: Any) -> str:
+def _text_parts(content: Any) -> list[str]:
+    if isinstance(content, str):
+        return [content] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            if block.strip():
+                parts.append(block)
+        elif isinstance(block, dict):
+            # LangChain text blocks, plus native Converse {"text": ...} blocks.
+            if block.get("type") in (None, "text"):
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text)
+    return parts
+
+
+def extract_text_from_llm_response(response: Any, *, allow_empty: bool = False) -> str:
+    """Extract only public text from string/list or LangChain/dict messages.
+
+    Normalized content_blocks are preferred, with a safe raw-content fallback.
+    Reasoning-only/unknown-block messages raise ValueError unless allow_empty is
+    requested; their Python representation is never fabricated as an answer.
     """
-    Extract text content from an LLM response, skipping thinking/reasoning blocks.
-
-    Uses LangChain's content_blocks abstraction (preferred) with fallback to
-    raw content parsing. Works across all providers.
-
-    Args:
-        response: LangChain AIMessage from llm.invoke()
-
-    Returns:
-        Extracted text string
-
-    Raises:
-        ValueError: If no text content could be extracted
-    """
-    # Strategy 1: content_blocks (preferred — normalized by LangChain)
-    if hasattr(response, "content_blocks"):
-        try:
-            text_parts = []
-            for block in response.content_blocks:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    if text:
-                        text_parts.append(text)
-            if text_parts:
-                return "\n\n".join(text_parts).strip()
-        except Exception as e:
-            logger.debug(f"content_blocks extraction failed: {e}, trying fallback")
-
-    # Strategy 2: raw content parsing
-    if hasattr(response, "content"):
-        content = response.content
-
-        # String content (simple case — Ollama, some Bedrock)
-        if isinstance(content, str):
-            return content.strip()
-
-        # List of blocks (Anthropic, Gemini with thinking)
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-                elif isinstance(block, str) and block.strip():
-                    text_parts.append(block.strip())
-            if text_parts:
-                return "\n\n".join(text_parts).strip()
-
-    # Strategy 3: last resort
-    raw = str(response.content) if hasattr(response, "content") else str(response)
-    if raw.strip():
-        return raw.strip()
-
+    try:
+        blocks = getattr(response, "content_blocks", None)
+        parts = _text_parts(blocks)
+    except Exception as exc:
+        logger.debug("content_blocks extraction failed: %s; using raw content", exc)
+        parts = []
+    if not parts:
+        if isinstance(response, dict):
+            content = response.get("content", "")
+        elif hasattr(response, "content"):
+            content = response.content
+        else:
+            content = response
+        parts = _text_parts(content)
+        # Preserve the prior simple-object fallback, but never stringify structured
+        # blocks, absent content, or an entire message object's representation.
+        if not parts and isinstance(content, (int, float, bool)):
+            parts = [str(content)]
+    text = "\n\n".join(parts).strip()
+    if text or allow_empty:
+        return text
     raise ValueError("Could not extract text from LLM response")

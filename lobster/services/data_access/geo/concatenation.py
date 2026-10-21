@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -87,7 +88,9 @@ class SampleConcatenator:
                             DataExpertAssistant,
                         )
 
-                        assistant = DataExpertAssistant()
+                        assistant = DataExpertAssistant(
+                            data_manager=self.service.data_manager
+                        )
 
                         modality_result = assistant.detect_modality(metadata, gse_id)
 
@@ -124,7 +127,10 @@ class SampleConcatenator:
                                 logger.warning(
                                     f"{gse_id}: Using sample count heuristic - {n_samples} samples suggests single-cell"
                                 )
+                    except InferenceRefused:
+                        raise
                     except Exception as e:
+                        reraise_inference_refusal(e)
                         logger.error(f"Modality detection failed for {gse_id}: {e}")
                         n_samples = len(metadata.get("samples", {}))
                         adapter_name = (
@@ -167,7 +173,10 @@ class SampleConcatenator:
                         f"Stored sample {gsm_id} as modality '{modality_name}' ({adata.shape})"
                     )
 
+                except InferenceRefused:
+                    raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.error(f"Failed to store sample {gsm_id}: {e}")
                     continue
 
@@ -176,7 +185,10 @@ class SampleConcatenator:
             )
             return stored_samples
 
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error storing samples as AnnData: {e}")
             return stored_samples
 
@@ -448,7 +460,7 @@ class SampleConcatenator:
                 # Lazy import to avoid circular imports
                 from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-                assistant = DataExpertAssistant()
+                assistant = DataExpertAssistant(data_manager=self.service.data_manager)
 
                 if gse_id:
                     metadata_for_detection = (
@@ -490,7 +502,10 @@ class SampleConcatenator:
                     logger.warning(
                         f"Using heuristic for {gsm_id}: {n_obs} cells, {n_samples} samples -> {adapter_name}"
                     )
+            except InferenceRefused:
+                raise
             except Exception as e:
+                reraise_inference_refusal(e)
                 logger.warning(f"Metadata-based detection failed for {gsm_id}: {e}")
                 n_samples = n_obs if n_obs < 1000 else n_vars
                 adapter_name = (
@@ -526,7 +541,10 @@ Adapter: {adapter_name}
 Saved to: {save_path}
 Ready for single-cell analysis!"""
 
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error storing sample {gsm_id}: {e}")
             return f"Error storing sample {gsm_id}: {str(e)}"
 

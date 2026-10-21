@@ -9,6 +9,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, Generator, List, Optional
 
 import pandas as pd
@@ -73,6 +74,13 @@ def _is_main_agent_namespace(namespace: Any) -> bool:
     return False
 
 
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    InferenceModelSelection,
+    resolve_inference_model,
+    validate_inference_binding,
+)
 from lobster.config.settings import MODEL_PRICING
 from lobster.config.workspace_agent_config import WorkspaceAgentConfig
 
@@ -87,6 +95,7 @@ from lobster.core.archive_utils import (
 # Import component registry (lazy - don't trigger load_components at import time)
 from lobster.core.component_registry import component_registry
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 
 # Extraction cache manager loaded lazily to avoid triggering all agent imports at startup
 _ExtractionCacheManager = None
@@ -123,6 +132,8 @@ class AgentClient(BaseClient):
         provider_override: Optional[str] = None,
         model_override: Optional[str] = None,
         interactive: bool = True,
+        inference_context: Optional[InferenceContext] = None,
+        model_factory: Optional[BoundModelFactory] = None,
     ):
         """
         Initialize the agent client with DataManagerV2.
@@ -140,7 +151,16 @@ class AgentClient(BaseClient):
             model_override: Optional explicit model name (e.g., "llama3:70b-instruct", "claude-4-sonnet")
             interactive: Whether running in interactive mode (chat). When False (query mode),
                 HITL tools like ask_user are excluded and the supervisor uses best-judgment.
+            inference_context: Optional immutable generation identity for one run.
+            model_factory: Paired factory. Bind a fresh run before the next query;
+                interrupted execution resumes with its original binding.
         """
+        validate_inference_binding(inference_context, model_factory)
+        self._inference_context = inference_context
+        self._model_factory = model_factory
+        self._inference_client_lock = RLock()
+        self._inference_run_consumed = False
+
         # Set up session
         self.session_id = (
             session_id or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -295,18 +315,26 @@ class AgentClient(BaseClient):
             ):  # nosec B110 # Missing optional workspace preferences use the documented defaults.
                 pass  # No config file or invalid - will use all agents
 
-        self.graph, self.graph_metadata = create_bioinformatics_graph(
+        self._graph_options = dict(
             data_manager=self.data_manager,
             checkpointer=self.checkpointer,
             store=self.store,
-            callback_handler=self.callbacks,  # Pass the list of callbacks
-            manual_model_params=manual_model_params,  # Placeholder for future manual model params
-            provider_override=provider_override,  # Pass provider override to graph
-            model_override=model_override,  # Pass model override to graph
-            workspace_path=self.workspace_path,  # Use resolved workspace path (always set)
-            config=agent_config,  # Phase 5: filter agents based on config.toml
-            aquadif_monitor=self.aquadif_monitor,  # AQUADIF monitoring wiring
+            callback_handler=self.callbacks,
+            manual_model_params=manual_model_params,
+            provider_override=provider_override,
+            model_override=model_override,
+            workspace_path=self.workspace_path,
+            config=agent_config,
+            aquadif_monitor=self.aquadif_monitor,
             interactive=self.interactive,
+        )
+        self.graph, self.graph_metadata = create_bioinformatics_graph(
+            **self._graph_options,
+            **(
+                {"inference_context": inference_context, "model_factory": model_factory}
+                if inference_context is not None
+                else {}
+            ),
         )
 
         # Conversation state
@@ -317,7 +345,74 @@ class AgentClient(BaseClient):
             "workspace": str(self.workspace_path),
         }
 
+    def bind_inference_run(
+        self,
+        *,
+        inference_context: InferenceContext,
+        model_factory: BoundModelFactory,
+        model_selection: InferenceModelSelection | None = None,
+    ) -> None:
+        """Rebuild for a new run after prior work drains, even with equal identity.
+
+        No selection inherits the host-resolved context and clears stale initial
+        overrides. Explicit selection must match that canonical pair before any
+        state mutation or model creation; aliases/policy are resolved by the host.
+        The host supplies fresh authorization/accounting closures. Data, history,
+        callbacks, store and checkpoint objects are retained; active or interrupted
+        graphs cannot be replaced. Construction failure never restores an ambient
+        model or makes a consumed binding reusable.
+        """
+        if not validate_inference_binding(inference_context, model_factory):
+            raise InferenceRefused("context")
+        provider, model_id = resolve_inference_model(inference_context, model_selection)
+        with self._inference_client_lock:
+            self._inference_run_consumed = True
+            options = {
+                **self._graph_options,
+                "provider_override": provider,
+                "model_override": model_id,
+                "manual_model_params": None,
+            }
+            graph, metadata = create_bioinformatics_graph(
+                **options,
+                inference_context=inference_context,
+                model_factory=model_factory,
+            )
+            self.graph, self.graph_metadata = graph, metadata
+            self._inference_context = inference_context
+            self._model_factory = model_factory
+            self.provider_override = provider
+            self.model_override = model_id
+            self._inference_run_consumed = False
+
     def query(
+        self, user_input: str, stream: bool = False, cancel_event=None
+    ) -> Dict[str, Any]:
+        """Process one query; supplied mode requires a fresh binding per new run."""
+        if getattr(self, "_inference_context", None) is None:
+            return self._query(user_input, stream, cancel_event)
+        with self._inference_client_lock:
+            if self._inference_run_consumed:
+                raise InferenceRefused("context")
+            graph = self.graph
+            binding = graph._binding
+            with binding.use():
+                self._inference_run_consumed = True
+                result = self._query(user_input, stream, cancel_event)
+        if not stream:
+            return result
+
+        def consume():
+            # If replacement happened before consumption, this lease refuses.
+            try:
+                with binding.use():
+                    yield from result
+            finally:
+                result.close()
+
+        return consume()
+
+    def _query(
         self, user_input: str, stream: bool = False, cancel_event=None
     ) -> Dict[str, Any]:
         """
@@ -551,6 +646,7 @@ class AgentClient(BaseClient):
             return response_data
 
         except Exception as e:
+            reraise_inference_refusal(e)
             # Enhanced error information for better debugging
             return {
                 "success": False,
@@ -872,6 +968,7 @@ class AgentClient(BaseClient):
             }
 
         except Exception as e:
+            reraise_inference_refusal(e)
             is_rate_limit = (
                 "RateLimitError" in type(e).__name__ or "rate limit" in str(e).lower()
             )
@@ -1197,6 +1294,7 @@ class AgentClient(BaseClient):
 
             if result_parts:
                 return "\n\n".join(result_parts).strip()
+            return ""  # Reasoning/tool/media blocks are not a public text answer.
 
         # Ultimate fallback
         return str(content).strip() if content else ""
@@ -2916,6 +3014,8 @@ class AgentClient(BaseClient):
         Returns:
             Dictionary with success status and message
         """
+        if getattr(self, "_inference_context", None) is not None:
+            raise InferenceRefused("context")
         from lobster.config.constants import VALID_PROVIDERS
         from lobster.config.llm_factory import LLMFactory
 

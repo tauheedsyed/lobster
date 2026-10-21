@@ -22,6 +22,11 @@ from lobster.agents.machine_learning.prompts import (
 )
 from lobster.agents.machine_learning.shared_tools import create_survival_analysis_tools
 from lobster.agents.machine_learning.state import SurvivalAnalysisExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -38,6 +43,8 @@ def survival_analysis_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Create survival analysis expert agent.
@@ -52,14 +59,22 @@ def survival_analysis_expert(
         delegation_tools: List of delegation tools for handoffs
         workspace_path: Optional workspace path
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params(agent_name)
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params(agent_name)
     llm = create_llm(
         agent_name,
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks
@@ -229,7 +244,10 @@ def survival_analysis_expert(
         else:
             return f"Survival analysis not available. Install with: {avail['install_command']}"
 
-    check_survival_availability.metadata = {"categories": ["UTILITY"], "provenance": False}
+    check_survival_availability.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     check_survival_availability.tags = ["UTILITY"]
 
     # Combine tools

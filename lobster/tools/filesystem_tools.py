@@ -25,14 +25,14 @@ See Also:
 from __future__ import annotations
 
 import asyncio
-import os
-import subprocess
+import subprocess  # nosec B404 # Implements the explicitly requested shell tool contract.
 from pathlib import Path
 from typing import List, Optional
 
 from langchain_core.tools import tool
 
 from lobster.utils.logger import get_logger
+from lobster.utils.subprocess_env import minimal_child_env
 
 logger = get_logger(__name__)
 
@@ -433,14 +433,16 @@ def create_filesystem_tools(workspace_path: Path) -> List:
         timeout = min(timeout, MAX_EXECUTE_TIMEOUT)
 
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B602 # Intentional shell tool; minimal child env, not a filesystem or process sandbox.
                 command,
                 shell=True,
                 cwd=str(workspace_path),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env={**os.environ, "HOME": os.environ.get("HOME", "/tmp")},
+                env=minimal_child_env(
+                    home_default="/tmp",  # nosec B108 # Preserve the existing HOME fallback; no file creation.
+                ),
             )
 
             output_parts = []

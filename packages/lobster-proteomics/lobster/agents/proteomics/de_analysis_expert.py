@@ -35,6 +35,11 @@ from langgraph.prebuilt import create_react_agent
 from lobster.agents.proteomics.config import detect_platform_type, get_platform_config
 from lobster.agents.proteomics.prompts import create_de_analysis_expert_prompt
 from lobster.agents.proteomics.state import DEAnalysisExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -66,6 +71,8 @@ def de_analysis_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for proteomics differential expression analysis sub-agent.
@@ -86,14 +93,22 @@ def de_analysis_expert(
     Returns:
         Configured ReAct agent with proteomics DE analysis capabilities
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("proteomics_de_analysis_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("proteomics_de_analysis_expert")
     llm = create_llm(
         "proteomics_de_analysis_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -401,7 +416,10 @@ def de_analysis_expert(
                     data_manager.plot_manager.save_plots_to_workspace()
                     response += f"\n**Volcano plot generated**: plot_id={plot_id}"
                 except Exception as reg_err:
-                    logger.error(f"PLOT REGISTRATION FAILED for volcano: {reg_err}", exc_info=True)
+                    logger.error(
+                        f"PLOT REGISTRATION FAILED for volcano: {reg_err}",
+                        exc_info=True,
+                    )
                     response += f"\n**Volcano plot**: registration failed ({reg_err})"
 
             # Sample size warning
@@ -453,7 +471,9 @@ def de_analysis_expert(
                         vc = _adata.obs[group_column].value_counts()
                         if len(vc) > 10:
                             vc = vc.head(10)
-                        parts.append(f"Group distribution ({group_column}): {vc.to_dict()}")
+                        parts.append(
+                            f"Group distribution ({group_column}): {vc.to_dict()}"
+                        )
                     else:
                         parts.append(
                             f"Group distribution: column '{group_column}' NOT in obs"
@@ -463,8 +483,12 @@ def de_analysis_expert(
 
                 # Shape for context
                 try:
-                    parts.append(f"Data shape: {_adata.shape[0]} obs x {_adata.shape[1]} vars")
-                except Exception:  # nosec B110 # Optional response-summary metadata must not replace the analysis result.
+                    parts.append(
+                        f"Data shape: {_adata.shape[0]} obs x {_adata.shape[1]} vars"
+                    )
+                except (
+                    Exception
+                ):  # nosec B110 # Optional response-summary metadata must not replace the analysis result.
                     pass
             else:
                 parts.append("adata: not loaded (modality retrieval may have failed)")
@@ -982,11 +1006,13 @@ def de_analysis_expert(
                         # Store normalized results back for the viz service
                         normalized_results = pw_df.to_dict("records")
 
-                        _pathway_fig, plot_stats = viz_service.create_pathway_enrichment_plot(
-                            adata_enriched,
-                            enrichment_results=normalized_results,
-                            plot_type="bubble",
-                            top_n=20,
+                        _pathway_fig, plot_stats = (
+                            viz_service.create_pathway_enrichment_plot(
+                                adata_enriched,
+                                enrichment_results=normalized_results,
+                                plot_type="bubble",
+                                top_n=20,
+                            )
                         )
             except Exception as viz_err:
                 logger.warning(f"Pathway figure creation failed: {viz_err}")
@@ -1006,16 +1032,19 @@ def de_analysis_expert(
                             "plot_id": plot_id,
                             "modality_name": enriched_name,
                             "plot_type": "pathway_enrichment",
-                            "n_significant": enrich_stats.get(
-                                "n_significant_terms", 0
-                            ),
+                            "n_significant": enrich_stats.get("n_significant_terms", 0),
                         },
                     )
                     # Save HTML + PNG to workspace (same pattern as visualization_expert)
                     data_manager.plot_manager.save_plots_to_workspace()
-                    response += f"\n**Pathway enrichment plot generated**: plot_id={plot_id}"
+                    response += (
+                        f"\n**Pathway enrichment plot generated**: plot_id={plot_id}"
+                    )
                 except Exception as reg_err:
-                    logger.error(f"PLOT REGISTRATION FAILED for pathway: {reg_err}", exc_info=True)
+                    logger.error(
+                        f"PLOT REGISTRATION FAILED for pathway: {reg_err}",
+                        exc_info=True,
+                    )
                     response += f"\n**Pathway plot**: registration failed ({reg_err})"
 
             return response

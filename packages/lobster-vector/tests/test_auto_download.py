@@ -22,7 +22,6 @@ from lobster.vector.backends.chromadb_backend import (
     _download_with_progress,
 )
 
-
 # ---------------------------------------------------------------------------
 # TestOntologyTarballs -- static constant validation
 # ---------------------------------------------------------------------------
@@ -52,9 +51,9 @@ class TestOntologyTarballs:
             "cell_ontology_v2024_01": "cell_ontology_openai_1536.tar.gz",
         }
         for key, url in ONTOLOGY_TARBALLS.items():
-            assert url.endswith(expected_filenames[key]), (
-                f"{key}: URL should end with {expected_filenames[key]}, got {url}"
-            )
+            assert url.endswith(
+                expected_filenames[key]
+            ), f"{key}: URL should end with {expected_filenames[key]}, got {url}"
 
     def test_cache_dir_is_under_home_lobster(self):
         """ONTOLOGY_CACHE_DIR ends with .lobster/ontology_cache."""
@@ -197,9 +196,7 @@ class TestEnsureOntologyData:
                 "lobster.vector.backends.chromadb_backend._download_with_progress",
                 side_effect=requests.ConnectionError("Network unreachable"),
             ),
-            patch(
-                "lobster.vector.backends.chromadb_backend.logger"
-            ) as mock_logger,
+            patch("lobster.vector.backends.chromadb_backend.logger") as mock_logger,
         ):
             result = backend._ensure_ontology_data("mondo_v2024_01")
 
@@ -223,9 +220,7 @@ class TestEnsureOntologyData:
                 "lobster.vector.backends.chromadb_backend.ONTOLOGY_CACHE_DIR",
                 cache_dir,
             ),
-            patch(
-                "lobster.vector.backends.chromadb_backend.logger"
-            ) as mock_logger,
+            patch("lobster.vector.backends.chromadb_backend.logger") as mock_logger,
         ):
             result = backend._ensure_ontology_data("mondo_v2024_01")
 
@@ -233,6 +228,59 @@ class TestEnsureOntologyData:
             # Corrupt tarball should be removed from cache
             assert not tarball_path.exists()
             mock_logger.warning.assert_called()
+
+    @pytest.mark.parametrize("has_collection", [False, True])
+    @pytest.mark.parametrize("close_raises", [False, True])
+    def test_source_client_closed_and_temp_removed_on_all_paths(
+        self, tmp_path, has_collection, close_raises
+    ):
+        """Early-return and normal load paths close the source before removing it."""
+        from types import SimpleNamespace
+
+        backend, _, _ = _make_backend_with_mock_client(tmp_path)
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        archive = cache / "mondo_openai_1536.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source_dir, arcname="mondo_openai_1536")
+
+        source_client = MagicMock()
+        if has_collection:
+            source = source_client.get_collection.return_value
+            source.count.return_value = 1
+            source.get.return_value = {
+                "ids": ["term1"],
+                "embeddings": [[0.1]],
+                "documents": ["term"],
+                "metadatas": [{"ontology_id": "term1"}],
+            }
+        else:
+            source_client.get_collection.side_effect = ValueError("not found")
+            source_client.list_collections.return_value = []
+        closed_paths = []
+
+        def close():
+            path = Path(factory.call_args.kwargs["path"])
+            assert path.is_dir()  # The source still exists when close is called.
+            closed_paths.append(path)
+            if close_raises:
+                raise RuntimeError("close failed")
+
+        source_client.close.side_effect = close
+        factory = MagicMock(return_value=source_client)
+        with (
+            patch.dict(
+                "sys.modules", {"chromadb": SimpleNamespace(PersistentClient=factory)}
+            ),
+            patch("lobster.vector.backends.chromadb_backend.ONTOLOGY_CACHE_DIR", cache),
+        ):
+            result = backend._ensure_ontology_data("mondo_v2024_01")
+        assert result is has_collection
+        source_client.close.assert_called_once()
+        assert len(closed_paths) == 1
+        assert not closed_paths[0].parent.exists()
 
     def test_atomic_download_cleans_up_tmp_on_failure(self, tmp_path):
         """When download fails mid-stream, no .tmp file is left behind."""
@@ -246,9 +294,7 @@ class TestEnsureOntologyData:
             side_effect=requests.ConnectionError("Connection reset"),
         ):
             with pytest.raises(requests.ConnectionError):
-                _download_with_progress(
-                    "https://example.com/test.tar.gz", dest
-                )
+                _download_with_progress("https://example.com/test.tar.gz", dest)
 
         assert not tmp_file.exists()
         assert not dest.exists()
@@ -286,15 +332,11 @@ class TestDownloadWithProgress:
         dest = tmp_path / "test_download.tar.gz"
 
         mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = requests.HTTPError(
-            "404 Not Found"
-        )
+        mock_response.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
 
         with patch("requests.get", return_value=mock_response):
             with pytest.raises(requests.HTTPError, match="404"):
-                _download_with_progress(
-                    "https://example.com/missing.tar.gz", dest
-                )
+                _download_with_progress("https://example.com/missing.tar.gz", dest)
 
         assert not dest.exists()
         assert not dest.with_suffix(".tmp").exists()

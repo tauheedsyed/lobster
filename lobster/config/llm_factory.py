@@ -22,6 +22,13 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    create_bound_model,
+    validate_inference_binding,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +56,8 @@ class LLMFactory:
         provider_override: Optional[str] = None,
         model_override: Optional[str] = None,
         workspace_path: Optional[Path] = None,
+        inference_context: Optional[InferenceContext] = None,
+        model_factory: Optional[BoundModelFactory] = None,
     ) -> Any:
         """
         Create an LLM instance based on configuration.
@@ -59,7 +68,8 @@ class LLMFactory:
         Args:
             model_config: Configuration dictionary with model parameters
                 - temperature: float (default: 1.0)
-                - max_tokens: int (default: 4096)
+                - max_tokens: int (optional; when absent the provider applies
+                  its own default, and Bedrock sends no limit)
                 - model_id: str (optional, can be overridden)
             agent_name: Optional agent name for logging and per-agent config
             provider_override: Explicit provider name from CLI flag
@@ -80,6 +90,16 @@ class LLMFactory:
             ...     provider_override="anthropic"
             ... )
         """
+        if validate_inference_binding(inference_context, model_factory):
+            return create_bound_model(
+                component=agent_name or "model",
+                inference_context=inference_context,
+                model_factory=model_factory,
+                model_config=model_config,
+                provider_override=provider_override,
+                model_override=model_override,
+            )
+
         from lobster.config.providers import ProviderRegistry, get_provider
         from lobster.core.config_resolver import ConfigResolver, ConfigurationError
 
@@ -131,7 +151,15 @@ class LLMFactory:
 
         # Extract parameters
         temperature = model_config.get("temperature", 1.0)
-        max_tokens = model_config.get("max_tokens", 4096)
+        model_params: Dict[str, Any] = {
+            "model_id": model_id,
+            "temperature": temperature,
+        }
+        # Forward an output-token limit only when the config sets one. Otherwise each
+        # provider applies its own default; Bedrock sends no limit, so the model's
+        # maximum applies (a factory-wide default would cap every Bedrock request).
+        if "max_tokens" in model_config:
+            model_params["max_tokens"] = model_config["max_tokens"]
 
         # Extract additional model request fields (thinking config, etc.)
         additional_fields = model_config.get("additional_model_request_fields", {})
@@ -141,9 +169,7 @@ class LLMFactory:
         # - Bedrock: thinking config via additional_model_request_fields
         # - Anthropic: extended thinking via additional_model_request_fields
         return provider.create_chat_model(
-            model_id=model_id,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **model_params,
             **additional_fields,  # Pass thinking config and other provider-specific params
         )
 
@@ -205,6 +231,8 @@ def create_llm(
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
     workspace_path: Optional[Path] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ) -> Any:
     """
     Create an LLM instance for a specific agent.
@@ -225,10 +253,17 @@ def create_llm(
     Example:
         >>> llm = create_llm("supervisor", {"temperature": 0.7})
     """
+    binding_kwargs = {}
+    if inference_context is not None or model_factory is not None:
+        binding_kwargs = {
+            "inference_context": inference_context,
+            "model_factory": model_factory,
+        }
     return LLMFactory.create_llm(
         model_config=model_params,
         agent_name=agent_name,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **binding_kwargs,
     )

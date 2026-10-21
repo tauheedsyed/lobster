@@ -36,6 +36,11 @@ from typing import Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -71,6 +76,8 @@ def variant_analysis_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for variant analysis expert sub-agent.
@@ -91,14 +98,22 @@ def variant_analysis_expert(
     Returns:
         Configured ReAct agent with variant analysis capabilities
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("variant_analysis_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("variant_analysis_expert")
     llm = create_llm(
         "variant_analysis_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list
@@ -393,7 +408,10 @@ def variant_analysis_expert(
             logger.error(f"Unexpected error in population frequency query: {e}")
             return f"Unexpected error: {str(e)}"
 
-    query_population_frequencies.metadata = {"categories": ["ANNOTATE"], "provenance": True}
+    query_population_frequencies.metadata = {
+        "categories": ["ANNOTATE"],
+        "provenance": True,
+    }
     query_population_frequencies.tags = ["ANNOTATE"]
 
     # =========================================================================
