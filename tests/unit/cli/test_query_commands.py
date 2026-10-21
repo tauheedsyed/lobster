@@ -378,3 +378,61 @@ def test_resolve_session_continuation_latest_falls_back_to_legacy_json(tmp_path)
     assert session_file == legacy_session
     assert session_id == "project_gamma"
     assert found_existing is True
+
+
+def _run_failing_query(monkeypatch, tmp_path, json_output):
+    import pytest
+    import typer
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        query_commands,
+        "validate_startup_or_raise_startup_diagnostic",
+        lambda *args, **kwargs: tmp_path,
+    )
+    monkeypatch.setattr(query_commands, "console", Console(record=True, width=120))
+    monkeypatch.setattr(
+        query_commands, "_maybe_print_timings", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(query_commands, "should_show_progress", lambda client: False)
+
+    class _FailingClient:
+        session_id = "session-test"
+        token_tracker = None
+        callbacks = []
+
+        def query(self, question):
+            return {"success": False, "response": "", "error": "model rejected"}
+
+    monkeypatch.setattr(
+        query_commands, "init_client", lambda *args, **kwargs: _FailingClient()
+    )
+    with pytest.raises(typer.Exit) as exc:
+        query_commands.query_impl(
+            "hello",
+            workspace=None,
+            session_id=None,
+            reasoning=False,
+            verbose=False,
+            debug=False,
+            output=None,
+            profile_timings=None,
+            provider=None,
+            model=None,
+            stream=False,
+            json_output=json_output,
+        )
+    return exc.value.exit_code
+
+
+def test_query_impl_json_failure_exits_nonzero(monkeypatch, tmp_path, capsys):
+    import json
+
+    assert _run_failing_query(monkeypatch, tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["success"] is False
+    assert payload["error"] == "model rejected"
+
+
+def test_query_impl_rich_failure_exits_nonzero(monkeypatch, tmp_path):
+    assert _run_failing_query(monkeypatch, tmp_path, json_output=False) == 1

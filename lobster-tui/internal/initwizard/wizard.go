@@ -167,20 +167,23 @@ var providerModels = map[string][]struct {
 	IsDefault   bool
 }{
 	providerAnthropic: {
-		{Name: "claude-sonnet-4-20250514", Description: "Claude Sonnet 4 — balanced speed & capability", IsDefault: true},
-		{Name: "claude-opus-4-20250514", Description: "Claude Opus 4 — most capable, complex reasoning"},
-		{Name: "claude-3-5-sonnet-20241022", Description: "Claude 3.5 Sonnet — previous generation"},
-		{Name: "claude-3-5-haiku-20241022", Description: "Claude 3.5 Haiku — fastest, high throughput"},
+		{Name: "claude-sonnet-5-5", Description: "Claude Sonnet 5.5 — best balance of capability, speed & cost", IsDefault: true},
+		{Name: "claude-haiku-5-5", Description: "Claude Haiku 5.5 — fast and low-cost"},
+		{Name: "claude-opus-5-5", Description: "Claude Opus 5.5 — most capable, complex reasoning"},
+		{Name: "claude-sonnet-4-20250514", Description: "Claude Sonnet 4 — previous generation"},
 	},
 	providerBedrock: {
-		{Name: "us.anthropic.claude-sonnet-4-5-20250929-v1:0", Description: "Claude Sonnet 4.5 — highest quality Sonnet", IsDefault: true},
-		{Name: "us.anthropic.claude-sonnet-4-20250514-v1:0", Description: "Claude Sonnet 4 — balanced quality & speed"},
-		{Name: "global.anthropic.claude-opus-4-5-20251101-v1:0", Description: "Claude Opus 4.5 — most capable"},
+		{Name: "global.anthropic.claude-sonnet-5-5", Description: "Claude Sonnet 5.5 — best balance of capability, speed & cost", IsDefault: true},
+		{Name: "global.anthropic.claude-haiku-5-5", Description: "Claude Haiku 5.5 — fast and low-cost"},
+		{Name: "global.anthropic.claude-opus-5-5", Description: "Claude Opus 5.5 — most capable"},
+		{Name: "global.openai.gpt-6.1-sol", Description: "GPT-6.1 Sol on Bedrock"},
+		{Name: "us.anthropic.claude-sonnet-4-5-20250929-v1:0", Description: "Claude Sonnet 4.5 — previous generation"},
 	},
 	providerOpenAI: {
-		{Name: "gpt-4o", Description: "GPT-4o — most capable GPT model", IsDefault: true},
-		{Name: "gpt-4o-mini", Description: "GPT-4o Mini — fast and affordable"},
-		{Name: "o3-mini", Description: "o3 Mini — compact reasoning model"},
+		{Name: "gpt-6.1-sol", Description: "GPT-6.1 Sol — newest GPT model", IsDefault: true},
+		{Name: "gpt-6-luna", Description: "GPT-6 Luna — fast and low-cost"},
+		{Name: "gpt-6-astra", Description: "GPT-6 Astra — most capable GPT model"},
+		{Name: "gpt-4o", Description: "GPT-4o — previous generation"},
 	},
 	providerGemini: {
 		{Name: "gemini-3-pro-preview", Description: "Gemini 3 Pro — best balance of speed & capability", IsDefault: true},

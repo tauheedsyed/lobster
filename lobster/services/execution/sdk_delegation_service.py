@@ -232,7 +232,7 @@ class SDKDelegationService:
                 "mcp__lobster__list_workspace_files",
             ],
             max_turns=15,  # Limit reasoning iterations
-            model="claude-sonnet-4-5",  # Latest model
+            model="claude-sonnet-5-5",
             cwd=str(self.workspace_path),
         )
 

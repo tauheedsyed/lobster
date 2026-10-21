@@ -51,15 +51,55 @@ class AnthropicProvider(ILLMProvider):
     _default_context_window = 200_000
 
     # Static model catalog with pricing
-    # Source: https://www.anthropic.com/pricing (January 2025)
+    # Source: https://www.anthropic.com/pricing (5.x rows: October 2026)
     KNOWN_MODELS = [
+        ModelInfo(
+            name="claude-sonnet-5-5",
+            display_name="Claude Sonnet 5.5",
+            description="Default - best balance of capability, speed and cost",
+            provider="anthropic",
+            context_window=1000000,
+            is_default=True,
+            input_cost_per_million=2.0,
+            output_cost_per_million=10.0,
+        ),
+        ModelInfo(
+            name="claude-haiku-5-5",
+            display_name="Claude Haiku 5.5",
+            description="Fast and low-cost; price shown for prompts up to 100K tokens",
+            provider="anthropic",
+            context_window=1000000,
+            is_default=False,
+            input_cost_per_million=0.1,
+            output_cost_per_million=0.5,
+        ),
+        ModelInfo(
+            name="claude-opus-5-5",
+            display_name="Claude Opus 5.5",
+            description="Most capable Claude model for complex reasoning",
+            provider="anthropic",
+            context_window=1000000,
+            is_default=False,
+            input_cost_per_million=4.0,
+            output_cost_per_million=20.0,
+        ),
+        ModelInfo(
+            name="claude-fable-5-1",
+            display_name="Claude Fable 5.1",
+            description="Frontier Claude model",
+            provider="anthropic",
+            context_window=1000000,
+            is_default=False,
+            input_cost_per_million=10.0,
+            output_cost_per_million=50.0,
+        ),
         ModelInfo(
             name="claude-sonnet-4-20250514",
             display_name="Claude Sonnet 4",
             description="Latest Sonnet - best balance of speed and capability",
             provider="anthropic",
             context_window=200000,
-            is_default=True,
+            is_default=False,
             input_cost_per_million=3.00,
             output_cost_per_million=15.00,
         ),
@@ -186,7 +226,7 @@ class AnthropicProvider(ILLMProvider):
         Get the recommended default model.
 
         Returns:
-            str: "claude-sonnet-4-20250514" (Claude Sonnet 4)
+            str: "claude-sonnet-5-5" (Claude Sonnet 5.5)
 
         Example:
             >>> provider = AnthropicProvider()
@@ -201,7 +241,7 @@ class AnthropicProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:
@@ -213,7 +253,7 @@ class AnthropicProvider(ILLMProvider):
 
         Args:
             model_id: Model identifier (must be valid Anthropic model)
-            temperature: Sampling temperature (0.0-2.0, default 1.0)
+            temperature: Sampling temperature (None = model default)
             max_tokens: Maximum tokens in response (default 4096)
             **kwargs: Additional ChatAnthropic parameters (api_key, etc.)
 

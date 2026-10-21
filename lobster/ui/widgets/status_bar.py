@@ -62,30 +62,20 @@ def get_friendly_model_name(model_id: str, provider: str) -> str:
     Returns:
         Friendly name (e.g., "sonnet 4.5", "gptoss:20b")
     """
-    # Bedrock model ID mappings
-    if provider == "bedrock":
-        if "claude-sonnet-4-5" in model_id or "claude-4-5-sonnet" in model_id:
-            return "sonnet 4.5"
-        elif "claude-haiku-4-5" in model_id or "claude-4-5-haiku" in model_id:
-            return "haiku 4.5"
-        elif "claude-sonnet-4" in model_id or "claude-4-sonnet" in model_id:
-            return "sonnet 4.0"
-        elif "claude-opus" in model_id:
-            return "opus 4.5"
-
-    # Anthropic Direct
-    elif provider == "anthropic":
-        if "claude-4-5-sonnet" in model_id or "claude-sonnet-4-5" in model_id:
-            return "sonnet 4.5"
-        elif "claude-4-5-haiku" in model_id or "claude-haiku-4-5" in model_id:
-            return "haiku 4.5"
-        elif "claude-4-sonnet" in model_id or "claude-sonnet-4" in model_id:
-            return "sonnet 4.0"
-        elif "claude-opus" in model_id:
-            return "opus 4.5"
+    # Claude IDs on Bedrock and Anthropic Direct: "<family> <major>.<minor>"
+    if provider in ("bedrock", "anthropic"):
+        match = re.search(
+            r"claude-(sonnet|haiku|opus|fable)-(\d+)(?:-(\d))?(?:\D|$)", model_id
+        )
+        if match:
+            family, major, minor = match.groups()
+            return f"{family} {major}.{minor or '0'}"
+        legacy = re.search(r"claude-(\d)-(\d)-(sonnet|haiku|opus)", model_id)
+        if legacy:
+            return f"{legacy.group(3)} {legacy.group(1)}.{legacy.group(2)}"
 
     # Ollama - use model name as-is (already friendly)
-    elif provider == "ollama":
+    if provider == "ollama":
         return model_id  # e.g., "gptoss:20b", "llama3:8b-instruct"
 
     # Fallback: truncate long IDs
@@ -200,8 +190,9 @@ class StatusBar(Horizontal):
             left.update(self._render_left())
             center.update(self._render_center())
             right.update(self._render_right())
-        except Exception:
-            # Widget tree not ready yet - ignore
+        except (
+            Exception
+        ):  # nosec B110 # Widget tree not mounted yet; the next refresh redraws.
             pass
 
     def _render_left(self) -> Text:

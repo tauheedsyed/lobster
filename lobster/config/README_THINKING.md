@@ -4,13 +4,19 @@ This guide explains how to configure and use the thinking/reasoning feature for 
 
 ## Overview
 
-The thinking feature allows compatible models (currently Claude 3.7 Sonnet) to output their step-by-step reasoning process before providing an answer. This can improve the quality of responses and provide transparency into the agent's decision-making process.
+The thinking feature lets compatible models reason step by step before answering. This can improve the quality of responses and provide transparency into the agent's decision-making process.
 
 ## Supported Models
 
-Currently, only the following models support thinking:
-- `claude-3-7-sonnet` (US region)
-- `claude-3-7-sonnet-eu` (EU region)
+Presets (`light`, `standard`, `extended`, `deep`) are translated per model
+family (`lobster/config/thinking.py`):
+
+| Model family | Request sent |
+|---|---|
+| Claude 5.x and Fable (Anthropic, Bedrock, Omics-OS Cloud) | adaptive thinking + effort `low` / `medium` / `high` / `max` |
+| Claude 3.7 and 4.x | `enabled` + `budget_tokens` (1000 / 2000 / 5000 / 10000) |
+| OpenAI (direct) | `reasoning.effort` `low` / `medium` / `high` / `high` |
+| GPT on Bedrock, other providers | nothing; a warning is logged once |
 
 ## Configuration Methods
 
@@ -115,8 +121,8 @@ settings.print_agent_configuration()
 
 ## Important Notes
 
-1. **Model Compatibility**: Thinking only works with models that support it (currently Claude 3.7 Sonnet variants)
-2. **Token Budget**: The thinking budget is separate from the main response tokens
+1. **Model Compatibility**: See the table above; unsupported routes ignore the preset with a warning
+2. **Token Budget**: On Claude 5.x the output limit includes thinking tokens
 3. **Performance**: Thinking adds some latency but can significantly improve response quality
 4. **Cost**: Thinking tokens are billed separately and may increase costs
 

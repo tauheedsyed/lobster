@@ -412,7 +412,7 @@ class OpenRouterProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:

@@ -22,7 +22,7 @@ Example:
 
 import logging
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 from lobster.config.providers.base_provider import ILLMProvider, ModelInfo
 
@@ -243,7 +243,7 @@ class AzureProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:
@@ -255,7 +255,7 @@ class AzureProvider(ILLMProvider):
 
         Args:
             model_id: Model name (e.g., "gpt-4o", "deepseek-r1")
-            temperature: Sampling temperature (0.0-2.0, default 1.0)
+            temperature: Sampling temperature (None = model default)
             max_tokens: Maximum tokens in response (default 4096)
             **kwargs: Additional AzureAIChatCompletionsModel parameters
 

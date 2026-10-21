@@ -25,7 +25,7 @@ Example:
 """
 
 import os
-from typing import Any, ClassVar, List
+from typing import Any, ClassVar, List, Optional
 
 from lobster.config.providers.base_provider import ILLMProvider, ModelInfo
 
@@ -310,7 +310,7 @@ class NebiusProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:

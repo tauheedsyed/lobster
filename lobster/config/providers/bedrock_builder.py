@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 def build_bedrock_converse(
     *,
     model_id: str,
-    temperature: float = 1.0,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     client: Any = None,
     bedrock_client: Any = None,
@@ -35,10 +35,11 @@ def build_bedrock_converse(
     """
     from langchain_aws import ChatBedrockConverse
 
-    params: dict[str, Any] = {
-        "model_id": model_id,
-        "temperature": temperature,
-    }
+    params: dict[str, Any] = {"model_id": model_id}
+
+    # Send a temperature only when set; newer models accept only their default.
+    if temperature is not None:
+        params["temperature"] = temperature
 
     # Send an output-token limit only when the caller asks for one. Without it
     # Bedrock applies the model's own maximum, whereas a built-in default would

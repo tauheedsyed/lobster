@@ -12,8 +12,6 @@ Covers:
 import os
 from unittest.mock import patch
 
-import pytest
-
 from lobster.config.agent_defaults import (
     THINKING_PRESETS,
     ThinkingConfig,
@@ -30,14 +28,14 @@ class TestGetAgentParams:
     """Test get_agent_params() resolution logic."""
 
     def test_unknown_agent_returns_default_temperature(self):
-        """Any unknown agent name must return temperature=1.0 without raising."""
+        """Unknown agents get no temperature (model default) without raising."""
         params = get_agent_params("totally_unknown_agent_xyz")
-        assert params == {"temperature": 1.0}
+        assert params == {}
 
     def test_known_agent_returns_default_temperature(self):
-        """A real agent name with no overrides also returns temperature=1.0."""
+        """A real agent with no overrides sends no temperature (model default)."""
         params = get_agent_params("supervisor")
-        assert params["temperature"] == 1.0
+        assert "temperature" not in params
 
     def test_env_var_overrides_temperature(self):
         """LOBSTER_{AGENT}_TEMPERATURE env var should override default temperature."""
@@ -49,7 +47,7 @@ class TestGetAgentParams:
         """A non-numeric LOBSTER_{AGENT}_TEMPERATURE must be silently ignored."""
         with patch.dict(os.environ, {"LOBSTER_SUPERVISOR_TEMPERATURE": "not_a_float"}):
             params = get_agent_params("supervisor")
-        assert params["temperature"] == 1.0
+        assert "temperature" not in params
 
     def test_env_var_thinking_preset_applies(self):
         """LOBSTER_{AGENT}_THINKING env var enables the specified preset."""
