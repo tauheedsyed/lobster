@@ -7,6 +7,7 @@ using the modular DataManagerV2 system.
 """
 
 # Agent configuration for entry point discovery (must be at top, before heavy imports)
+from lobster.core.utils.dtype_guards import is_text_dtype
 from lobster.agents.machine_learning.config import ML_EXPERT_CONFIG
 
 AGENT_CONFIG = ML_EXPERT_CONFIG
@@ -733,7 +734,7 @@ def machine_learning_expert(
 
                 if include_labels:
                     labels = adata.obs[label_column]
-                    if labels.dtype == "object" or labels.dtype.name == "category":
+                    if is_text_dtype(labels) or labels.dtype.name == "category":
                         from sklearn.preprocessing import LabelEncoder
 
                         le = LabelEncoder()

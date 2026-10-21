@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from lobster.core.utils.dtype_guards import is_text_dtype
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 
 if TYPE_CHECKING:
@@ -118,7 +119,7 @@ class MLPreparationService:
             checks.update(
                 {
                     "gene_symbols_available": "gene_symbols" in adata.var.columns
-                    or adata.var.index.dtype == "object",
+                    or is_text_dtype(adata.var.index),
                     "count_data": (
                         np.all(adata.X >= 0) if hasattr(adata.X, "__iter__") else True
                     ),
@@ -860,7 +861,7 @@ elif "proteomics" in name_lower or "protein" in name_lower:
 # Modality-specific checks
 if modality_type in ["single_cell_rna_seq", "bulk_rna_seq"]:
     checks.update({
-        "gene_symbols_available": "gene_symbols" in adata.var.columns or adata.var.index.dtype == "object",
+        "gene_symbols_available": "gene_symbols" in adata.var.columns or adata.var.index.dtype.kind in "OSU",
         "count_data": np.all(adata.X >= 0) if hasattr(adata.X, "__iter__") else True,
         "reasonable_gene_count": 500 <= adata.n_vars <= 50000,
     })

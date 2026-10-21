@@ -138,6 +138,11 @@ allowlist entry. That is the pattern to prefer.
 
 ## D6 — 15 live type-identity comparisons in `packages/lobster-ml/**`
 
+**Status: fixed in 1.1.433.** The nine runtime sites use `is_text_dtype`. The
+six template sites use `dtype.kind in "OSU"`, so exported notebooks need no
+Lobster import. The `pandas<3` ceilings are removed, and the full unit and
+package suites pass under pandas 3.0.6 and numpy 2.5.4.
+
 Same bug class as the shipped fix (`.values.dtype == object` and
 `.dtype == "object"` both evaluate False for a pandas-3 default string Series /
 Index). **Not live in production** — `lobster-ml` is not installed in the Cloud

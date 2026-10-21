@@ -12,9 +12,9 @@ import pandas as pd
 from anndata import AnnData
 from scipy.sparse import issparse
 
+from lobster.core.utils.dtype_guards import is_text_dtype
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.ml.sparse_utils import (
-    SparseConversionError,
     check_sparse_conversion_safe,
 )
 from lobster.utils.logger import get_logger
@@ -268,7 +268,7 @@ sample_names = adata.obs_names.tolist()
 
 # Encode target if categorical
 label_encoder = None
-if y.dtype == object or str(y.dtype) == "category":
+if y.dtype.kind in "OSU" or str(y.dtype) == "category":
     label_encoder = LabelEncoder()
     y = label_encoder.fit_transform(y)
     class_names = label_encoder.classes_.tolist()
@@ -655,7 +655,7 @@ print(f"CV complete: accuracy={aggregated_metrics['accuracy']['mean']:.3f}+/-{ag
 
         # Encode target if categorical
         label_encoder = None
-        if y.dtype == object or str(y.dtype) == "category":
+        if is_text_dtype(y) or str(y.dtype) == "category":
             label_encoder = LabelEncoder()
             y = label_encoder.fit_transform(y)
             class_names = label_encoder.classes_.tolist()
@@ -680,7 +680,6 @@ print(f"CV complete: accuracy={aggregated_metrics['accuracy']['mean']:.3f}+/-{ag
         all_predictions = []
         fold_predictions_by_fold = []  # For per-fold sampling
         all_importances = []
-        all_probabilities = []
 
         for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y)):
             logger.info(f"Processing fold {fold_idx + 1}/{n_splits}")
@@ -804,7 +803,7 @@ print(f"CV complete: accuracy={aggregated_metrics['accuracy']['mean']:.3f}+/-{ag
                 "stability": stability[top_indices].tolist(),
             }
             logger.info(
-                f"Stored feature importance: full arrays in var, top 100 in uns"
+                "Stored feature importance: full arrays in var, top 100 in uns"
             )
 
         # Store results in adata

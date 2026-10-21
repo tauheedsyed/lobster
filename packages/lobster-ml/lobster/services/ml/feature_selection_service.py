@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from anndata import AnnData
 
+from lobster.core.utils.dtype_guards import is_text_dtype
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.ml.sparse_utils import (
-    SparseConversionError,
     check_sparse_conversion_safe,
 )
 from lobster.utils.logger import get_logger
@@ -277,7 +277,7 @@ print(f"\\nInput: {n_samples} samples x {n_total_features} features")
 print(f"Target: '{ {{ target_column | repr }} }'")
 
 # Encode categorical target if needed
-if y.dtype == object or str(y.dtype) == "category":
+if y.dtype.kind in "OSU" or str(y.dtype) == "category":
     le = LabelEncoder()
     y = le.fit_transform(y)
     print(f"Encoded {len(le.classes_)} target classes: {list(le.classes_)}")
@@ -563,11 +563,11 @@ scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
 # Determine task type (classification vs regression)
-is_classification = y.dtype == object or str(y.dtype) == "category" or len(np.unique(y)) < 10
+is_classification = y.dtype.kind in "OSU" or str(y.dtype) == "category" or len(np.unique(y)) < 10
 
 if is_classification:
     # Encode target for classification
-    if y.dtype == object or str(y.dtype) == "category":
+    if y.dtype.kind in "OSU" or str(y.dtype) == "category":
         le = LabelEncoder()
         y = le.fit_transform(y)
 
@@ -1106,7 +1106,7 @@ print(f"{'=' * 60}")
         n_total_features = X.shape[1]
 
         # Encode categorical target if needed
-        if y.dtype == object or str(y.dtype) == "category":
+        if is_text_dtype(y) or str(y.dtype) == "category":
             from sklearn.preprocessing import LabelEncoder
 
             le = LabelEncoder()
@@ -1331,12 +1331,12 @@ print(f"{'=' * 60}")
 
         # Determine task type
         is_classification = (
-            y.dtype == object or str(y.dtype) == "category" or len(np.unique(y)) < 10
+            is_text_dtype(y) or str(y.dtype) == "category" or len(np.unique(y)) < 10
         )
 
         if is_classification:
             # Encode target
-            if y.dtype == object or str(y.dtype) == "category":
+            if is_text_dtype(y) or str(y.dtype) == "category":
                 le = LabelEncoder()
                 y = le.fit_transform(y)
 
@@ -1446,7 +1446,6 @@ print(f"{'=' * 60}")
                     f"If using integrated factors, ensure integration was run first."
                 )
             X = adata.obsm[feature_space_key]
-            feature_names = [f"Factor_{i + 1}" for i in range(X.shape[1])]
 
             if X.shape[0] != len(adata.obs):
                 raise ValueError(
@@ -1455,7 +1454,6 @@ print(f"{'=' * 60}")
                 )
         else:
             X = adata.X
-            feature_names = adata.var_names.tolist()
 
         # Calculate variances with chunked or standard approach
         if issparse(X):

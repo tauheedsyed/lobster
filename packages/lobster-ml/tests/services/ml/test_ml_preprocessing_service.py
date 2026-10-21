@@ -13,13 +13,11 @@ Tests cover:
 All tests run WITHOUT instantiating DataManagerV2 (isolated unit tests).
 """
 
-from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.services.ml.ml_preprocessing_service import (
     MLPreprocessingService,
     infer_task_type,
@@ -139,6 +137,11 @@ def small_class_adata():
 class TestInferTaskType:
     """Test the infer_task_type helper function."""
 
+    def test_pandas_string_dtype_is_classification(self):
+        """pandas string labels (the pandas 3 default) are classification."""
+        y = pd.Series(["A", "B", "A", "B", "C"], dtype="string").values
+        assert infer_task_type(y) == ("classification", 1.0)
+
     def test_categorical_string_high_confidence(self):
         """Categorical string array returns classification with confidence 1.0."""
         y = np.array(["A", "B", "A", "B", "C"])
@@ -239,7 +242,7 @@ class TestMetadataPreservation:
     def test_is_synthetic_column_exists(self, service, imbalanced_adata):
         """Output AnnData has is_synthetic column."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -256,7 +259,7 @@ class TestMetadataPreservation:
     def test_real_samples_marked_false(self, service, imbalanced_adata):
         """Real samples (first n_original) have is_synthetic=False."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -272,12 +275,12 @@ class TestMetadataPreservation:
 
         # First n_original samples should be real
         real_samples = adata_out.obs.iloc[:n_original]
-        assert (real_samples["is_synthetic"] == False).all()
+        assert (~real_samples["is_synthetic"]).all()
 
     def test_synthetic_samples_marked_true(self, service, imbalanced_adata):
         """Synthetic samples (after n_original) have is_synthetic=True."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -294,12 +297,12 @@ class TestMetadataPreservation:
         # After n_original should be synthetic
         if adata_out.shape[0] > n_original:
             synthetic_samples = adata_out.obs.iloc[n_original:]
-            assert (synthetic_samples["is_synthetic"] == True).all()
+            assert synthetic_samples["is_synthetic"].all()
 
     def test_real_samples_preserve_all_metadata(self, service, imbalanced_adata):
         """Real samples preserve ALL original obs columns."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -330,7 +333,7 @@ class TestMetadataPreservation:
     def test_synthetic_samples_have_uuid_ids(self, service, imbalanced_adata):
         """Synthetic samples have UUID-based IDs."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -353,7 +356,7 @@ class TestMetadataPreservation:
     def test_synthetic_samples_have_na_metadata(self, service, imbalanced_adata):
         """Synthetic samples have NA for non-target metadata columns."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -377,7 +380,7 @@ class TestMetadataPreservation:
     def test_original_index_preserved(self, service, imbalanced_adata):
         """Original sample IDs are preserved in output."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -407,7 +410,7 @@ class TestUnsMetadata:
     def test_smote_config_stored(self, service, imbalanced_adata):
         """SMOTE configuration stored in uns['smote_config']."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -432,7 +435,7 @@ class TestUnsMetadata:
     def test_label_encoder_classes_stored(self, service, imbalanced_adata):
         """Label encoder classes stored when target is categorical."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -460,7 +463,7 @@ class TestBalanceThreshold:
     def test_balanced_data_skipped(self, service, balanced_adata):
         """Already balanced data skips SMOTE processing."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -482,7 +485,7 @@ class TestBalanceThreshold:
     def test_skipped_has_is_synthetic_false(self, service, balanced_adata):
         """Skipped processing still adds is_synthetic=False."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -495,7 +498,7 @@ class TestBalanceThreshold:
         )
 
         assert "is_synthetic" in adata_out.obs.columns
-        assert (adata_out.obs["is_synthetic"] == False).all()
+        assert (~adata_out.obs["is_synthetic"]).all()
 
 
 # =============================================================================
@@ -509,7 +512,7 @@ class TestMinimumSamplesValidation:
     def test_too_few_samples_raises_error(self, service, small_class_adata):
         """Class with too few samples raises ValueError."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -529,7 +532,7 @@ class TestMinimumSamplesValidation:
     def test_error_includes_class_name(self, service, small_class_adata):
         """Error message includes the class name."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -556,7 +559,7 @@ class TestStatsOutput:
     def test_n_synthetic_in_stats(self, service, imbalanced_adata):
         """Stats dict includes n_synthetic count."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -575,7 +578,7 @@ class TestStatsOutput:
     def test_stats_match_actual_counts(self, service, imbalanced_adata):
         """Stats n_synthetic matches actual synthetic sample count."""
         try:
-            from imblearn.over_sampling import SMOTE
+            from imblearn.over_sampling import SMOTE  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("imbalanced-learn not installed")
 
@@ -590,7 +593,7 @@ class TestStatsOutput:
         )
 
         # Calculate actual synthetic count
-        actual_synthetic = (adata_out.obs["is_synthetic"] == True).sum()
+        actual_synthetic = adata_out.obs["is_synthetic"].sum()
         reported_synthetic = stats["n_synthetic"]
 
         assert actual_synthetic == reported_synthetic

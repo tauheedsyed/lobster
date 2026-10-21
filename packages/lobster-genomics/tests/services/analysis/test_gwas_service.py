@@ -705,7 +705,7 @@ class TestLDPruning:
 
     def test_ld_prune_variants_basic(self, gwas_service, simple_gwas_adata):
         """Test that LD pruning returns fewer variants than input."""
-        sg = pytest.importorskip("sgkit")
+        pytest.importorskip("sgkit")
 
         adata_pruned, stats, ir = gwas_service.ld_prune_variants(
             simple_gwas_adata,
@@ -727,9 +727,21 @@ class TestLDPruning:
         assert stats["n_variants_after"] == adata_pruned.n_vars
         assert stats["n_variants_removed"] == stats["n_variants_before"] - stats["n_variants_after"]
 
+    def test_ld_prune_with_string_dtype_ids(self, gwas_service, simple_gwas_adata):
+        """String-dtype IDs (the pandas 3 default) reach sgkit as numpy arrays."""
+        pytest.importorskip("sgkit")
+        adata = simple_gwas_adata.copy()
+        adata.var.index = adata.var.index.astype("string")
+        adata.obs.index = adata.obs.index.astype("string")
+
+        adata_pruned, stats, _ = gwas_service.ld_prune_variants(adata, threshold=0.2)
+
+        assert stats["n_variants_before"] == adata.n_vars
+        assert 0 < adata_pruned.n_vars <= adata.n_vars
+
     def test_ld_prune_ir_structure(self, gwas_service, simple_gwas_adata):
         """Test that LD prune IR has correct operation name."""
-        sg = pytest.importorskip("sgkit")
+        pytest.importorskip("sgkit")
 
         _, _, ir = gwas_service.ld_prune_variants(simple_gwas_adata)
 
@@ -749,7 +761,7 @@ class TestLDPruning:
 
     def test_ld_prune_missing_genotype_layer(self, gwas_service, simple_gwas_adata):
         """Test error when genotype layer doesn't exist."""
-        sg = pytest.importorskip("sgkit")
+        pytest.importorskip("sgkit")
         from lobster.services.analysis.gwas_service import GWASError
 
         with pytest.raises(GWASError):
@@ -769,7 +781,7 @@ class TestKinship:
 
     def test_compute_kinship_basic(self, gwas_service, simple_gwas_adata):
         """Test that kinship returns matrix in obsm and related pairs in uns."""
-        sg = pytest.importorskip("sgkit")
+        pytest.importorskip("sgkit")
 
         adata_kin, stats, ir = gwas_service.compute_kinship(
             simple_gwas_adata,
@@ -799,7 +811,7 @@ class TestKinship:
 
     def test_compute_kinship_ir_structure(self, gwas_service, simple_gwas_adata):
         """Test that kinship IR has correct fields."""
-        sg = pytest.importorskip("sgkit")
+        pytest.importorskip("sgkit")
 
         _, _, ir = gwas_service.compute_kinship(simple_gwas_adata)
 
