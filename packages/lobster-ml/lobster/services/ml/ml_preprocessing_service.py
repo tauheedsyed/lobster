@@ -162,12 +162,12 @@ sample_missing_rate = np.mean(missing_mask, axis=1)
 # Filter features with too many missing values
 keep_features = feature_missing_rate <= {{ feature_threshold }}
 n_features_removed = np.sum(~keep_features)
-print(f"Removing {n_features_removed} features with >{{ feature_threshold }} missing")
+print(f"Removing {n_features_removed} features with >{ {{ feature_threshold | repr }} } missing")
 
 # Filter samples with too many missing values
 keep_samples = sample_missing_rate <= {{ sample_threshold }}
 n_samples_removed = np.sum(~keep_samples)
-print(f"Removing {n_samples_removed} samples with >{{ sample_threshold }} missing")
+print(f"Removing {n_samples_removed} samples with >{ {{ sample_threshold | repr }} } missing")
 
 # Apply filters
 X_filtered = X[keep_samples][:, keep_features]
@@ -175,19 +175,19 @@ missing_after_filter = np.isnan(X_filtered).sum()
 print(f"After filtering: {X_filtered.shape}, {missing_after_filter} missing values remain")
 
 # Impute remaining missing values
-if missing_after_filter > 0 and "{{ imputation_strategy }}" != "none":
+if missing_after_filter > 0 and {{ imputation_strategy | string | repr }} != "none":
     {% if imputation_strategy == "constant" %}
     {% if fill_value is not none %}
     fill_value = {{ fill_value }}
     {% else %}
     fill_value = 0
     {% endif %}
-    imputer = SimpleImputer(strategy="{{ imputation_strategy }}", fill_value=fill_value)
+    imputer = SimpleImputer(strategy={{ imputation_strategy | string | repr }}, fill_value=fill_value)
     {% else %}
-    imputer = SimpleImputer(strategy="{{ imputation_strategy }}")
+    imputer = SimpleImputer(strategy={{ imputation_strategy | string | repr }})
     {% endif %}
     X_imputed = imputer.fit_transform(X_filtered)
-    print(f"Imputed {missing_after_filter} values using {{ imputation_strategy }} strategy")
+    print(f"Imputed {missing_after_filter} values using { {{ imputation_strategy | repr }} } strategy")
 else:
     X_imputed = X_filtered
     print("No imputation needed")
@@ -200,7 +200,7 @@ adata.X = X_imputed
 adata.uns["missing_value_handling"] = {
     "feature_threshold": {{ feature_threshold }},
     "sample_threshold": {{ sample_threshold }},
-    "imputation_strategy": "{{ imputation_strategy }}",
+    "imputation_strategy": {{ imputation_strategy | string | repr }},
     "features_removed": int(n_features_removed),
     "samples_removed": int(n_samples_removed),
 }
@@ -281,7 +281,7 @@ print(f"Final shape: {adata.shape}")
             ),
         }
 
-        code_template = """# Feature scaling with {{ method }} scaler
+        code_template = """# Feature scaling with {{ method | string | repr }} scaler
 import numpy as np
 from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler
 from lobster.services.ml.sparse_utils import check_sparse_conversion_safe
@@ -306,13 +306,13 @@ print(f"  Std: {original_std:.4f}")
 print(f"  Range: [{original_min:.4f}, {original_max:.4f}]")
 
 # Select and configure scaler based on method
-print(f"\\nScaling method: {{ method }}")
+print(f"\\nScaling method: { {{ method | repr }} }")
 {% if method == "standard" %}
 # StandardScaler: (X - mean) / std
 # Good for: normally distributed features, algorithms sensitive to scale (SVM, neural nets)
 scaler = StandardScaler(with_mean={{ with_mean }}, with_std={{ with_std }})
 print("Using StandardScaler (z-score normalization)")
-print(f"  with_mean={{ with_mean }}, with_std={{ with_std }}")
+print(f"  with_mean={ {{ with_mean | repr }} }, with_std={ {{ with_std | repr }} }")
 {% elif method == "robust" %}
 # RobustScaler: (X - median) / IQR
 # Good for: data with outliers, uses median and interquartile range
@@ -340,7 +340,7 @@ X_scaled = scaler.fit_transform(X)
 print("Scaling complete")
 
 # Store scaler parameters for reproducibility
-scaler_params = {"method": "{{ method }}"}
+scaler_params = {"method": {{ method | string | repr }}}
 {% if method == "standard" %}
 scaler_params["mean"] = scaler.mean_.tolist()
 scaler_params["scale"] = scaler.scale_.tolist()
@@ -484,7 +484,7 @@ print(f"\\nScaling complete for {X.shape[1]} features")
             ),
         }
 
-        code_template = """# Class imbalance handling with {{ method }} - metadata preserving
+        code_template = """# Class imbalance handling with {{ method | string | repr }} - metadata preserving
 import uuid
 import numpy as np
 import pandas as pd
@@ -500,8 +500,8 @@ from imblearn.combine import SMOTETomek
 {% endif %}
 
 # Configuration
-target_column = "{{ target_column }}"
-task_type = "{{ task_type }}"
+target_column = {{ target_column | string | repr }}
+task_type = {{ task_type | string | repr }}
 k_neighbors = {{ k_neighbors }}
 balance_threshold = {{ balance_threshold }}
 
@@ -551,19 +551,19 @@ else:
     {% if method == "smote" %}
     resampler = SMOTE(
         k_neighbors=k_neighbors,
-        sampling_strategy="{{ sampling_strategy }}",
+        sampling_strategy={{ sampling_strategy | string | repr }},
         random_state={{ random_state }}
     )
     print(f"Using SMOTE with k_neighbors={k_neighbors}")
     {% elif method == "random_under" %}
     resampler = RandomUnderSampler(
-        sampling_strategy="{{ sampling_strategy }}",
+        sampling_strategy={{ sampling_strategy | string | repr }},
         random_state={{ random_state }}
     )
     print("Using RandomUnderSampler")
     {% elif method == "smote_tomek" %}
     resampler = SMOTETomek(
-        sampling_strategy="{{ sampling_strategy }}",
+        sampling_strategy={{ sampling_strategy | string | repr }},
         random_state={{ random_state }}
     )
     print("Using SMOTETomek")
@@ -600,9 +600,9 @@ else:
 
     # Store metadata
     adata.uns["smote_config"] = {
-        "method": "{{ method }}",
+        "method": {{ method | string | repr }},
         "k_neighbors": k_neighbors,
-        "sampling_strategy": "{{ sampling_strategy }}",
+        "sampling_strategy": {{ sampling_strategy | string | repr }},
         "random_state": {{ random_state }},
         "balance_threshold": balance_threshold,
         "target_column": target_column,
@@ -612,7 +612,7 @@ else:
 
     new_distribution = dict(zip(*np.unique(y_resampled, return_counts=True)))
     adata.uns["class_imbalance_handling"] = {
-        "method": "{{ method }}",
+        "method": {{ method | string | repr }},
         "original_distribution": {str(k): int(v) for k, v in class_distribution.items()},
         "resampled_distribution": {str(k): int(v) for k, v in new_distribution.items()},
     }
@@ -697,7 +697,7 @@ print("Class imbalance handling complete")
             ),
         }
 
-        code_template = """# Categorical encoding with {{ method }} encoder
+        code_template = """# Categorical encoding with {{ method | string | repr }} encoder
 import numpy as np
 {% if method == "label" %}
 from sklearn.preprocessing import LabelEncoder
@@ -713,7 +713,7 @@ encoding_info = {}
 n_columns = len(columns)
 
 print(f"Starting categorical encoding:")
-print(f"  Method: {{ method }}")
+print(f"  Method: { {{ method | repr }} }")
 print(f"  Columns: {columns}")
 print(f"  Total columns: {n_columns}")
 
@@ -727,7 +727,7 @@ print("  - Implies ordinal relationship (not always desired)")
 print("\\nOne-Hot Encoding:")
 print("  - Creates binary column for each category")
 print("  - No ordinal assumption")
-print(f"  - Drop first: {{ drop_first }}")
+print(f"  - Drop first: { {{ drop_first | repr }} }")
 {% elif method == "ordinal" %}
 print("\\nOrdinal Encoding:")
 print("  - Converts categories to ordered integers")
@@ -766,7 +766,7 @@ for col_idx, col in enumerate(columns, 1):
     {% elif method == "onehot" %}
     # One-hot encoding: categorical -> binary columns
     # Best for: linear models, neural networks
-    ohe = OneHotEncoder(sparse_output=False, drop="{{ "first" if drop_first else "None" }}")
+    ohe = OneHotEncoder(sparse_output=False, drop={{ ("first" if drop_first else "None") | string | repr }})
     encoded = ohe.fit_transform(values.reshape(-1, 1))
     categories = ohe.categories_[0]
 
@@ -825,7 +825,7 @@ adata.uns["categorical_encoding"] = encoding_info
 
 # Summary
 print(f"\\nEncoding complete:")
-print(f"  Method: {{ method }}")
+print(f"  Method: { {{ method | repr }} }")
 print(f"  Columns processed: {len(columns)}")
 {% if method == "onehot" %}
 total_new_cols = sum(len(info.get("new_columns", [])) for info in encoding_info.values())

@@ -9,7 +9,7 @@ Test coverage target: 95%+ with meaningful tests for bulk RNA-seq operations.
 """
 
 import os
-import subprocess
+import subprocess  # nosec B404 - subprocess used with fixed argument lists
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -165,7 +165,9 @@ class TestBulkRNASeqServiceCore:
     def test_service_initialization_default(self):
         """Test BulkRNASeqService initialization with default parameters."""
         # Service now requires results_dir or data_manager
-        default_results_dir = Path("/tmp/bulk_results")
+        default_results_dir = Path(
+            "/tmp/bulk_results"
+        )  # nosec B108 - path alias, not a temp file
         with patch("pathlib.Path.mkdir"):
             service = BulkRNASeqService(results_dir=default_results_dir)
 
@@ -775,7 +777,6 @@ class TestPyDESeq2Integration:
         self, bulk_service, pydeseq2_count_matrix, pydeseq2_metadata
     ):
         """Test that pyDESeq2 IR code template renders correctly."""
-        from jinja2 import Template
 
         with patch.object(bulk_service, "validate_pydeseq2_setup") as mock_validate:
             mock_validate.return_value = {"pydeseq2": True, "pydeseq2_inference": True}
@@ -803,8 +804,7 @@ class TestPyDESeq2Integration:
                         )
 
                         # Test Jinja2 rendering
-                        template = Template(ir.code_template)
-                        rendered = template.render(**ir.parameters)
+                        rendered = ir.render()
 
                         # Verify rendered code
                         assert "~condition" in rendered
@@ -1270,9 +1270,9 @@ class TestIRGeneration:
 
         # Verify code template
         assert ir.code_template is not None
-        assert "{{ groupby }}" in ir.code_template
-        assert "{{ group1 }}" in ir.code_template
-        assert "{{ group2 }}" in ir.code_template
+        assert "{{ groupby | string | repr }}" in ir.code_template
+        assert "{{ group1 | string | repr }}" in ir.code_template
+        assert "{{ group2 | string | repr }}" in ir.code_template
         assert "scipy" in ir.code_template
         assert "multipletests" in ir.code_template
 
@@ -1378,7 +1378,7 @@ class TestIRGeneration:
 
         # Verify code template
         assert "DeseqDataSet" in ir.code_template or "pydeseq2" in ir.code_template
-        assert "{{ formula }}" in ir.code_template
+        assert "{{ formula | string | repr }}" in ir.code_template
         assert "{{ contrast }}" in ir.code_template
 
         # Verify imports
@@ -1477,7 +1477,6 @@ class TestIRGeneration:
 
     def test_ir_code_template_renders_without_errors(self, bulk_service):
         """Test that Jinja2 code templates render successfully."""
-        from jinja2 import Template
 
         # Test DE IR template
         ir_de = bulk_service._create_de_ir(
@@ -1488,8 +1487,7 @@ class TestIRGeneration:
             min_expression_threshold=1.0,
         )
 
-        template_de = Template(ir_de.code_template)
-        rendered_de = template_de.render(**ir_de.parameters)
+        rendered_de = ir_de.render()
 
         # Should contain actual values, not placeholders
         assert "condition" in rendered_de
@@ -1504,8 +1502,7 @@ class TestIRGeneration:
             organism="human",
         )
 
-        template_enrich = Template(ir_enrich.code_template)
-        rendered_enrich = template_enrich.render(**ir_enrich.parameters)
+        rendered_enrich = ir_enrich.render()
 
         assert "GO_Biological_Process_2023" in rendered_enrich
         assert "{{" not in rendered_enrich

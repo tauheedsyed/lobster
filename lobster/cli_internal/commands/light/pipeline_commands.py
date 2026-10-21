@@ -30,11 +30,37 @@ def _render_blocks(output: OutputAdapter, blocks: list[OutputBlock]) -> None:
     output.render_blocks(blocks)
 
 
+EXPORT_USAGE = "pipeline export [name] [description] [--replay] [--force]"
+
+
+def parse_export_args(
+    args: list[str],
+) -> tuple[Optional[str], Optional[str], str, bool]:
+    """Parse ``pipeline export`` arguments into (name, description, mode, force).
+
+    Raises:
+        ValueError: If an argument looks like an option but is not one, so a
+            mistyped flag is never used as the notebook name.
+    """
+    flags = {"--replay", "--force"}
+    unknown = [a for a in args if a.startswith("-") and a != "-" and a not in flags]
+    if unknown:
+        raise ValueError(f"Unknown option: {', '.join(unknown)}. Usage: {EXPORT_USAGE}")
+    mode = "replay" if "--replay" in args else "successful"
+    force = "--force" in args
+    rest = [a for a in args if a not in flags]
+    name = rest[0] if rest else None
+    description = " ".join(rest[1:]) if len(rest) > 1 else None
+    return name, description, mode, force
+
+
 def pipeline_export(
     client: "AgentClient",
     output: OutputAdapter,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    mode: str = "successful",
+    force: bool = False,
 ) -> Optional[str]:
     """
     Export current session as Jupyter notebook.
@@ -44,6 +70,10 @@ def pipeline_export(
         output: OutputAdapter for rendering
         name: Notebook name (without extension). If None, prompts interactively.
         description: Optional notebook description. If None, prompts interactively.
+        mode: "successful" (curated, the default) or "replay" (every step
+            needed to reproduce the result).
+        force: Replace an existing notebook of the same name. Without it the
+            export refuses, because the file may hold the user's own edits.
 
     Returns:
         Summary string for conversation history, or None
@@ -85,11 +115,27 @@ def pipeline_export(
             _render_blocks(output, [alert_block("Name required", level="error")])
             return "Export cancelled - no name provided"
 
+        existing = Path(client.data_manager.workspace_path) / "notebooks"
+        existing = existing / f"{name}.ipynb"
+        if existing.exists() and not force:
+            _render_blocks(
+                output,
+                [
+                    alert_block(f"Notebook already exists: {existing}", level="error"),
+                    hint_block("Choose another name, or add --force to replace it."),
+                ],
+            )
+            return f"Export failed: notebook already exists: {existing}"
+
         if description is None:
             description = output.prompt("Description (optional)", default="")
 
-        _render_blocks(output, [section_block(body="Exporting notebook...")])
-        path = client.data_manager.export_notebook(name, description)
+        _render_blocks(
+            output, [section_block(body=f"Exporting notebook ({mode} mode)...")]
+        )
+        path = client.data_manager.export_notebook(
+            name, description, filter_strategy=mode
+        )
 
         _render_blocks(
             output,

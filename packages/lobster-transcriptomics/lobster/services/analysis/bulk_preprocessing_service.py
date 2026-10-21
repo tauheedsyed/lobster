@@ -846,7 +846,7 @@ pca = PCA(n_components=n_components)
 pca_coords = pca.fit_transform(adata.X)
 
 # For each PC, compute R-squared with batch
-batch = adata.obs['{{ batch_key }}'].values
+batch = adata.obs[{{ batch_key | string | repr }}].values
 unique_batches = np.unique(batch)
 design = np.zeros((len(batch), len(unique_batches)))
 for i, b in enumerate(unique_batches):

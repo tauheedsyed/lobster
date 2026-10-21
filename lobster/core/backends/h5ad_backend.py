@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from lobster.core.backends.base import BaseBackend
+from lobster.core.utils.h5ad_utils import repair_log1p_base as _repair_log1p_base
 from lobster.core.utils.h5ad_utils import sanitize_key as util_sanitize_key
 from lobster.core.utils.h5ad_utils import sanitize_value as util_sanitize_value
 
@@ -93,6 +94,7 @@ class H5ADBackend(BaseBackend):
             else:
                 # Load fully into memory
                 adata = anndata.read_h5ad(resolved_path)
+            _repair_log1p_base(adata)
 
             self._log_operation(
                 "load",
@@ -540,6 +542,7 @@ class H5ADBackend(BaseBackend):
 
             # saniztize Anndata before storing
             adata_sanitized = self.sanitize_anndata(adata_converted)
+            _repair_log1p_base(adata_sanitized)
 
             # FIX #5.2: Post-sanitization validation (diagnostic safety check)
             # Verify that sanitization actually worked before attempting write

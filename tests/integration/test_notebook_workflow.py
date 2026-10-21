@@ -323,7 +323,7 @@ class TestNotebookWorkflow:
             c for c in nb.cells if c.metadata.get("tags", []) == ["parameters"]
         )
         assert "input_data" in params_cell.source
-        assert "random_seed" in params_cell.source
+        assert "output_prefix" in params_cell.source
 
         # Check that code cells use scanpy (standard library)
         code_content = "\n".join(c.source for c in nb.cells if c.cell_type == "code")
@@ -368,17 +368,25 @@ class TestNotebookWorkflow:
         with patch("lobster.core.notebooks.executor.papermill") as mock_pm:
             mock_pm.execute_notebook.return_value = None
 
-            # Execute with custom parameters
-            custom_params = {"random_seed": 999, "custom_value": "test"}
+            # Execute with a parameter the notebook defines
             result = dm.run_notebook(
-                str(notebook_path), "test_data", parameters=custom_params
+                str(notebook_path),
+                "test_data",
+                parameters={"output_prefix": "rerun"},
             )
 
             # Verify parameters were passed
             call_kwargs = mock_pm.execute_notebook.call_args.kwargs
             params = call_kwargs["parameters"]
-            assert params["random_seed"] == 999
-            assert params["custom_value"] == "test"
+            assert params["output_prefix"] == "rerun"
+
+            # A name the notebook does not define is refused, not ignored
+            mock_pm.execute_notebook.reset_mock()
+            result = dm.run_notebook(
+                str(notebook_path), "test_data", parameters={"custom_value": "x"}
+            )
+            assert result["status"] == "validation_failed"
+            mock_pm.execute_notebook.assert_not_called()
 
     @patch("lobster.core.notebooks.executor.papermill")
     def test_execution_failure_handling(

@@ -8,6 +8,7 @@ The exporter uses Service-Emitted Intermediate Representation (IR) to automatica
 generate code without manual mapping registries, achieving 95%+ executable notebooks.
 """
 
+import ast
 import hashlib
 import json
 import logging
@@ -30,6 +31,44 @@ from lobster.core.provenance.analysis_ir import (
 from lobster.core.provenance.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
+
+
+def _guarded_save_code(path_line: str, compression: Optional[str] = None) -> str:
+    """Code for the final save cell.
+
+    ``path_line`` assigns ``output_path``. If h5ad cannot write some uns
+    entries, the cell writes a copy without them, names them in
+    ``uns['lobster_unsaved_uns_keys']`` and leaves the in-memory adata as is.
+    """
+    kwargs = f", compression={compression!r}" if compression else ""
+    return f"""# Save processed data
+{path_line}
+try:
+    adata.write_h5ad(output_path{kwargs})
+except Exception as exc:
+    # Some uns entries cannot be written to h5ad. Write a copy without them
+    # and record their names in that copy; the in-memory adata keeps them.
+    import tempfile
+    from pathlib import Path as _Path
+
+    _unwritable = []
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _key in list(adata.uns):
+            _probe = adata.copy()
+            _probe.uns = {{_key: adata.uns[_key]}}
+            try:
+                _probe.write_h5ad(_Path(_tmp) / "probe.h5ad")
+            except Exception:
+                _unwritable.append(_key)
+    _to_write = adata.copy()
+    for _key in _unwritable:
+        del _to_write.uns[_key]
+    _to_write.uns["lobster_unsaved_uns_keys"] = list(_unwritable)
+    print(f"WARNING: these uns keys could not be written and are NOT in {{output_path}}: {{_unwritable}}")
+    print(f"         original error: {{type(exc).__name__}}: {{exc}}")
+    _to_write.write_h5ad(output_path{kwargs})
+print(f"Saved processed data to: {{output_path}}")
+"""
 
 
 class NotebookExporter:
@@ -103,6 +142,21 @@ class NotebookExporter:
 
         logger.info(f"Exporting notebook with IR: {name}")
 
+        # A failed step may have changed data before it failed. A reproduction
+        # cannot assume it did not, so "replay" refuses instead of dropping it.
+        failed_types = [
+            str(a.get("type") or "unknown")
+            for a in self.provenance.activities
+            if self._is_failed(a)
+        ]
+        if filter_strategy == "replay" and failed_types:
+            raise ValueError(
+                "Cannot export a replay notebook: the session has failed steps "
+                f"({', '.join(dict.fromkeys(failed_types))}) that may have changed "
+                "data before failing. Re-run the analysis without them, or export "
+                "with the default mode."
+            )
+
         # Filter activities by success status
         activities = self._filter_activities(filter_strategy)
         logger.debug(f"Filtered {len(activities)} activities for export")
@@ -147,7 +201,13 @@ class NotebookExporter:
 
         # Add header
         notebook.cells.append(
-            self._create_header_cell(name, description, exportable_count)
+            self._create_header_cell(
+                name,
+                description,
+                exportable_count,
+                mode=filter_strategy,
+                omitted_types=failed_types + excluded_activity_types,
+            )
         )
 
         # Add the export record (hashes taken at export time; not verified at run time)
@@ -162,8 +222,10 @@ class NotebookExporter:
         if helper_cell:
             notebook.cells.append(helper_cell)
 
-        # Add parameters cell (Papermill-tagged)
-        notebook.cells.append(self._create_parameters_cell(irs))
+        # Parameters cell (Papermill-tagged). Filled in once every code cell
+        # exists, so it offers only names the notebook code actually reads.
+        parameters_index = len(notebook.cells)
+        notebook.cells.append(new_code_cell(""))
 
         # Initialize ML bindings once per run, on mutually exclusive input paths.
         # Self-loading roots supply their own load but still need a run boundary.
@@ -190,6 +252,15 @@ class NotebookExporter:
         # Add data saving cell
         notebook.cells.append(self._create_data_saving_cell(irs))
 
+        read_names = self._names_read(
+            cell
+            for index, cell in enumerate(notebook.cells)
+            if index != parameters_index
+        )
+        notebook.cells[parameters_index] = self._create_parameters_cell(
+            irs, read_names=read_names
+        )
+
         # Add provenance summary cell (explains what's in notebook vs provenance)
         notebook.cells.append(
             self._create_provenance_summary_cell(
@@ -202,7 +273,11 @@ class NotebookExporter:
 
         # Add footer cell
         notebook.cells.append(
-            self._create_footer_cell(excluded_activity_types, select_on=select_on)
+            self._create_footer_cell(
+                excluded_activity_types,
+                select_on=select_on,
+                failed_types=failed_types,
+            )
         )
 
         # Add notebook metadata
@@ -247,20 +322,38 @@ class NotebookExporter:
             List of filtered activity dictionaries
         """
         if strategy in ("successful", "replay"):
-            # Exclude activities with error markers. "replay" shares this base
-            # set — a step that failed produced no state worth reproducing —
-            # and differs only in which IR flag selects it downstream.
-            return [
-                a
-                for a in self.provenance.activities
-                if not a.get("error") and a.get("type") != "failed_operation"
-            ]
+            # Exclude activities with error markers. export() refuses "replay"
+            # when any exist, and lists them as omitted for "successful".
+            return [a for a in self.provenance.activities if not self._is_failed(a)]
         elif strategy == "all":
             return self.provenance.activities.copy()
         else:
             # Manual filtering not implemented yet
             logger.warning("Manual filter strategy not implemented, using 'successful'")
             return self._filter_activities("successful")
+
+    @staticmethod
+    def _is_failed(activity: Dict[str, Any]) -> bool:
+        """Whether a provenance activity records a failed step."""
+        return bool(activity.get("error")) or activity.get("type") == "failed_operation"
+
+    @staticmethod
+    def _names_read(cells) -> set:
+        """Names the given code cells read (Python ``Name`` loads)."""
+        names = set()
+        for cell in cells:
+            if cell.cell_type != "code" or not cell.source.strip():
+                continue
+            try:
+                tree = ast.parse(cell.source)
+            except SyntaxError:
+                continue  # Only cells exempt from validation get here.
+            names.update(
+                node.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            )
+        return names
 
     def _extract_irs(self, activities: List[Dict[str, Any]]) -> List[AnalysisStep]:
         """
@@ -405,7 +498,12 @@ class NotebookExporter:
         )
 
     def _create_header_cell(
-        self, name: str, description: str, n_irs: int
+        self,
+        name: str,
+        description: str,
+        n_irs: int,
+        mode: str = "successful",
+        omitted_types: Optional[List[str]] = None,
     ) -> NotebookNode:
         """
         Create markdown header cell for notebook.
@@ -414,6 +512,8 @@ class NotebookExporter:
             name: Notebook name
             description: Optional description
             n_irs: Number of IR objects extracted
+            mode: Export mode the notebook was built with
+            omitted_types: Types of recorded activities left out of the notebook
 
         Returns:
             Markdown cell with header content
@@ -424,6 +524,16 @@ class NotebookExporter:
             else 0
         )
 
+        if mode == "replay":
+            mode_text = "`replay`: every recorded step needed to reproduce the result"
+        else:
+            mode_text = (
+                f"`{mode}`: curated steps for a readable workflow; "
+                "not a full reproduction (use `/pipeline export --replay` for that)"
+            )
+        omitted = list(dict.fromkeys(omitted_types or []))
+        omitted_text = ", ".join(f"`{t}`" for t in omitted) if omitted else "none"
+
         header_content = f"""# {name}
 
 **Generated from Lobster AI Session**
@@ -432,6 +542,10 @@ class NotebookExporter:
 
 **Created:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 **Lobster Version:** {self._get_lobster_version()}
+**Export mode:** {mode_text}
+**Steps included:** {n_irs} of {len(self.provenance.activities)} recorded activities
+**Omitted activity types:** {omitted_text}
+**Verification:** not run. This notebook has not been executed or compared with the session.
 **IR Coverage:** {n_irs}/{len(self.provenance.activities)} activities ({coverage_pct:.1f}%)
 
 ---
@@ -627,62 +741,63 @@ Recorded when this notebook was exported, for your own checks.
         logger.debug(f"Generated helper code cell with {len(helpers)} helper(s)")
         return new_code_cell(code)
 
-    def _create_parameters_cell(self, irs: List[AnalysisStep]) -> NotebookNode:
+    def _create_parameters_cell(
+        self, irs: List[AnalysisStep], read_names: Optional[set] = None
+    ) -> NotebookNode:
         """
-        Create Papermill parameters cell dynamically from IR schemas.
+        Create the Papermill parameters cell.
+
+        A parameter is offered only if the notebook code reads it. Recorded
+        step settings are written into each step's own code, so offering them
+        here would suggest an override that changes nothing.
 
         Args:
             irs: List of AnalysisStep objects
+            read_names: Names the notebook's other code cells read
 
         Returns:
             Code cell tagged for Papermill parameter injection
         """
-        # Collect all Papermill-injectable parameters from IRs
-        injectable_params: Dict[str, Any] = {}
+        read_names = read_names or set()
 
-        for ir in irs:
-            papermill_params = ir.get_papermill_parameters()
-            injectable_params.update(papermill_params)
-
-        # Standard parameters
         code = """# Parameters (tagged for Papermill parameter injection)
 # Override with: papermill notebook.ipynb output.ipynb -p param_name value
+# Only names this notebook reads are listed. Each step's recorded settings are
+# written into that step's code cell; edit the cell to change them.
 
-# Input/Output paths
-input_data = "dataset.h5ad"  # Path to input H5AD file
-output_prefix = "results"     # Prefix for output files
-
-# Reproducibility
-random_seed = 42              # Random seed for reproducibility
 """
-
-        # Add IR-derived parameters if present
-        # Skip params already defined in the standard section above
-        standard_params = {"input_data", "output_prefix", "random_seed"}
-        ir_only_params = {
-            k: v for k, v in injectable_params.items() if k not in standard_params
+        # The runner always supplies these two, so they are always defined.
+        standard = {
+            "input_data": ("dataset.h5ad", "Path to the input data file"),
+            "output_prefix": ("results", "Prefix for output files"),
         }
+        for param_name, (value, comment) in standard.items():
+            if param_name not in read_names:
+                comment += " (not read by this notebook)"
+            code += f"{param_name} = {value!r}  # {comment}\n"
 
-        if ir_only_params:
-            code += "\n# Analysis parameters (from workflow IR)\n"
-            for param_name, param_value in sorted(ir_only_params.items()):
-                # Format value for Python
-                if isinstance(param_value, str):
-                    value_str = f'"{param_value}"'
-                elif isinstance(param_value, (list, tuple)):
-                    value_str = repr(param_value)
-                else:
-                    value_str = str(param_value)
+        offered = {}
+        for ir in irs:
+            for param_name, value in ir.get_papermill_parameters().items():
+                if param_name in standard or param_name not in read_names:
+                    continue
+                literal = repr(value)
+                try:
+                    ok = ast.literal_eval(literal) == value
+                except (ValueError, SyntaxError, TypeError):
+                    ok = False
+                if ok:
+                    offered.setdefault(param_name, literal)
 
-                code += f"{param_name} = {value_str}\n"
+        if offered:
+            code += "\n# Analysis parameters read by the code below\n"
+            for param_name, literal in sorted(offered.items()):
+                code += f"{param_name} = {literal}\n"
 
         cell = new_code_cell(code)
         cell.metadata["tags"] = ["parameters"]
 
-        logger.debug(
-            f"Generated parameters cell with {len(injectable_params)} "
-            f"IR-derived parameters"
-        )
+        logger.debug(f"Generated parameters cell with {len(offered)} IR parameters")
 
         return cell
 
@@ -779,8 +894,24 @@ print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
                         else:
                             ir = AnalysisStep.from_dict(ir_obj)
                         code = ir.render()
-                        logger.debug("Using IR for data saving cell")
-                        return new_code_cell(code)
+                        path_lines = [
+                            line
+                            for line in code.splitlines()
+                            if line.startswith("output_path = ")
+                        ]
+                        if not path_lines:
+                            # Not the standard saver; keep its code as is.
+                            return new_code_cell(code)
+                        else:
+                            # Keep the session's file name and compression, but
+                            # write through the same guarded save as below.
+                            compression = ir.parameters.get("compression")
+                            if compression in (None, "", "none"):
+                                compression = None
+                            logger.debug("Using IR for data saving cell")
+                            return new_code_cell(
+                                _guarded_save_code(path_lines[0], compression)
+                            )
                     except Exception as e:
                         logger.warning(f"Failed to use IR for data saving: {e}")
 
@@ -799,32 +930,9 @@ print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
         # AttributeError instead and the replay aborted on the last cell again.
         # Any serialisation failure should sanitise and retry, because reaching
         # this cell means every analysis step already succeeded.
-        code = """# Save processed data
-output_path = f"{output_prefix}_processed.h5ad"
-try:
-    adata.write_h5ad(output_path)
-except Exception as exc:
-    # Retry without the uns entries h5ad cannot represent, reporting each one.
-    import tempfile
-    from pathlib import Path as _Path
-
-    _unwritable = []
-    with tempfile.TemporaryDirectory() as _tmp:
-        for _key in list(adata.uns):
-            _probe = adata.copy()
-            _probe.uns = {_key: adata.uns[_key]}
-            try:
-                _probe.write_h5ad(_Path(_tmp) / "probe.h5ad")
-            except Exception:
-                _unwritable.append(_key)
-    for _key in _unwritable:
-        del adata.uns[_key]
-    print(f"WARNING: dropped un-serialisable uns keys before writing: {_unwritable}")
-    print(f"         original error: {type(exc).__name__}: {exc}")
-    adata.write_h5ad(output_path)
-print(f"Saved processed data to: {output_path}")
-"""
-        return new_code_cell(code)
+        return new_code_cell(
+            _guarded_save_code('output_path = f"{output_prefix}_processed.h5ad"')
+        )
 
     def _create_doc_cell(
         self, activity: Dict[str, Any], step_number: int
@@ -872,82 +980,12 @@ print(f"Saved processed data to: {output_path}")
 
         return new_markdown_cell(doc_content)
 
-    def _activity_to_code(
-        self, activity: Dict[str, Any], validate: bool = True
-    ) -> Optional[NotebookNode]:
-        """
-        Convert provenance activity to executable Python code using IR.
-
-        Args:
-            activity: Activity dictionary from provenance
-            validate: Whether to validate syntax
-
-        Returns:
-            Code cell with executable Python, or None if cannot generate
-        """
-        ir_dict = activity.get("ir")
-
-        if ir_dict is None:
-            # No IR available - return placeholder
-            tool_name = activity.get("type", "unknown")
-            logger.warning(f"No IR for activity: {tool_name}")
-
-            return new_code_cell(
-                f"# TODO: Manual review needed for {tool_name}\n"
-                f"# No IR available - service needs to emit AnalysisStep\n"
-                f"# Parameters: {activity.get('parameters', {})}\n"
-                f"pass"
-            )
-
-        # Deserialize IR (may already be an AnalysisStep from in-memory provenance)
-        try:
-            if isinstance(ir_dict, AnalysisStep):
-                ir = ir_dict
-            else:
-                ir = AnalysisStep.from_dict(ir_dict)
-        except Exception as e:
-            logger.error(f"Failed to deserialize IR: {e}")
-            return new_code_cell(f"# ERROR: Failed to deserialize IR\n# {str(e)}\npass")
-
-        # Render code from template
-        try:
-            code = ir.render()
-
-            # Validate syntax if requested
-            if validate and ir.validates_on_export:
-                try:
-                    ir.validate_rendered_code()
-                    logger.debug(f"Validated syntax for {ir.operation}")
-                except SyntaxError as e:
-                    logger.error(
-                        f"Syntax error in generated code for {ir.operation}: {e}"
-                    )
-                    code = (
-                        f"# SYNTAX ERROR in generated code:\n"
-                        f"# {str(e)}\n"
-                        f"# Original template:\n"
-                        f"# {ir.code_template}\n"
-                        f"{code}"
-                    )
-
-            return new_code_cell(code)
-
-        except Exception as e:
-            logger.error(f"Failed to render code for {ir.operation}: {e}")
-            return new_code_cell(
-                f"# ERROR: Template rendering failed\n"
-                f"# Operation: {ir.operation}\n"
-                f"# Error: {str(e)}\n"
-                f"pass"
-            )
-
     def _ir_to_code_cell(self, ir: AnalysisStep, validate: bool = True) -> NotebookNode:
         """
         Convert AnalysisStep IR directly to executable code cell.
 
-        Unlike _activity_to_code, this method does NOT generate placeholder
-        cells - it requires a valid IR object. This ensures notebooks contain
-        only executable, reproducible code.
+        Requires a valid IR object and never writes a placeholder or a cell
+        that does not parse.
 
         Args:
             ir: AnalysisStep IR object with code template
@@ -961,32 +999,28 @@ print(f"Saved processed data to: {output_path}")
         """
         try:
             code = ir.render()
-
-            # Validate syntax if requested
-            if validate and ir.validates_on_export:
-                try:
-                    ir.validate_rendered_code()
-                    logger.debug(f"Validated syntax for {ir.operation}")
-                except SyntaxError as e:
-                    logger.error(
-                        f"Syntax error in generated code for {ir.operation}: {e}"
-                    )
-                    code = (
-                        f"# SYNTAX ERROR in generated code:\n"
-                        f"# {str(e)}\n"
-                        f"# Original template:\n"
-                        f"# {ir.code_template}\n"
-                        f"{code}"
-                    )
-
-            return new_code_cell(code)
-
         except Exception as e:
             logger.error(f"Failed to render code for {ir.operation}: {e}")
             raise ValueError(f"Failed to render IR for {ir.operation}: {e}") from e
 
+        if validate and ir.validates_on_export:
+            try:
+                ast.parse(code)
+            except SyntaxError as e:
+                # Fail the export rather than write a cell that cannot run.
+                raise ValueError(
+                    f"Generated code for step {ir.operation!r} is not valid "
+                    f"Python ({e}); the notebook was not exported"
+                ) from e
+            logger.debug(f"Validated syntax for {ir.operation}")
+
+        return new_code_cell(code)
+
     def _create_footer_cell(
-        self, excluded_activity_types: List[str], select_on: str = "exportable"
+        self,
+        excluded_activity_types: List[str],
+        select_on: str = "exportable",
+        failed_types: Optional[List[str]] = None,
     ) -> NotebookNode:
         """
         Create markdown footer cell.
@@ -994,6 +1028,7 @@ print(f"Saved processed data to: {output_path}")
         Args:
             excluded_activity_types: Activity types excluded from the selected IR count
             select_on: IR flag used to select activities
+            failed_types: Types of failed activities left out of the notebook
 
         Returns:
             Markdown cell with export instructions
@@ -1010,6 +1045,14 @@ print(f"Saved processed data to: {output_path}")
             export_status = (
                 "Notebook export is complete. "
                 f"All selected activities have {select_on} IR."
+            )
+
+        if failed_types:
+            failed_names = ", ".join(f"`{t}`" for t in dict.fromkeys(failed_types))
+            export_status += (
+                f"\n\n**Failed steps not in this notebook:** {failed_names}. A failed "
+                "step may have changed data before it failed, so this notebook may "
+                "not reproduce the session."
             )
 
         footer_content = f"""---
@@ -1033,6 +1076,9 @@ papermill notebook.ipynb output.ipynb \\
     -p input_data "new_dataset.h5ad" \\
     -p output_prefix "new_analysis"
 ```
+
+Only the names in the parameters cell can be overridden. To change a step's
+settings, edit that step's code cell.
 
 ### IR Coverage Note
 

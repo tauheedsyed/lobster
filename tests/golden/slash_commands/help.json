@@ -87,7 +87,7 @@
             "Load data file"
           ],
           [
-            "/pipeline export",
+            "/pipeline export [--replay]",
             "Export as Jupyter notebook"
           ],
           [

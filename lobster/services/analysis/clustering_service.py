@@ -132,6 +132,9 @@ class ClusteringService:
         Returns:
             AnalysisStep with full clustering pipeline code template
         """
+        # The template calls sc.tl.<algorithm>, so it must be a known name.
+        if str(algorithm).lower() not in ("leiden", "louvain"):
+            raise ValueError(f"Unknown clustering algorithm {algorithm!r}")
         # Parameter schema
         parameter_schema = {
             "resolution": ParameterSpec(
@@ -209,19 +212,19 @@ print("Scaling complete")
 # computes n_pcs (30), so the exported notebook summed 50 components and
 # reported a different variance ratio than the session it came from.
 sc.tl.pca(adata_selected, svd_solver='arpack', n_comps={{ n_pcs }})
-print(f"PCA complete (using {{ n_pcs }} components)")
+print(f"PCA complete (using { {{ n_pcs | repr }} } components)")
 
 # 6. Compute neighborhood graph
 sc.pp.neighbors(adata_selected, n_neighbors={{ n_neighbors }}, n_pcs={{ n_pcs }})
 print("Neighborhood graph computed")
 
-# 7. {{ algorithm | capitalize }} clustering
+# 7. {{ algorithm | capitalize | repr }} clustering
 # The column name matches the service's algorithm/resolution convention.
-cluster_key = '{{ algorithm }}_res{{ resolution | string | replace(".", "_") }}'
-sc.tl.{{ algorithm }}(adata_selected, resolution={{ resolution }}, key_added=cluster_key)
-adata_selected.obs['{{ algorithm }}'] = adata_selected.obs[cluster_key]
+cluster_key = {{ (algorithm ~ '_res' ~ resolution | string | replace(".", "_")) | repr }}
+sc.tl.{{ algorithm | lower }}(adata_selected, resolution={{ resolution }}, key_added=cluster_key)
+adata_selected.obs[{{ algorithm | string | repr }}] = adata_selected.obs[cluster_key]
 n_clusters = len(adata_selected.obs[cluster_key].unique())
-print(f"{{ algorithm | capitalize }} clustering complete: {n_clusters} clusters (resolution={{ resolution }})")
+print(f"{ {{ algorithm | capitalize | repr }} } clustering complete: {n_clusters} clusters (resolution={ {{ resolution | repr }} })")
 
 # 8. UMAP visualization
 sc.tl.umap(adata_selected)
@@ -230,7 +233,7 @@ print("UMAP coordinates computed")
 # Transfer results back onto the full object, exactly as the service does. The
 # notebook must retain the full modality for subsequent analysis steps.
 adata.obs[cluster_key] = adata_selected.obs[cluster_key]
-adata.obs['{{ algorithm }}'] = adata_selected.obs['{{ algorithm }}']
+adata.obs[{{ algorithm | string | repr }}] = adata_selected.obs[{{ algorithm | string | repr }}]
 adata.obsm['X_umap'] = adata_selected.obsm['X_umap']
 if 'X_pca' in adata_selected.obsm:
     adata.obsm['X_pca'] = adata_selected.obsm['X_pca'].copy()
@@ -259,7 +262,7 @@ adata.uns['umap_distance_warning'] = (
 #     (clustering_service.py:1611), so a replay without it lacked
 #     uns['rank_genes_groups'] entirely.
 try:
-    sc.tl.rank_genes_groups(adata, '{{ algorithm }}', method='wilcoxon')
+    sc.tl.rank_genes_groups(adata, {{ algorithm | string | repr }}, method='wilcoxon')
     print("Marker genes identified")
 except ValueError as e:
     # High resolution can produce singleton clusters, for which
@@ -326,19 +329,19 @@ print("Scaling complete")
 # computes n_pcs (30), so the exported notebook summed 50 components and
 # reported a different variance ratio than the session it came from.
 sc.tl.pca(adata_selected, svd_solver='arpack', n_comps={{ n_pcs }})
-print(f"PCA complete (using {{ n_pcs }} components)")
+print(f"PCA complete (using { {{ n_pcs | repr }} } components)")
 
 # 6. Compute neighborhood graph
 sc.pp.neighbors(adata_selected, n_neighbors={{ n_neighbors }}, n_pcs={{ n_pcs }})
 print("Neighborhood graph computed")
 
-# 7. {{ algorithm | capitalize }} clustering
+# 7. {{ algorithm | capitalize | repr }} clustering
 # The column name matches the service's algorithm/resolution convention.
-cluster_key = '{{ algorithm }}_res{{ resolution | string | replace(".", "_") }}'
-sc.tl.{{ algorithm }}(adata_selected, resolution={{ resolution }}, key_added=cluster_key)
-adata_selected.obs['{{ algorithm }}'] = adata_selected.obs[cluster_key]
+cluster_key = {{ (algorithm ~ '_res' ~ resolution | string | replace(".", "_")) | repr }}
+sc.tl.{{ algorithm | lower }}(adata_selected, resolution={{ resolution }}, key_added=cluster_key)
+adata_selected.obs[{{ algorithm | string | repr }}] = adata_selected.obs[cluster_key]
 n_clusters = len(adata_selected.obs[cluster_key].unique())
-print(f"{{ algorithm | capitalize }} clustering complete: {n_clusters} clusters (resolution={{ resolution }})")
+print(f"{ {{ algorithm | capitalize | repr }} } clustering complete: {n_clusters} clusters (resolution={ {{ resolution | repr }} })")
 
 # 8. UMAP visualization
 sc.tl.umap(adata_selected)
@@ -347,7 +350,7 @@ print("UMAP coordinates computed")
 # Transfer results back onto the full object, exactly as the service does. The
 # notebook must retain the full modality for subsequent analysis steps.
 adata.obs[cluster_key] = adata_selected.obs[cluster_key]
-adata.obs['{{ algorithm }}'] = adata_selected.obs['{{ algorithm }}']
+adata.obs[{{ algorithm | string | repr }}] = adata_selected.obs[{{ algorithm | string | repr }}]
 adata.obsm['X_umap'] = adata_selected.obsm['X_umap']
 if 'X_pca' in adata_selected.obsm:
     adata.obsm['X_pca'] = adata_selected.obsm['X_pca'].copy()
@@ -376,7 +379,7 @@ adata.uns['umap_distance_warning'] = (
 #     (clustering_service.py:1611), so a replay without it lacked
 #     uns['rank_genes_groups'] entirely.
 try:
-    sc.tl.rank_genes_groups(adata, '{{ algorithm }}', method='wilcoxon')
+    sc.tl.rank_genes_groups(adata, {{ algorithm | string | repr }}, method='wilcoxon')
     print("Marker genes identified")
 except ValueError as e:
     # High resolution can produce singleton clusters, for which
@@ -581,6 +584,75 @@ print(f"Clustering pipeline complete: {adata.n_obs} cells in {n_clusters} cluste
             logger.exception(f"Error in PCA: {e}")
             raise ClusteringError(f"PCA failed: {str(e)}")
 
+    def _create_embedding_clustering_ir(
+        self,
+        use_rep: str,
+        resolution: float,
+        algorithm: str,
+        demo_mode: bool,
+        find_markers: bool,
+    ) -> AnalysisStep:
+        """IR for clustering on an existing embedding (``use_rep``).
+
+        Mirrors the ``use_rep`` branch of ``_perform_clustering``: no
+        normalization, feature selection or PCA.
+        """
+        algorithm = str(algorithm).lower()
+        if algorithm not in ("leiden", "louvain"):
+            raise ValueError(f"Unknown clustering algorithm {algorithm!r}")
+        code_template = """# Clustering on the existing embedding (no normalization or PCA)
+adata.raw = adata.copy()
+n_neighbors = {{ n_neighbors }}
+if adata.n_obs <= n_neighbors:
+    n_neighbors = max(2, adata.n_obs - 1)
+sc.pp.neighbors(adata, use_rep={{ use_rep | repr }}, n_neighbors=n_neighbors)
+sc.tl.{{ algorithm }}(adata, resolution={{ resolution }}, key_added={{ algorithm | repr }})
+{% if demo_mode %}
+sc.tl.umap(adata, min_dist=0.5, spread=1.5)
+{% else %}
+sc.tl.umap(adata)
+{% endif %}
+{% if find_markers %}
+try:
+    sc.tl.rank_genes_groups(adata, {{ algorithm | repr }}, method={{ marker_method | repr }})
+except ValueError as e:
+    print(f"Skipping marker gene identification: {e}")
+{% endif %}
+print(f"Clustering complete: {adata.obs[{{ algorithm | repr }}].nunique()} clusters")
+"""
+        parameters = {
+            "use_rep": use_rep,
+            "resolution": resolution,
+            "n_neighbors": 10 if demo_mode else 15,
+            "algorithm": algorithm,
+            "demo_mode": demo_mode,
+            "find_markers": find_markers,
+            "marker_method": "t-test" if demo_mode else "wilcoxon",
+        }
+        return AnalysisStep(
+            operation=f"scanpy.tl.{algorithm}",
+            tool_name="cluster_and_visualize",
+            description=(
+                f"{algorithm.capitalize()} clustering on existing embedding "
+                f"'{use_rep}' (res={resolution})"
+            ),
+            library="scanpy",
+            code_template=code_template,
+            imports=["import scanpy as sc"],
+            parameters=parameters,
+            parameter_schema={},
+            input_entities=["adata"],
+            output_entities=["adata"],
+            execution_context={
+                "operation_type": "clustering",
+                "algorithm": algorithm,
+                "use_rep": use_rep,
+                "resolution": resolution,
+            },
+            validates_on_export=True,
+            requires_validation=False,
+        )
+
     def _create_pca_ir(
         self,
         n_comps: int,
@@ -625,7 +697,7 @@ else:
 sc.pp.scale(adata_pca, max_value=10)
 {% endif %}
 # Run PCA
-sc.tl.pca(adata_pca, svd_solver='{{ svd_solver }}', n_comps={{ n_comps }})
+sc.tl.pca(adata_pca, svd_solver={{ svd_solver | string | repr }}, n_comps={{ n_comps }})
 
 # Transfer PCA results back
 adata.obsm['X_pca'] = adata_pca.obsm['X_pca']
@@ -633,7 +705,7 @@ if 'pca' in adata_pca.uns:
     adata.uns['pca'] = adata_pca.uns['pca']
 
 variance_explained = sum(adata.uns['pca']['variance_ratio']) * 100
-print(f"PCA complete: {{ n_comps }} components, {variance_explained:.1f}% variance explained")
+print(f"PCA complete: { {{ n_comps | repr }} } components, {variance_explained:.1f}% variance explained")
 """
 
         return AnalysisStep(
@@ -814,13 +886,13 @@ print(f"UMAP computed: {adata.obsm['X_umap'].shape}")
 """
         else:
             embed_code = """# Compute tSNE embedding
-sc.tl.tsne(adata, use_rep='{{ use_rep }}', n_pcs={{ n_pcs }})
+sc.tl.tsne(adata, use_rep={{ use_rep | string | repr }}, n_pcs={{ n_pcs }})
 print(f"tSNE computed: {adata.obsm['X_tsne'].shape}")
 """
 
         code_template = f"""# Compute neighborhood graph and embedding
-sc.pp.neighbors(adata, n_neighbors={{{{ n_neighbors }}}}, n_pcs={{{{ n_pcs }}}}, use_rep='{{{{ use_rep }}}}')
-print(f"Neighborhood graph computed (n_neighbors={{{{ n_neighbors }}}}, n_pcs={{{{ n_pcs }}}})")
+sc.pp.neighbors(adata, n_neighbors={{{{ n_neighbors }}}}, n_pcs={{{{ n_pcs }}}}, use_rep={{{{ use_rep | string | repr }}}})
+print(f"Neighborhood graph computed (n_neighbors={{ {{{{ n_neighbors | repr }}}} }}, n_pcs={{ {{{{ n_pcs | repr }}}} }})")
 
 {embed_code}"""
 
@@ -1087,6 +1159,18 @@ print(f"Neighborhood graph computed (n_neighbors={{{{ n_neighbors }}}}, n_pcs={{
             logger.info(f"Clustering completed: {n_clusters} clusters identified")
 
             # Create IR for notebook export
+            if use_rep and use_rep in adata.obsm:
+                # _perform_clustering used the existing embedding and skipped
+                # normalization, feature selection and PCA; export the same.
+                ir = self._create_embedding_clustering_ir(
+                    use_rep=use_rep,
+                    resolution=resolution,
+                    algorithm=algorithm,
+                    demo_mode=demo_mode,
+                    find_markers="marker_genes" not in skip_steps,
+                )
+                return adata_clustered, clustering_stats, ir
+
             ir = self._create_clustering_ir(
                 resolution=(
                     resolution if resolution else self.default_cluster_resolution
@@ -2083,13 +2167,13 @@ from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_har
 import numpy as np
 
 # Get cluster labels
-labels = adata.obs["{{ cluster_key }}"].values
+labels = adata.obs[{{ cluster_key | string | repr }}].values
 
 # Get data representation
 {% if n_pcs %}
-X = adata.obsm["{{ use_rep }}"][:, :{{ n_pcs }}]
+X = adata.obsm[{{ use_rep | string | repr }}][:, :{{ n_pcs }}]
 {% else %}
-X = adata.obsm["{{ use_rep }}"]
+X = adata.obsm[{{ use_rep | string | repr }}]
 {% endif %}
 
 # Compute metrics
@@ -2111,7 +2195,7 @@ print(f"Calinski-Harabasz score: {quality_results['calinski_harabasz_score']:.2f
 {% endif %}
 
 # Store results
-adata.uns["{{ cluster_key }}_quality"] = quality_results
+adata.uns[{{ (cluster_key ~ '_quality') | repr }}] = quality_results
 print(f"Quality metrics computed for {len(np.unique(labels))} clusters")
 """
 
@@ -2739,60 +2823,55 @@ print(f"Quality metrics computed for {len(np.unique(labels))} clusters")
         }
 
         # Jinja2 code template
+        # Mirrors subcluster_cells step by step (fresh PCA on the subset, one
+        # key per resolution, labels as strings prefixed with the parent).
         code_template = """# Sub-clustering pipeline: Re-cluster specific cell populations
 import scanpy as sc
 import numpy as np
 
 # Configuration
 cluster_key = {{ cluster_key|repr }}
-clusters_to_refine = {{ clusters_to_refine|repr }}
-resolution = {{ resolution }}
+clusters_to_refine = [str(c) for c in {{ clusters_to_refine|repr }}]
+resolutions = {{ resolutions|repr }} or [{{ resolution }}]
 n_pcs = {{ n_pcs }}
 n_neighbors = {{ n_neighbors }}
 algorithm = {{ algorithm|repr }}
 
-# Validate cluster key exists
 if cluster_key not in adata.obs.columns:
-    raise ValueError(f"Cluster key '{cluster_key}' not found in adata.obs")
+    raise ValueError(f"Cluster key {cluster_key!r} not found in adata.obs")
+if "X_pca" not in adata.obsm:
+    raise ValueError("PCA results not found in adata.obsm['X_pca']; run clustering first")
+if not clusters_to_refine:
+    clusters_to_refine = sorted(adata.obs[cluster_key].astype(str).unique())
 
-# Select cells to sub-cluster
-if clusters_to_refine:
-    subset_mask = adata.obs[cluster_key].astype(str).isin([str(c) for c in clusters_to_refine])
-    print(f"Sub-clustering {len(clusters_to_refine)} parent clusters: {clusters_to_refine}")
-else:
-    subset_mask = adata.obs.index.isin(adata.obs.index)  # All cells
-    print("Sub-clustering ALL cells")
-
-n_cells_to_subcluster = subset_mask.sum()
-print(f"Selected {n_cells_to_subcluster} cells for sub-clustering")
-
-# Create subset
+# Select and copy the cells to sub-cluster
+subset_mask = adata.obs[cluster_key].astype(str).isin(clusters_to_refine)
+print(f"Selected {subset_mask.sum()} cells from {len(clusters_to_refine)} clusters")
 adata_subset = adata[subset_mask].copy()
 
-# Compute neighbors on subset (using existing PCA from adata.obsm['X_pca'])
-print(f"Computing neighbors (n_neighbors={n_neighbors}, n_pcs={n_pcs})")
+# PCA and neighbors on the subset
+sc.tl.pca(adata_subset, n_comps=n_pcs)
 sc.pp.neighbors(adata_subset, n_neighbors=n_neighbors, n_pcs=n_pcs)
 
-# Run clustering
-subcluster_key = f"{algorithm}_subcluster"
-print(f"Running {algorithm} sub-clustering (resolution={resolution})")
-getattr(sc.tl, algorithm)(adata_subset, resolution=resolution, key_added=subcluster_key)
+for res in resolutions:
+    if len(resolutions) == 1:
+        subcluster_key = f"{algorithm}_subcluster"
+    else:
+        subcluster_key = f"{algorithm}_sub_res{res}".replace(".", "_")
+    getattr(sc.tl, algorithm)(adata_subset, resolution=res, key_added=subcluster_key)
 
-# Add parent cluster prefix to sub-cluster labels
-if clusters_to_refine:
+    # Labels become strings "<parent>.<sub>"
+    adata_subset.obs[subcluster_key] = adata_subset.obs[subcluster_key].astype(str)
     for parent_cluster in clusters_to_refine:
-        parent_mask = adata_subset.obs[cluster_key].astype(str) == str(parent_cluster)
-        if parent_mask.sum() > 0:
-            sub_labels = adata_subset.obs.loc[parent_mask, subcluster_key].astype(str)
-            prefixed_labels = sub_labels.apply(lambda x: f"{parent_cluster}.{x}")
-            adata_subset.obs.loc[parent_mask, subcluster_key] = prefixed_labels
+        parent_mask = adata_subset.obs[cluster_key].astype(str) == parent_cluster
+        adata_subset.obs.loc[parent_mask, subcluster_key] = adata_subset.obs.loc[
+            parent_mask, subcluster_key
+        ].apply(lambda x: f"{parent_cluster}.{x}")
 
-# Merge back to original AnnData
-adata.obs[subcluster_key] = adata.obs[cluster_key].astype(str)
-adata.obs.loc[subset_mask, subcluster_key] = adata_subset.obs[subcluster_key]
-
-n_subclusters = adata.obs[subcluster_key].nunique()
-print(f"Sub-clustering complete: {n_subclusters} sub-clusters identified")
+    # Merge back: cells not sub-clustered keep their parent label
+    adata.obs[subcluster_key] = adata.obs[cluster_key].astype(str)
+    adata.obs.loc[subset_mask, subcluster_key] = adata_subset.obs[subcluster_key]
+    print(f"{subcluster_key}: {adata.obs[subcluster_key].nunique()} clusters")
 """
 
         return AnalysisStep(
