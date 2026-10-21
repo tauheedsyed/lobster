@@ -1,16 +1,38 @@
 """Generic explicit-endpoint Messages factory with host-owned request authority."""
 
 import asyncio
+from importlib.metadata import version
 from threading import RLock
 from urllib.parse import urlsplit
 
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion
+
 from lobster.config.inference_context import INFERENCE_BINDING_VERSION, InferenceContext
-from lobster.config.providers.controlled_anthropic_client import (
-    ControlledAnthropicClient,
-    ControlledChatAnthropic,
-)
 from lobster.config.providers.request_auth import canonical_refusal, refusal_spec
 from lobster.core.exceptions import InferenceRefused
+
+# Qualification baseline: Cloud constraints-prod-*.txt declares
+# anthropic==1.7.0 and httpx2==2.13.0. Patch updates retain this minor contract.
+QUALIFIED_ANTHROPIC_SDK = ">=1.7.0,<1.8"
+
+# Check the optional transport and SDK domain before importing SDK consumers.
+try:
+    import httpx2
+
+    if not SpecifierSet(QUALIFIED_ANTHROPIC_SDK).contains(version("anthropic")):
+        raise ImportError("Unqualified Anthropic SDK version")
+    from lobster.config.providers.controlled_anthropic_client import (
+        ControlledAnthropicClient,
+        ControlledChatAnthropic,
+    )
+except (ImportError, InvalidVersion):
+    refusal = InferenceRefused("context")
+    refusal.add_note(
+        "Owned Anthropic inference requires lobster-ai[anthropic] "
+        f"with anthropic{QUALIFIED_ANTHROPIC_SDK} and httpx2>=2.0.0,<3."
+    )
+    raise refusal from None
 
 
 def _options(value):
@@ -154,7 +176,6 @@ class OwnedAnthropicFactory:
             if "additional_model_request_fields" in options:
                 raise InferenceRefused("context")
             authorizer = self._authorizer_factory(component, context)
-            import httpx2
 
             sync_transport, async_transport = (
                 self._transports(component) if self._transports else (None, None)
