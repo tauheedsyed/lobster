@@ -1,6 +1,6 @@
 """Tests for the default verify_connection() implementation in ILLMProvider."""
 
-from typing import Any, List, Optional
+from typing import Any, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -83,7 +83,7 @@ class TestDefaultVerifyConnection:
         assert ok is True
         assert "custom/model-xyz" in msg
         provider.create_chat_model.assert_called_once_with(
-            "custom/model-xyz", temperature=0.0, max_tokens=1
+            "custom/model-xyz", max_tokens=1
         )
 
     def test_returns_false_on_exception(self, provider):

@@ -74,6 +74,16 @@ class OmicsOSProvider(ILLMProvider):
             input_cost_per_million=3.00,
             output_cost_per_million=15.00,
         ),
+        ModelInfo(
+            name="global.anthropic.claude-sonnet-5-5",
+            display_name="Claude Sonnet 5.5 (Omics-OS Cloud)",
+            description="Newest Sonnet; available once the gateway admits it",
+            provider="omics-os",
+            context_window=1000000,
+            is_default=False,
+            input_cost_per_million=2.00,
+            output_cost_per_million=10.00,
+        ),
     ]
 
     @property
@@ -116,7 +126,7 @@ class OmicsOSProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:

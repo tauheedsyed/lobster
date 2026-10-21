@@ -93,7 +93,9 @@ class Settings:
 
         # Web server settings (for 'lobster serve' FastAPI server)
         self.PORT = int(os.environ.get("PORT", "8000"))
-        self.HOST = os.environ.get("HOST", "0.0.0.0")  # nosec B104 # container default; override with HOST
+        self.HOST = os.environ.get(
+            "HOST", "0.0.0.0"
+        )  # nosec B104 # container default; override with HOST
         self.DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
         # Data processing settings
@@ -324,7 +326,7 @@ class Settings:
         Resolution order (via agent_defaults):
         1. Environment variable overrides
         2. Workspace config.toml agent_settings
-        3. Defaults (temperature=1.0, thinking=disabled)
+        3. Defaults (temperature unset = model default, thinking=disabled)
 
         Never fails for unknown agents — they get sensible defaults.
 

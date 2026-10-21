@@ -57,7 +57,9 @@ def _query_callbacks_displayed_reasoning(callbacks: list[Any]) -> bool:
             try:
                 if checker():
                     return True
-            except Exception:
+            except (
+                Exception
+            ):  # nosec B112 # A faulty display callback must not fail the query.
                 continue
     return False
 
@@ -436,6 +438,9 @@ def query_impl(
         else:
             json_result["error"] = result.get("error", "Unknown error")
         print(json.dumps(json_result))
+        if not json_result["success"]:
+            # Scripts and CI rely on the exit code to detect a failed query.
+            raise typer.Exit(1)
         return
 
     # Display or save result (Rich mode)
@@ -477,6 +482,8 @@ def query_impl(
             )
 
     _maybe_print_timings(client, "Query")
+    if not result["success"]:
+        raise typer.Exit(1)
 
 
 # ============================================================================

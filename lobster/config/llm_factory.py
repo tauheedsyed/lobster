@@ -67,7 +67,7 @@ class LLMFactory:
 
         Args:
             model_config: Configuration dictionary with model parameters
-                - temperature: float (default: 1.0)
+                - temperature: float (optional; when absent the model default applies)
                 - max_tokens: int (optional; when absent the provider applies
                   its own default, and Bedrock sends no limit)
                 - model_id: str (optional, can be overridden)
@@ -150,11 +150,11 @@ class LLMFactory:
             )
 
         # Extract parameters
-        temperature = model_config.get("temperature", 1.0)
-        model_params: Dict[str, Any] = {
-            "model_id": model_id,
-            "temperature": temperature,
-        }
+        # Send a temperature only when one is configured; the model default
+        # applies otherwise (newer models reject non-default sampling).
+        model_params: Dict[str, Any] = {"model_id": model_id}
+        if model_config.get("temperature") is not None:
+            model_params["temperature"] = model_config["temperature"]
         # Forward an output-token limit only when the config sets one. Otherwise each
         # provider applies its own default; Bedrock sends no limit, so the model's
         # maximum applies (a factory-wide default would cap every Bedrock request).
@@ -163,6 +163,13 @@ class LLMFactory:
 
         # Extract additional model request fields (thinking config, etc.)
         additional_fields = model_config.get("additional_model_request_fields", {})
+
+        # Translate thinking presets into the shape this provider and model accept.
+        from lobster.config.thinking import translate_thinking
+
+        additional_fields = translate_thinking(
+            provider_name, model_id, dict(additional_fields or {})
+        )
 
         # Create model via provider
         # Pass additional_fields as kwargs to support provider-specific features:

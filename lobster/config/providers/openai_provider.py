@@ -9,7 +9,7 @@ Architecture:
     - Implements ILLMProvider interface for consistency
     - Uses static model catalog with pricing
     - Creates ChatOpenAI instances via LangChain
-    - Special handling for o1/o3 reasoning models (no temperature/max_tokens)
+    - Temperature and max_tokens sent only when explicitly set
 
 Example:
     >>> from lobster.config.providers.openai_provider import OpenAIProvider
@@ -21,7 +21,7 @@ Example:
 
 import logging
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 from lobster.config.providers.base_provider import ILLMProvider, ModelInfo
 
@@ -52,15 +52,55 @@ class OpenAIProvider(ILLMProvider):
     _default_context_window = 128_000
 
     # Static model catalog with pricing
-    # Source: https://openai.com/api/pricing/ (February 2026)
+    # Source: https://openai.com/api/pricing/ (GPT-6 rows: October 2026)
     KNOWN_MODELS = [
+        ModelInfo(
+            name="gpt-6.1-sol",
+            display_name="GPT-6.1 Sol",
+            description="Default - newest GPT; price shown for prompts up to 272K tokens",
+            provider="openai",
+            context_window=272000,
+            is_default=True,
+            input_cost_per_million=2.0,
+            output_cost_per_million=10.0,
+        ),
+        ModelInfo(
+            name="gpt-6-sol",
+            display_name="GPT-6 Sol",
+            description="Price shown for prompts up to 272K tokens",
+            provider="openai",
+            context_window=272000,
+            is_default=False,
+            input_cost_per_million=2.0,
+            output_cost_per_million=10.0,
+        ),
+        ModelInfo(
+            name="gpt-6-luna",
+            display_name="GPT-6 Luna",
+            description="Fast and low-cost; price shown for prompts up to 272K tokens",
+            provider="openai",
+            context_window=272000,
+            is_default=False,
+            input_cost_per_million=0.1,
+            output_cost_per_million=0.5,
+        ),
+        ModelInfo(
+            name="gpt-6-astra",
+            display_name="GPT-6 Astra",
+            description="Most capable GPT; price shown for prompts up to 272K tokens",
+            provider="openai",
+            context_window=272000,
+            is_default=False,
+            input_cost_per_million=10.0,
+            output_cost_per_million=50.0,
+        ),
         ModelInfo(
             name="gpt-4o",
             display_name="GPT-4o",
             description="Most capable GPT model - best for complex tasks",
             provider="openai",
             context_window=128000,
-            is_default=True,
+            is_default=False,
             input_cost_per_million=2.50,
             output_cost_per_million=10.00,
         ),
@@ -216,23 +256,11 @@ class OpenAIProvider(ILLMProvider):
                 return model.name
         return self.KNOWN_MODELS[0].name  # Fallback to first model
 
-    def _is_reasoning_model(self, model_id: str) -> bool:
-        """
-        Check if model doesn't support temperature/max_tokens params.
-
-        Args:
-            model_id: Model identifier
-
-        Returns:
-            bool: True if model rejects temperature/max_tokens
-        """
-        return model_id.startswith(("o1", "o3", "o4-mini", "gpt-5.5"))
-
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
-        max_tokens: int = 4096,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -241,15 +269,15 @@ class OpenAIProvider(ILLMProvider):
         Instantiates a LangChain ChatOpenAI model with the specified
         parameters. Uses OPENAI_API_KEY from environment.
 
-        For o1/o3 reasoning models, temperature and max_tokens parameters
-        are omitted as these models don't support them.
+        Temperature and max_tokens are sent only when set. Reasoning models
+        (o-series, GPT-5.5 and GPT-6) accept only their default sampling, so
+        leaving them unset keeps every model valid.
 
         Args:
             model_id: Model identifier (must be valid OpenAI model)
-            temperature: Sampling temperature (0.0-2.0, default 1.0)
-                Ignored for o1/o3 reasoning models.
-            max_tokens: Maximum tokens in response (default 4096)
-                Ignored for o1/o3 reasoning models.
+            temperature: Sampling temperature. None (default) sends none and
+                the model default applies.
+            max_tokens: Maximum tokens in response. None (default) sends none.
             **kwargs: Additional ChatOpenAI parameters (api_key, etc.)
 
         Returns:
@@ -271,7 +299,6 @@ class OpenAIProvider(ILLMProvider):
         Notes:
             - Reads OPENAI_API_KEY from environment by default
             - Override with api_key kwarg if needed
-            - o1/o3 models ignore temperature and max_tokens
         """
         try:
             from langchain_openai import ChatOpenAI
@@ -297,14 +324,10 @@ class OpenAIProvider(ILLMProvider):
             "api_key": api_key,
         }
 
-        # o1/o3 reasoning models don't support temperature or max_tokens
-        if self._is_reasoning_model(model_id):
-            logger.debug(
-                f"Model '{model_id}' is a reasoning model - "
-                "skipping temperature and max_tokens parameters."
-            )
-        else:
+        # Send sampling and output limits only when explicitly requested.
+        if temperature is not None:
             model_kwargs["temperature"] = temperature
+        if max_tokens is not None:
             model_kwargs["max_tokens"] = max_tokens
 
         # Merge any additional kwargs (excluding already-handled ones)
@@ -333,7 +356,7 @@ class OpenAIProvider(ILLMProvider):
             "   OPENAI_API_KEY=sk-...\n\n"
             f"Default model: {self.get_default_model()}\n"
             f"Available models: {', '.join(self.get_model_names())}\n\n"
-            "Note: o1/o3 reasoning models don't support temperature parameter."
+            "Note: reasoning models accept only their default temperature."
         )
 
 

@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TEMPERATURE: Optional[float] = None  # None = model default
 
 
 @dataclass
@@ -59,7 +59,7 @@ def get_agent_params(
     Resolution order:
     1. Environment variable override (LOBSTER_{AGENT}_TEMPERATURE)
     2. Workspace config.toml agent_settings
-    3. Defaults (temperature=1.0, thinking=disabled)
+    3. Defaults (temperature unset = model default, thinking=disabled)
 
     Never raises for unknown agents — they get sensible defaults.
 
@@ -85,8 +85,10 @@ def get_agent_params(
                     temperature = agent_settings.temperature
                 if agent_settings.thinking_preset:
                     thinking_preset = agent_settings.thinking_preset
-    except Exception:
-        pass  # Graceful fallback to defaults
+    except (
+        Exception
+    ):  # nosec B110 # Unreadable workspace config falls back to documented defaults.
+        pass
 
     # Layer 2: Environment variable overrides (highest priority)
     env_temp = os.environ.get(f"LOBSTER_{agent_name.upper()}_TEMPERATURE")
@@ -107,7 +109,9 @@ def get_agent_params(
         thinking_preset = env_thinking
 
     # Build params dict
-    params: Dict[str, Any] = {"temperature": temperature}
+    params: Dict[str, Any] = {}
+    if temperature is not None:
+        params["temperature"] = temperature
 
     if thinking_preset != "disabled" and thinking_preset in THINKING_PRESETS:
         thinking_config = THINKING_PRESETS[thinking_preset]
@@ -143,7 +147,9 @@ def get_current_profile(workspace_path: Optional[Path] = None) -> str:
             config = WorkspaceProviderConfig.load(workspace_path)
             if config.profile:
                 return config.profile
-    except Exception:
+    except (
+        Exception
+    ):  # nosec B110 # Unreadable workspace config falls back to the default profile.
         pass
 
     return "production"

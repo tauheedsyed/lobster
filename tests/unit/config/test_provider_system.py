@@ -11,7 +11,6 @@ Tests cover:
 
 import importlib.util
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -179,7 +178,7 @@ def test_bedrock_provider_is_configured():
         os.environ,
         {
             "AWS_BEDROCK_ACCESS_KEY": "test_access",
-            "AWS_BEDROCK_SECRET_ACCESS_KEY": "test_secret",
+            "AWS_BEDROCK_SECRET_ACCESS_KEY": "test_secret",  # nosec B105 # Placeholder credential for an offline unit test.
         },
         clear=True,
     ):
@@ -195,8 +194,10 @@ def test_bedrock_provider_list_models():
     assert all(isinstance(m, ModelInfo) for m in models)
     assert all(m.provider == "bedrock" for m in models)
 
-    # Bedrock models should have "anthropic" in name
-    assert all("anthropic" in m.name.lower() for m in models)
+    # Bedrock catalog holds Anthropic and OpenAI models
+    assert all(
+        "anthropic" in m.name.lower() or ".openai." in m.name.lower() for m in models
+    )
 
 
 # =============================================================================
@@ -427,7 +428,7 @@ def test_azure_provider_create_chat_model(mock_azure_chat):
         clear=True,
     ):
         provider = get_provider("azure")
-        llm = provider.create_chat_model("gpt-4o", temperature=0.7)
+        provider.create_chat_model("gpt-4o", temperature=0.7)
 
         mock_azure_chat.assert_called_once()
         call_kwargs = mock_azure_chat.call_args.kwargs
@@ -514,14 +515,16 @@ def test_openai_provider_list_models():
     provider = get_provider("openai")
     models = provider.list_models()
 
-    assert len(models) == 6  # gpt-4o, gpt-4o-mini, o1, o1-mini, o3-mini, gpt-5.5
+    assert (
+        len(models) == 10
+    )  # GPT-6.x (4), gpt-4o, gpt-4o-mini, o1, o1-mini, o3-mini, gpt-5.5
     assert all(isinstance(m, ModelInfo) for m in models)
     assert all(m.provider == "openai" for m in models)
 
     # Check default model exists
     default_models = [m for m in models if m.is_default]
     assert len(default_models) == 1
-    assert default_models[0].name == "gpt-4o"
+    assert default_models[0].name == "gpt-6.1-sol"
 
 
 def test_openai_provider_get_default_model():
@@ -530,7 +533,7 @@ def test_openai_provider_get_default_model():
     default = provider.get_default_model()
 
     assert default is not None
-    assert default == "gpt-4o"
+    assert default == "gpt-6.1-sol"
 
 
 def test_openai_provider_validate_model():
@@ -563,7 +566,7 @@ def test_openai_provider_create_chat_model(mock_openai_chat):
         clear=True,
     ):
         provider = get_provider("openai")
-        llm = provider.create_chat_model("gpt-4o", temperature=0.7, max_tokens=8192)
+        provider.create_chat_model("gpt-4o", temperature=0.7, max_tokens=8192)
 
         mock_openai_chat.assert_called_once()
         call_kwargs = mock_openai_chat.call_args.kwargs
@@ -579,7 +582,11 @@ def test_openai_provider_create_chat_model(mock_openai_chat):
 )
 @patch("langchain_openai.ChatOpenAI")
 def test_openai_provider_create_chat_model_o1(mock_openai_chat):
-    """Test that o1 reasoning models skip temperature and max_tokens."""
+    """Reasoning models get no sampling fields unless the user sets them.
+
+    No model-name list: unset temperature/max_tokens are never sent, and an
+    explicit value is forwarded (the API reports it if unsupported).
+    """
     mock_openai_chat.return_value = MagicMock()
 
     with patch.dict(
@@ -588,14 +595,16 @@ def test_openai_provider_create_chat_model_o1(mock_openai_chat):
         clear=True,
     ):
         provider = get_provider("openai")
-        llm = provider.create_chat_model("o1", temperature=0.7, max_tokens=8192)
-
-        mock_openai_chat.assert_called_once()
+        provider.create_chat_model("o1")
         call_kwargs = mock_openai_chat.call_args.kwargs
         assert call_kwargs["model"] == "o1"
-        # o1 models should NOT have temperature or max_tokens
         assert "temperature" not in call_kwargs
         assert "max_tokens" not in call_kwargs
+
+        provider.create_chat_model("o1", temperature=0.7, max_tokens=8192)
+        call_kwargs = mock_openai_chat.call_args.kwargs
+        assert call_kwargs["temperature"] == 0.7
+        assert call_kwargs["max_tokens"] == 8192
 
 
 def test_openai_provider_configuration_help():
@@ -734,7 +743,7 @@ def test_llm_factory_with_valid_config(tmp_path):
         )
         config.save(workspace_path)
 
-        llm = LLMFactory.create_llm(
+        LLMFactory.create_llm(
             model_config={"temperature": 0.7, "max_tokens": 4096},
             agent_name="test_agent",
             workspace_path=workspace_path,
@@ -796,7 +805,7 @@ def test_end_to_end_provider_selection(tmp_path):
         config.save(workspace_path)
 
         # Step 2: Create LLM via convenience function
-        llm = create_llm(
+        create_llm(
             agent_name="supervisor",
             model_params={"temperature": 0.5},
             workspace_path=workspace_path,
@@ -831,7 +840,7 @@ def test_runtime_override_priority(tmp_path):
         config.save(workspace_path)
 
         # Override with anthropic at runtime
-        llm = create_llm(
+        create_llm(
             agent_name="test",
             model_params={},
             provider_override="anthropic",  # Runtime override
@@ -864,7 +873,7 @@ def test_unregistered_provider_validation():
 
     # Pydantic should reject invalid provider during model creation
     with pytest.raises(Exception) as exc_info:  # Pydantic ValidationError
-        config = WorkspaceProviderConfig(global_provider="invalid_fake_provider")
+        WorkspaceProviderConfig(global_provider="invalid_fake_provider")
 
     # The error should mention invalid provider
     assert (

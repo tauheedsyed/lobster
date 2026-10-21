@@ -39,7 +39,7 @@ dependencies = [
     "mudata>=0.2.0",
     "h5py>=3.9.0",
     # Agent framework (only langchain-core, provider packages are extras)
-    "langchain-core>=0.3.79",
+    "langchain-core>=1.6.12",
     "langgraph>=1.0.5",
     # CLI
     "rich>=12.0.0",
@@ -90,16 +90,16 @@ dependencies = [
 # =============================================================================
 # LLM Providers (one required, installed via `lobster init`)
 # =============================================================================
-anthropic = ["langchain-anthropic>=0.3.20", "httpx2>=2.0.0"]
-bedrock = ["langchain-aws>=0.1.0", "boto3>=1.26.0"]
+anthropic = ["langchain-anthropic>=1.7.6", "httpx2>=2.0.0"]
+bedrock = ["langchain-aws>=1.9.0", "boto3>=1.43.64"]
 ollama = ["langchain-ollama>=0.3.10", "ollama>=0.6.0"]
 gemini = ["langchain-google-genai>=4.1.2"]
-openai = ["langchain-openai>=0.3.0"]
+openai = ["langchain-openai>=1.7.2"]
 # OpenAI-wire-compatible gateways — same client package, distinct extras so
 # `lobster-ai[openrouter]` / `[nebius]` resolve instead of silently no-op'ing
 # (uv ignores unknown extras without error).
-openrouter = ["langchain-openai>=0.3.0"]
-nebius = ["langchain-openai>=0.3.0"]
+openrouter = ["langchain-openai>=1.7.2"]
+nebius = ["langchain-openai>=1.7.2"]
 all-providers = [
     "lobster-ai[anthropic,bedrock,ollama,gemini,azure,openai,openrouter,nebius]"
 ]
@@ -186,12 +186,8 @@ plink = [
 # =============================================================================
 azure = [
     "langchain-azure-ai>=0.1.0",
-    "azure-ai-agents>=1.0.0b1",
     "azure-ai-inference>=1.0.0b1",
-    "azure-ai-projects>=1.0.0b1",
     "azure-identity>=1.25.0",
-    "azure-search-documents>=11.6.0",
-    "azure-storage-blob>=12.28.0",
 ]
 
 # =============================================================================
@@ -529,7 +525,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [tool.bumpversion]
-current_version = "1.1.431"
+current_version = "1.1.432"
 commit = true
 tag = true
 
