@@ -274,7 +274,7 @@ class OllamaProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:
@@ -416,7 +416,7 @@ class OllamaProvider(ILLMProvider):
             str: Configuration instructions with quickstart commands
         """
         return (
-            "Ollama (Local) Configuration:\n\n"
+            "Ollama (Local) Configuration:\n\n"  # nosec B608 # Help text, not SQL ("auto-select ... from" wording).
             "1. Install Ollama: https://ollama.ai/download\n"
             "2. Start Ollama: ollama serve\n"
             "3. Pull a model: ollama pull llama3:70b-instruct\n\n"

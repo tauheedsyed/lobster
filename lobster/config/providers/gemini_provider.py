@@ -19,7 +19,7 @@ Example:
 
 import logging
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 from lobster.config.providers.base_provider import ILLMProvider, ModelInfo
 
@@ -181,7 +181,7 @@ class GeminiProvider(ILLMProvider):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:
@@ -193,7 +193,7 @@ class GeminiProvider(ILLMProvider):
 
         Args:
             model_id: Model identifier (must be valid Gemini model)
-            temperature: Sampling temperature (0.0-2.0, default 1.0)
+            temperature: Sampling temperature (None = model default)
                 WARNING: Gemini 3.0+ requires temperature=1.0 (lower values
                 can cause infinite loops per Google documentation)
             max_tokens: Maximum tokens in response (default 4096)
@@ -244,7 +244,7 @@ class GeminiProvider(ILLMProvider):
             )
 
         # CRITICAL: Gemini 3+ requires temperature=1.0 (lower values cause infinite loops)
-        if "gemini-3" in model_id and temperature != 1.0:
+        if "gemini-3" in model_id and temperature is not None and temperature != 1.0:
             logger.warning(
                 f"Gemini 3.0+ models require temperature=1.0 (you set {temperature}). "
                 f"Lower values can cause infinite loops. Overriding to 1.0."

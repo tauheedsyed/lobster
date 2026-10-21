@@ -165,10 +165,11 @@ class TestLLMFactoryThinking:
         mock_provider.create_chat_model.assert_called_once()
         call_kwargs = mock_provider.create_chat_model.call_args[1]
 
-        # Should have thinking config in kwargs
-        assert "thinking" in call_kwargs
-        assert call_kwargs["thinking"]["type"] == "enabled"
-        assert call_kwargs["thinking"]["budget_tokens"] == 5000
+        # Bedrock routes carry thinking inside additional_model_request_fields;
+        # an unrecognised model ID keeps the legacy enabled + budget shape.
+        thinking = call_kwargs["additional_model_request_fields"]["thinking"]
+        assert thinking["type"] == "enabled"
+        assert thinking["budget_tokens"] == 5000
 
     @patch("lobster.core.config_resolver.ConfigResolver")
     @patch("lobster.config.providers.get_provider")
@@ -231,7 +232,7 @@ class TestBedrockThinkingIntegration:
             os.environ,
             {
                 "AWS_BEDROCK_ACCESS_KEY": "test_access",
-                "AWS_BEDROCK_SECRET_ACCESS_KEY": "test_secret",
+                "AWS_BEDROCK_SECRET_ACCESS_KEY": "test_secret",  # nosec B105 # Placeholder credential for an offline unit test.
             },
             clear=True,
         ):
@@ -363,10 +364,11 @@ class TestThinkingEndToEndFlow:
         call_kwargs = mock_provider.create_chat_model.call_args[1]
 
         # CRITICAL: Verify thinking config was passed through
+        extra = call_kwargs.get("additional_model_request_fields") or {}
         assert (
-            "thinking" in call_kwargs
+            "thinking" in extra
         ), "Thinking config was not passed to provider.create_chat_model()"
-        assert call_kwargs["thinking"]["budget_tokens"] == 5000
+        assert extra["thinking"]["budget_tokens"] == 5000
 
     @patch("lobster.core.config_resolver.ConfigResolver")
     @patch("lobster.config.providers.get_provider")

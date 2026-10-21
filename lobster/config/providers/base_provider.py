@@ -177,7 +177,7 @@ class ILLMProvider(ABC):
     def create_chat_model(
         self,
         model_id: str,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> Any:
@@ -281,7 +281,7 @@ class ILLMProvider(ABC):
         """
         target_model = model_id or self.get_default_model()
         try:
-            llm = self.create_chat_model(target_model, temperature=0.0, max_tokens=1)
+            llm = self.create_chat_model(target_model, max_tokens=1)
             llm.invoke("Hi")
             return (
                 True,
