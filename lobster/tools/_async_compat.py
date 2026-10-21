@@ -7,18 +7,21 @@ with `func=None` and `coroutine=<the async fn>`. This means `.invoke()` raises
 Cloud uses `graph.astream()` which calls `tool.ainvoke()` — works fine.
 CLI uses `graph.stream()` which calls `tool.invoke()` — breaks.
 
-`enable_sync_fallback(tool)` patches `tool.func` with a sync wrapper that runs
-the coroutine on one persistent background event loop. A fresh loop per call
-(`asyncio.run`) breaks SDK clients that cache an async HTTP client bound to the
-first loop: the second call fails with "Event loop is closed". If the wrapper
-is called from that background loop itself, it falls back to a private
-thread so it cannot deadlock.
+`enable_sync_fallback(tool)` patches `tool.func` with a sync wrapper:
+- No loop running (CLI): run on one persistent background event loop. A fresh
+  loop per call (`asyncio.run`) breaks SDK clients that cache an async HTTP
+  client bound to the first loop: the second call failed with
+  "Event loop is closed".
+- Loop already running in this thread: offload `asyncio.run` to a private
+  thread, as before. Never block on the shared loop from a running loop, which
+  could deadlock nested calls.
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import threading
 from typing import Any, Optional
 
@@ -26,6 +29,17 @@ from langchain_core.tools import BaseTool
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_lock = threading.Lock()
+
+
+def _reset_after_fork() -> None:
+    # A forked child inherits the loop object but not its thread.
+    global _loop, _loop_lock
+    _loop = None
+    _loop_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_after_fork)
 
 
 def _background_loop() -> asyncio.AbstractEventLoop:
@@ -46,16 +60,17 @@ def _background_loop() -> asyncio.AbstractEventLoop:
 
 def run_coroutine_sync(coro: Any) -> Any:
     """Run a coroutine to completion from synchronous code."""
-    loop = _background_loop()
     try:
-        running = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        running = None
-    if running is loop:
-        # Called from the shared loop's own thread: blocking on it would deadlock.
+        pass
+    else:
+        # A loop is running in this thread: blocking it on the shared loop could
+        # deadlock nested calls, so keep the previous private-thread behaviour.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, coro).result()
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    # Caller context variables propagate: the task is created in a copy of them.
+    future = asyncio.run_coroutine_threadsafe(coro, _background_loop())
     try:
         return future.result()
     except BaseException:

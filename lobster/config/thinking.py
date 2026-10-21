@@ -72,20 +72,21 @@ def translate_thinking(
     )
     if claude_route and not known_non_claude:
         # Unknown IDs (custom ARNs, application profiles) keep the legacy shape.
+        # Converse (Bedrock, gateway) takes model fields only inside this mapping.
+        if provider == "anthropic":
+            target = out
+        else:
+            target = dict(out.get("additional_model_request_fields") or {})
+            out["additional_model_request_fields"] = target
         if uses_adaptive_thinking(model):
-            request = {
-                "thinking": {"type": "adaptive"},
-                "output_config": {"effort": effort},
+            target["thinking"] = {"type": "adaptive"}
+            # Keep other output options (e.g. format); set only the effort.
+            target["output_config"] = {
+                **(target.get("output_config") or {}),
+                "effort": effort,
             }
         else:
-            request = {"thinking": thinking}
-        if provider == "anthropic":
-            out.update(request)
-        else:
-            # Converse takes model-specific fields only inside this mapping.
-            extra = dict(out.get("additional_model_request_fields") or {})
-            extra.update(request)
-            out["additional_model_request_fields"] = extra
+            target["thinking"] = thinking
         return out
 
     if provider == "openai":

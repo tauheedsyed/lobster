@@ -6,7 +6,11 @@ loop, so the second delegation failed with "Event loop is closed".
 """
 
 import asyncio
+import contextvars
+import os
+import threading
 
+import pytest
 from langchain_core.tools import tool
 
 from lobster.tools._async_compat import enable_sync_fallback, run_coroutine_sync
@@ -66,7 +70,57 @@ def test_exceptions_propagate():
     async def boom():
         raise ValueError("bad")
 
-    import pytest
-
     with pytest.raises(ValueError, match="bad"):
         run_coroutine_sync(boom())
+
+
+def test_deeply_nested_sync_calls_do_not_deadlock():
+    """Sync bridge calls nested three levels deep must finish, not hang."""
+
+    async def level(n):
+        if n == 0:
+            return "done"
+        return run_coroutine_sync(level(n - 1))
+
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.setdefault("v", run_coroutine_sync(level(3))),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=10)
+    assert result.get("v") == "done"
+
+
+def test_caller_context_variables_propagate():
+    var = contextvars.ContextVar("lobster_test_var", default="unset")
+    var.set("caller")
+
+    async def read():
+        return var.get()
+
+    assert run_coroutine_sync(read()) == "caller"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_bridge_works_in_forked_child():
+    async def ping():
+        return "pong"
+
+    assert run_coroutine_sync(ping()) == "pong"  # warm the shared loop
+    pid = os.fork()
+    if pid == 0:  # child
+        code = 1
+        try:
+            done = {}
+            t = threading.Thread(
+                target=lambda: done.setdefault("v", run_coroutine_sync(ping())),
+                daemon=True,
+            )
+            t.start()
+            t.join(timeout=5)
+            code = 0 if done.get("v") == "pong" else 1
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0

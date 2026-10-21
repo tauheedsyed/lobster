@@ -114,6 +114,22 @@ class TestTranslateThinking:
             "effort": "low"
         }
 
+    def test_existing_output_config_is_kept_direct(self):
+        fields = {**_preset("standard"), "output_config": {"format": {"type": "x"}}}
+        out = translate_thinking("anthropic", "claude-opus-5-5", fields)
+        assert out["output_config"] == {"format": {"type": "x"}, "effort": "medium"}
+
+    def test_existing_output_config_is_kept_nested(self):
+        fields = {
+            **_preset("light"),
+            "additional_model_request_fields": {"output_config": {"format": "x"}},
+        }
+        out = translate_thinking("bedrock", "global.anthropic.claude-opus-5-5", fields)
+        assert out["additional_model_request_fields"]["output_config"] == {
+            "format": "x",
+            "effort": "low",
+        }
+
     @pytest.mark.parametrize(
         "preset,effort",
         [("light", "low"), ("standard", "medium"), ("deep", "high")],
