@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 import scipy.sparse as spr
 
-from lobster.utils import deviance as deviance_module
 from lobster.utils.deviance import calculate_deviance
 
 
@@ -224,7 +223,72 @@ def test_explicitly_stored_zeros_are_ignored():
 
 
 class TestInputDomainIsEnforced:
-    """Tests for accepted count-domain inputs."""
+    """Negative and non-finite input must RAISE, not warn, drop, or clamp.
+
+    Dropping them silently would change the returned gene set, and a deviance
+    computed on normalized, log-transformed or scaled input looks valid and means
+    nothing.
+    """
+
+    @pytest.mark.parametrize("sparse", [False, True])
+    def test_negative_values_raise(self, sparse):
+        counts = np.array([[3.0, -1.0], [2.0, 4.0]])
+        matrix = spr.csr_matrix(counts) if sparse else counts
+        with pytest.raises(ValueError, match="negative"):
+            calculate_deviance(matrix)
+
+    @pytest.mark.parametrize("sparse", [False, True])
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    def test_non_finite_values_raise(self, sparse, bad):
+        counts = np.array([[3.0, 1.0], [2.0, 4.0]])
+        counts[0, 1] = bad
+        matrix = spr.csr_matrix(counts) if sparse else counts
+        with pytest.raises(ValueError, match="non-finite"):
+            calculate_deviance(matrix)
+
+    def test_nan_is_not_masked_by_the_negative_check(self):
+        """Ordering guard: ``np.min`` of a NaN array is NaN and ``NaN < 0`` is False.
+
+        If the dense path checked the minimum before checking finiteness, a NaN
+        matrix would pass both tests and reach ``np.log``. This asserts the checks
+        run in the order that makes the second one reachable.
+        """
+        counts = np.array([[3.0, np.nan], [2.0, 4.0]])
+        assert not (float(np.nanmin(counts)) < 0), "fixture has no negative to catch"
+        with pytest.raises(ValueError, match="non-finite"):
+            calculate_deviance(counts)
+
+    def test_negative_stored_in_a_sparse_container_is_not_skipped(self):
+        """A negative must be rejected even where a structural zero is fine.
+
+        The validator runs on the stored values, so it has to distinguish "absent,
+        therefore zero, therefore legal" from "stored and negative".
+        """
+        counts = np.array([[5.0, 0.0, 2.0], [0.0, -3.0, 1.0]])
+        matrix = spr.csr_matrix(counts)
+        assert matrix.nnz == 4
+        with pytest.raises(ValueError, match="negative"):
+            calculate_deviance(matrix)
+
+    def test_message_names_the_statistic_and_the_expected_domain(self):
+        """The person who hits this needs to know their pipeline is upstream-wrong."""
+        with pytest.raises(ValueError) as excinfo:
+            calculate_deviance(np.array([[1.0, -2.5], [3.0, 4.0]]))
+        message = str(excinfo.value)
+        assert "-2.5" in message, "must name the offending value"
+        assert "raw counts" in message.lower(), "must state the expected domain"
+
+    def test_log_normalized_input_is_rejected(self):
+        """The realistic failure: ``adata.X`` after ``sc.pp.log1p`` on scaled data.
+
+        This is the motivating case for raising rather than warning. Such input
+        previously returned a plausible finite ranking.
+        """
+        counts = np.array([[5.0, 0.0, 2.0], [0.0, 3.0, 1.0], [1.0, 1.0, 0.0]])
+        scaled = (counts - counts.mean(axis=0)) / counts.std(axis=0)
+        assert scaled.min() < 0, "fixture must actually contain negatives"
+        with pytest.raises(ValueError, match="negative"):
+            calculate_deviance(scaled)
 
     @pytest.mark.parametrize("sparse", [False, True])
     def test_legitimate_zero_total_gene_is_not_rejected(self, sparse):
