@@ -26,7 +26,9 @@ except ImportError:
     ClaudeSDKClient = None
     ClaudeAgentOptions = None
 
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.utils.logger import get_logger
 
@@ -147,8 +149,11 @@ class SDKDelegationService:
                             k: v
                             for k, v in list(metrics.items())[:5]  # First 5 metrics
                         }
-                except Exception:
-                    pass
+                except Exception as error:
+                    logger.debug(
+                        "Optional quality metrics unavailable (%s)",
+                        type(error).__name__,
+                    )
 
                 return {
                     "content": [
@@ -210,6 +215,9 @@ class SDKDelegationService:
         Returns:
             Dictionary with reasoning_result and metadata
         """
+        if capture_inference_binding(self.data_manager) is not None:
+            raise InferenceRefused("context")
+
         # Create SDK MCP server with Lobster tools
         lobster_tools_server = create_sdk_mcp_server(
             name="lobster", version="1.0.0", tools=self.create_lobster_sdk_tools()
@@ -270,6 +278,7 @@ Available modalities: {self.data_manager.list_modalities()}
             }
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"SDK delegation failed: {e}")
             raise SDKDelegationError(f"SDK execution failed: {e}")
 
@@ -295,6 +304,9 @@ Available modalities: {self.data_manager.list_modalities()}
         Raises:
             SDKDelegationError: If delegation fails
         """
+        if capture_inference_binding(self.data_manager) is not None:
+            raise InferenceRefused("context")
+
         try:
             # Run async SDK call in sync context
             result = asyncio.run(self._async_delegate(task, context))
@@ -315,6 +327,7 @@ Available modalities: {self.data_manager.list_modalities()}
             return result["reasoning_result"], stats, ir
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Delegation failed: {e}")
 
             # Still return IR even on failure

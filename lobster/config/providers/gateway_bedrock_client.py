@@ -12,24 +12,53 @@ logger = logging.getLogger(__name__)
 class _EventIterator:
     """Wraps NDJSON lines into Bedrock EventStream-like dicts."""
 
-    def __init__(self, lines_iter):
+    def __init__(self, lines_iter, response, http):
         self._lines = lines_iter
+        self._response = response
+        self._http = http
+        self._closed = False
 
     def __iter__(self):
         return self
 
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._response.close()
+        finally:
+            self._http.close()
+
     def __next__(self):
-        for line in self._lines:
-            line = line.strip()
-            if not line:
-                continue
-            if line == "[DONE]":
-                raise StopIteration
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
-        raise StopIteration
+        if self._closed:
+            raise StopIteration
+        try:
+            for line in self._lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if line == "[DONE]":
+                    self.close()
+                    raise StopIteration
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+            from botocore.exceptions import ClientError
+
+            raise ClientError(
+                error_response={
+                    "Error": {
+                        "Code": "StreamIncomplete",
+                        "Message": "Gateway stream ended before [DONE].",
+                    }
+                },
+                operation_name="ConverseStream",
+            )
+        except BaseException:
+            self.close()
+            raise
 
 
 class GatewayBedrockClient:
@@ -74,7 +103,9 @@ class GatewayBedrockClient:
 
     def _retry_delay(self, attempt: int) -> float:
         base = 2**attempt
-        return base + random.uniform(0, 0.5)
+        return base + random.uniform(
+            0, 0.5
+        )  # nosec B311 # Retry timing jitter, not cryptographic randomness.
 
     def _handle_error(self, status_code: int, body: str) -> None:
         """Raise botocore-compatible ClientError for ChatBedrockConverse error handling."""
@@ -228,7 +259,7 @@ class GatewayBedrockClient:
 
                 # Return Bedrock-compatible response shape
                 return {
-                    "stream": _EventIterator(resp.iter_lines()),
+                    "stream": _EventIterator(resp.iter_lines(), resp, http),
                     "ResponseMetadata": {"HTTPStatusCode": 200},
                 }
 

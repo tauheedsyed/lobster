@@ -33,11 +33,18 @@ from lobster.agents.research.config import (
 )
 from lobster.agents.research.prompts import create_research_agent_prompt
 from lobster.agents.research.state import ResearchAgentState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 
 # Premium feature - graceful fallback if unavailable
 from lobster.core.component_registry import component_registry
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.schemas.download_queue import (
     DownloadStatus,
@@ -77,6 +84,8 @@ def research_agent(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """Create research agent using DataManagerV2 and modular publication service.
 
@@ -117,14 +126,33 @@ def research_agent(
                 filtered_delegation_tools.append(delegation_tool)
         delegation_tools = filtered_delegation_tools
 
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("research_agent")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    binding_kwargs = {
+        name: value
+        for name, value in (
+            ("inference_context", inference_context),
+            ("model_factory", model_factory),
+        )
+        if value is not None
+    }
+    capture_inference_binding(
+        data_manager, inference_context, model_factory, inherit=False
+    )
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("research_agent")
     llm = create_llm(
         "research_agent",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -162,7 +190,10 @@ def research_agent(
         if _data_expert is None:
             from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-            _data_expert = DataExpertAssistant()
+            _data_expert = DataExpertAssistant(
+                data_manager=data_manager,
+                **binding_kwargs,
+            )
             logger.debug("Lazy-loaded DataExpertAssistant")
         return _data_expert
 
@@ -174,7 +205,10 @@ def research_agent(
                 MetadataValidationService,
             )
 
-            _metadata_validator = MetadataValidationService(data_manager=data_manager)
+            _metadata_validator = MetadataValidationService(
+                data_manager=data_manager,
+                **binding_kwargs,
+            )
             logger.debug("Lazy-loaded MetadataValidationService")
         return _metadata_validator
 
@@ -877,6 +911,7 @@ def research_agent(
                         )
                         return formatted
                     except Exception as e:
+                        reraise_inference_refusal(e)
                         logger.error(f"Error fetching GEO metadata: {e}")
                         return f"Error fetching GEO metadata for {identifier}: {str(e)}"
                 elif database.lower() == "pride":
@@ -1062,6 +1097,7 @@ def research_agent(
                 return formatted
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error extracting metadata: {e}")
             return f"Error extracting metadata for {identifier}: {str(e)}"
 
@@ -1148,6 +1184,7 @@ def research_agent(
                         queue_entries = [result.queue_entry]
 
                     except Exception as e:
+                        reraise_inference_refusal(e)
                         logger.error(
                             f"Failed to add cached dataset {identifier} to download queue: {e}"
                         )
@@ -1319,6 +1356,7 @@ def research_agent(
                                 report += f"2. Hand off to data_expert with entry_id: `{entry_id}`\n"
 
                             except Exception as e:
+                                reraise_inference_refusal(e)
                                 logger.error(
                                     f"Failed to add {identifier} to download queue: {e}"
                                 )
@@ -1345,15 +1383,24 @@ def research_agent(
                         f"For '{identifier}', use `prepare_dataset_download(accession='{identifier}')` instead."
                     )
 
+            except InferenceRefused:
+                raise
             except Exception as e:
+                reraise_inference_refusal(e)
                 logger.error(f"Error accessing dataset {identifier}: {e}")
                 return f"Error accessing dataset {identifier}: {str(e)}"
 
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error in metadata validation: {e}")
             return f"Error validating dataset metadata: {str(e)}"
 
-    validate_dataset_metadata.metadata = {"categories": ["UTILITY"], "provenance": False}
+    validate_dataset_metadata.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     validate_dataset_metadata.tags = ["UTILITY"]
 
     @tool
@@ -1469,6 +1516,7 @@ def research_agent(
             return "\n".join(report_parts)
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Failed to prepare download for {accession}: {e}")
             return f"Error preparing download for '{accession}': {str(e)}"
 
@@ -2091,6 +2139,7 @@ Could not extract content for: {identifier}
             return entry_id
 
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Failed to create queue entry for {identifier}: {e}")
             raise ValueError(f"Could not fetch metadata for {identifier}: {e}")
 
@@ -2276,7 +2325,10 @@ Could not extract content for: {identifier}
         )
         return outcome.response_markdown
 
-    process_publication_entry.metadata = {"categories": ["UTILITY"], "provenance": False}
+    process_publication_entry.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     process_publication_entry.tags = ["UTILITY"]
 
     @tool
@@ -2403,7 +2455,10 @@ Could not extract content for: {identifier}
             )
             return result
 
-    process_publication_queue.metadata = {"categories": ["UTILITY"], "provenance": False}
+    process_publication_queue.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     process_publication_queue.tags = ["UTILITY"]
 
     # ============================================================
@@ -2417,7 +2472,10 @@ Could not extract content for: {identifier}
     get_content_from_workspace = create_get_content_from_workspace_tool(
         data_manager, agent_name="research_agent"
     )
-    get_content_from_workspace.metadata = {"categories": ["UTILITY"], "provenance": False}
+    get_content_from_workspace.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     get_content_from_workspace.tags = ["UTILITY"]
 
     # ============================================================
@@ -2453,7 +2511,9 @@ Could not extract content for: {identifier}
         elif db_lower in providers_map:
             selected = [(db_lower, providers_map[db_lower])]
         else:
-            return f"Unknown database '{database}'. Use: dbaasp, iedb, peptipedia, or all"
+            return (
+                f"Unknown database '{database}'. Use: dbaasp, iedb, peptipedia, or all"
+            )
 
         all_results = []
         for db_name, provider_cls in selected:

@@ -24,7 +24,9 @@ except ImportError:
 
 from lobster.core.exceptions import (
     FeatureNotImplementedError,
+    InferenceRefused,
     UnsupportedPlatformError,
+    reraise_inference_refusal,
 )
 from lobster.services.data_access.geo.constants import (
     PLATFORM_REGISTRY,
@@ -98,7 +100,10 @@ class MetadataFetcher:
         except FeatureNotImplementedError:
             # Re-raise modality errors - they should be handled by caller
             raise
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.exception(f"Error fetching metadata for {geo_id}: {e}")
             return (None, None)
 
@@ -136,7 +141,10 @@ class MetadataFetcher:
                 )
                 try:
                     return self._fetch_gse_metadata_via_entrez(gse_id)
+                except InferenceRefused:
+                    raise
                 except Exception as e:
+                    reraise_inference_refusal(e)
                     logger.error(f"Entrez fallback also failed for {gse_id}: {e}")
                     logger.error(
                         f"Failed to fetch metadata for {gse_id}: "
@@ -197,7 +205,10 @@ class MetadataFetcher:
         except FeatureNotImplementedError:
             # Re-raise modality errors without catching them
             raise
+        except InferenceRefused:
+            raise
         except Exception as geoparse_error:
+            reraise_inference_refusal(geoparse_error)
             logger.error(f"GEOparse metadata fetch failed: {geoparse_error}")
             logger.error(
                 f"Failed to fetch metadata for {gse_id}. GEOparse ({geoparse_error}) failed."
@@ -237,7 +248,11 @@ class MetadataFetcher:
 
             # Make the request with SSL support
             try:
-                response = urllib.request.urlopen(url, context=ssl_context, timeout=30)
+                if urllib.parse.urlsplit(url).scheme != "https":
+                    raise ValueError("NCBI metadata URL must use HTTPS")
+                response = urllib.request.urlopen(  # nosec B310 # Scheme validated to HTTPS above.
+                    url, context=ssl_context, timeout=30
+                )
                 response_data = response.read().decode("utf-8")
             except Exception as e:
                 error_str = str(e)
@@ -302,7 +317,10 @@ class MetadataFetcher:
             logger.error(f"Error parsing GDS JSON response: {e}")
             logger.error(f"Error parsing GDS metadata response for {gds_id}: {str(e)}")
             return (None, None)
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error fetching GDS metadata for {gds_id}: {e}")
             logger.error(f"Error fetching GDS metadata for {gds_id}: {str(e)}")
             return (None, None)
@@ -429,7 +447,11 @@ class MetadataFetcher:
 
             # Make the request with SSL support (timeout: 30s)
             try:
-                response = urllib.request.urlopen(url, context=ssl_context, timeout=30)
+                if urllib.parse.urlsplit(url).scheme != "https":
+                    raise ValueError("NCBI metadata URL must use HTTPS")
+                response = urllib.request.urlopen(  # nosec B310 # Scheme validated to HTTPS above.
+                    url, context=ssl_context, timeout=30
+                )
                 response_data = response.read().decode("utf-8")
             except Exception as e:
                 error_str = str(e)
@@ -517,7 +539,10 @@ class MetadataFetcher:
             raise Exception(
                 f"Error parsing Entrez metadata response for {gse_id}: {str(e)}"
             )
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.error(f"Error in Entrez fallback for {gse_id}: {e}")
             raise
 
@@ -1053,7 +1078,9 @@ class MetadataFetcher:
         from lobster.agents.data_expert.assistant import DataExpertAssistant
 
         if not hasattr(self.service, "_data_expert_assistant"):
-            self.service._data_expert_assistant = DataExpertAssistant()
+            self.service._data_expert_assistant = DataExpertAssistant(
+                data_manager=self.service.data_manager
+            )
 
         # Call LLM to detect modality
         modality_result = self.service._data_expert_assistant.detect_modality(

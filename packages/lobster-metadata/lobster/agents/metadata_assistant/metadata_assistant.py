@@ -24,8 +24,15 @@ from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
+from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.exceptions import InferenceRefused
 from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -222,6 +229,8 @@ def metadata_assistant(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """Create metadata assistant agent for metadata operations.
 
@@ -243,14 +252,33 @@ def metadata_assistant(
     Returns:
         Compiled LangGraph agent with metadata tools
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("metadata_assistant")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    binding_kwargs = {
+        name: value
+        for name, value in (
+            ("inference_context", inference_context),
+            ("model_factory", model_factory),
+        )
+        if value is not None
+    }
+    capture_inference_binding(
+        data_manager, inference_context, model_factory, inherit=False
+    )
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("metadata_assistant")
     llm = create_llm(
         "metadata_assistant",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -265,7 +293,8 @@ def metadata_assistant(
     # Initialize services (Phase 3: new services)
     sample_mapping_service = SampleMappingService(data_manager=data_manager)
     metadata_standardization_service = MetadataStandardizationService(
-        data_manager=data_manager
+        data_manager=data_manager,
+        **binding_kwargs,
     )
 
     # Initialize optional microbiome services if available
@@ -907,7 +936,8 @@ def metadata_assistant(
                 )
 
                 validation_service = MetadataValidationService(
-                    data_manager=data_manager
+                    data_manager=data_manager,
+                    **binding_kwargs,
                 )
 
                 result = validation_service.validate_sample_metadata(
@@ -1007,6 +1037,8 @@ def metadata_assistant(
             logger.info(f"Validation complete for {source}")
             return report
 
+        except InferenceRefused:
+            raise
         except ValueError as e:
             logger.error(f"Validation error: {e}")
             return f"❌ Validation failed: {str(e)}"
@@ -2025,6 +2057,8 @@ Which approach would you prefer?"""
                     for future in as_completed(futures):
                         try:
                             future.result()
+                        except InferenceRefused:
+                            raise
                         except Exception as e:
                             logger.error(f"Worker error: {e}")
                 finally:

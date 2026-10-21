@@ -11,6 +11,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.services.interaction.component_schemas import (
     COMPONENT_SCHEMAS,
     ComponentSelection,
@@ -146,7 +147,10 @@ def _llm_select_component(
         result = structured_llm.invoke(prompt)
         return result  # Pydantic validator handles invalid component names
 
-    except Exception:
+    except InferenceRefused:
+        raise
+    except Exception as error:
+        reraise_inference_refusal(error)
         logger.debug(
             "LLM component selection failed, falling back to text_input",
             exc_info=True,

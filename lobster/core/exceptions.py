@@ -5,7 +5,57 @@ This module provides a comprehensive exception hierarchy for handling
 errors throughout the data loading and analysis pipeline.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
+
+RefusalCategory = Literal[
+    "context", "auth", "policy", "budget", "provider", "accounting"
+]
+
+
+class InferenceRefused(Exception):
+    """A terminal inference refusal that must not become a scientific fallback.
+
+    Only a fixed category and retryability are exposed. Provider exception text,
+    request payloads and credential values must never be passed as a message.
+    Callers may retry only under the same authorized inference identity.
+    """
+
+    def __init__(self, category: RefusalCategory, *, retryable: bool = False):
+        if category not in {
+            "context",
+            "auth",
+            "policy",
+            "budget",
+            "provider",
+            "accounting",
+        }:
+            raise ValueError("Unknown inference refusal category")
+        self.category = category
+        self.retryable = retryable
+        super().__init__(f"Inference refused ({category}).")
+
+
+def reraise_inference_refusal(error: BaseException) -> None:
+    """Preserve a refusal hidden by a wrapper or executor exception group.
+
+    Scientific recovery handlers must call this before logging an exception or
+    returning a fallback. Inspect only typed exception links, never their text.
+    """
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, InferenceRefused):
+            raise current from None
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
 
 
 class LobsterCoreError(Exception):

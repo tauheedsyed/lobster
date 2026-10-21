@@ -20,7 +20,11 @@ AGENT_CONFIG = AgentRegistryConfig(
     factory_function="lobster.agents.proteomics.proteomics_expert.proteomics_expert",
     handoff_tool_name="handoff_to_proteomics_expert",
     handoff_tool_description="Assign proteomics tasks: import proteomics data (CSV, MaxQuant, DIA-NN, Spectronaut, Olink NPX, SomaScan ADAT, Luminex MFI), QC assessment, normalization, batch correction, filtering, imputation, differential expression, pathway enrichment, network analysis. Use for ANY task involving protein expression data.",
-    child_agents=["proteomics_de_analysis_expert", "biomarker_discovery_expert", "peptide_expert"],
+    child_agents=[
+        "proteomics_de_analysis_expert",
+        "biomarker_discovery_expert",
+        "peptide_expert",
+    ],
     supervisor_accessible=True,
     tier_requirement="free",  # All agents free — commercial value in Omics-OS Cloud
 )
@@ -36,6 +40,11 @@ from langgraph.prebuilt import create_react_agent
 from lobster.agents.proteomics.prompts import create_proteomics_expert_prompt
 from lobster.agents.proteomics.shared_tools import create_shared_tools
 from lobster.agents.proteomics.state import ProteomicsExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
@@ -73,6 +82,8 @@ def proteomics_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for unified proteomics expert parent agent.
@@ -95,14 +106,22 @@ def proteomics_expert(
     Returns:
         Configured ReAct agent with proteomics analysis capabilities
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("proteomics_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("proteomics_expert")
     llm = create_llm(
         "proteomics_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -325,7 +344,10 @@ for i, j, _ in cross_reactive_pairs:
             logger.error(f"Error validating antibody specificity: {e}")
             return f"Error in antibody validation: {str(e)}"
 
-    validate_antibody_specificity.metadata = {"categories": ["QUALITY"], "provenance": True}
+    validate_antibody_specificity.metadata = {
+        "categories": ["QUALITY"],
+        "provenance": True,
+    }
     validate_antibody_specificity.tags = ["QUALITY"]
 
     @tool

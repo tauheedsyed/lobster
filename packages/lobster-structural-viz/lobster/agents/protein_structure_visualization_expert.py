@@ -31,6 +31,11 @@ from typing import List, Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.runtime.data_manager import DataManagerV2
@@ -65,6 +70,8 @@ def protein_structure_visualization_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Create protein structure visualization expert agent using DataManagerV2.
@@ -86,14 +93,22 @@ def protein_structure_visualization_expert(
     Returns:
         LangGraph agent for protein structure visualization
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params(agent_name)
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params(agent_name)
     llm = create_llm(
         agent_name,
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)

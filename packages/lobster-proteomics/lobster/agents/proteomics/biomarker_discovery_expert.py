@@ -37,6 +37,11 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.proteomics.prompts import create_biomarker_discovery_expert_prompt
 from lobster.agents.proteomics.state import BiomarkerDiscoveryExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
@@ -64,6 +69,8 @@ def biomarker_discovery_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Factory function for the biomarker discovery expert sub-agent.
@@ -85,14 +92,22 @@ def biomarker_discovery_expert(
     Returns:
         Configured ReAct agent with biomarker discovery capabilities
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("biomarker_discovery_expert")
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params("biomarker_discovery_expert")
     llm = create_llm(
         "biomarker_discovery_expert",
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list (fix double-nesting bug)
@@ -211,7 +226,10 @@ def biomarker_discovery_expert(
             logger.error(f"Error identifying co-expression modules: {e}")
             return f"Error in module identification: {str(e)}"
 
-    identify_coexpression_modules.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    identify_coexpression_modules.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+    }
     identify_coexpression_modules.tags = ["ANALYZE"]
 
     # =========================================================================
@@ -314,7 +332,10 @@ def biomarker_discovery_expert(
             logger.error(f"Error correlating modules with traits: {e}")
             return f"Error in module-trait correlation: {str(e)}"
 
-    correlate_modules_with_traits.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    correlate_modules_with_traits.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+    }
     correlate_modules_with_traits.tags = ["ANALYZE"]
 
     # =========================================================================
@@ -714,7 +735,9 @@ def biomarker_discovery_expert(
                             else lasso_boot.coef_
                         )
                         selection_counts += (np.abs(boot_coefs) > 0).astype(int)
-                    except Exception:  # nosec B112 # Failed bootstrap iterations are excluded, not authorization failures.
+                    except (
+                        Exception
+                    ):  # nosec B112 # Failed bootstrap iterations are excluded, not authorization failures.
                         continue  # Skip failed iterations
 
                 stability_freq = selection_counts / n_iterations
@@ -755,7 +778,9 @@ def biomarker_discovery_expert(
 
                         # Count hits: real feature beats max shadow
                         hit_counts += (real_importances > shadow_max).astype(int)
-                    except Exception:  # nosec B112 # Failed comparison iterations are excluded, not authorization failures.
+                    except (
+                        Exception
+                    ):  # nosec B112 # Failed comparison iterations are excluded, not authorization failures.
                         continue
 
                 # Features that beat shadow in >50% of rounds are selected
@@ -1055,9 +1080,7 @@ stability_selected = stability_freq > 0.6""",
                     keep_cols = ~all_nan_cols
                     X = X[:, keep_cols]
                     valid_proteins = [
-                        p
-                        for p, keep in zip(valid_proteins, keep_cols)
-                        if keep
+                        p for p, keep in zip(valid_proteins, keep_cols) if keep
                     ]
                     logger.warning(
                         f"Dropped {int(all_nan_cols.sum())} all-NaN panel proteins"

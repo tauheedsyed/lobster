@@ -42,9 +42,11 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, Generator
 from unittest.mock import Mock
 
@@ -336,18 +338,38 @@ def mock_agent_environment(
     )
     mock_get_instance.return_value = mock_resolver_instance
 
+    from lobster.config import llm_factory
+
+    original_create_llm = llm_factory.create_llm
     # Mock LLM creation to prevent any real API calls
     mock_llm = Mock()
     mock_llm.with_config.return_value = mock_llm
     mock_create_llm = mocker.patch("lobster.config.llm_factory.create_llm")
     mock_create_llm.return_value = mock_llm
 
-    return {
-        "workspace": isolated_environment,
-        "settings": mock_settings_instance,
-        "llm": mock_llm,
-        "config_resolver": mock_resolver_instance,
-    }
+    try:
+        yield {
+            "workspace": isolated_environment,
+            "settings": mock_settings_instance,
+            "llm": mock_llm,
+            "config_resolver": mock_resolver_instance,
+        }
+    finally:
+        _restore_llm_import_aliases(mock_create_llm, original_create_llm)
+
+
+def _restore_llm_import_aliases(mocked, original):
+    """Undo exact aliases imported during a mock fixture, without importing code.
+
+    Restoring only the source attribute leaves `from ... import create_llm`
+    references in freshly imported consumers pointing at an expired test mock.
+    Do not overwrite unrelated replacements or pre-load consumers to hide this.
+    """
+    for name, module in tuple(sys.modules.items()):
+        if name.startswith("lobster.") and isinstance(module, ModuleType):
+            for attribute, value in tuple(vars(module).items()):
+                if value is mocked:
+                    setattr(module, attribute, original)
 
 
 @pytest.fixture(
@@ -379,7 +401,8 @@ def auto_mock_provider_config(
     """
     # Skip if test is marked with no_auto_config
     if "no_auto_config" in request.keywords:
-        return {}
+        yield {}
+        return
     # Set environment variable to enable provider
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("LOBSTER_LLM_PROVIDER", "anthropic")
@@ -396,6 +419,9 @@ def auto_mock_provider_config(
     )
     mock_get_instance.return_value = mock_resolver_instance
 
+    from lobster.config import llm_factory
+
+    original_create_llm = llm_factory.create_llm
     # Mock LLM creation to prevent any real API calls
     mock_llm = Mock()
     mock_llm.with_config.return_value = mock_llm
@@ -409,12 +435,15 @@ def auto_mock_provider_config(
     )
     mock_factory_create.return_value = mock_llm
 
-    return {
-        "provider": "anthropic",
-        "model": "claude-sonnet-4",
-        "config_resolver": mock_resolver_instance,
-        "llm": mock_llm,
-    }
+    try:
+        yield {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4",
+            "config_resolver": mock_resolver_instance,
+            "llm": mock_llm,
+        }
+    finally:
+        _restore_llm_import_aliases(mock_create_llm, original_create_llm)
 
 
 @pytest.fixture(scope="function")

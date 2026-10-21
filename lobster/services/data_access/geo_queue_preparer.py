@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.core.interfaces.queue_preparer import (
     IQueuePreparer,
     QueuePreparationResult,
@@ -257,7 +258,7 @@ class GEOQueuePreparer(IQueuePreparer):
         if self._data_expert is None:
             from lobster.agents.data_expert.assistant import DataExpertAssistant
 
-            self._data_expert = DataExpertAssistant()
+            self._data_expert = DataExpertAssistant(data_manager=self.data_manager)
             logger.debug("Lazy-loaded DataExpertAssistant for GEOQueuePreparer")
         return self._data_expert
 
@@ -330,7 +331,13 @@ class GEOQueuePreparer(IQueuePreparer):
         except Exception:
             ssl_ctx = None
 
-        response = urllib.request.urlopen(url, context=ssl_ctx, timeout=30)
+        if urllib.parse.urlsplit(url).scheme != "https":
+            raise ValueError("NCBI metadata URL must use HTTPS")
+        response = (
+            urllib.request.urlopen(  # nosec B310 # Scheme validated to HTTPS above.
+                url, context=ssl_ctx, timeout=30
+            )
+        )
         data = json.loads(response.read().decode("utf-8"))
 
         if "result" not in data or gds_number not in data["result"]:
@@ -457,7 +464,10 @@ class GEOQueuePreparer(IQueuePreparer):
                     cached_strategy_config, analysis, metadata, url_data
                 )
 
+        except InferenceRefused:
+            raise
         except Exception as e:
+            reraise_inference_refusal(e)
             logger.warning(
                 f"LLM strategy extraction failed for {accession}: {e}, "
                 "using URL-based fallback"

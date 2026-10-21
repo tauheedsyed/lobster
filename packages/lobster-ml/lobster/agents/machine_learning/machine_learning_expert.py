@@ -23,6 +23,11 @@ from langgraph.prebuilt import create_react_agent
 
 from lobster.agents.machine_learning.prompts import create_ml_expert_prompt
 from lobster.agents.machine_learning.state import MachineLearningExpertState
+from lobster.config.inference_context import (
+    BoundModelFactory,
+    InferenceContext,
+    validate_inference_binding,
+)
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
 from lobster.core.provenance.analysis_ir import AnalysisStep
@@ -150,8 +155,11 @@ def _split_binding(modality_name: str, adata) -> Optional[Dict[str, str]]:
         return None
     if not source.get("split_id") or not source.get("split"):
         return None
-    return {"modality": modality_name, "split": str(source["split"]),
-            "split_id": str(source["split_id"])}
+    return {
+        "modality": modality_name,
+        "split": str(source["split"]),
+        "split_id": str(source["split_id"]),
+    }
 
 
 class MachineLearningError(Exception):
@@ -180,6 +188,8 @@ def machine_learning_expert(
     workspace_path: Optional[Path] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    inference_context: Optional[InferenceContext] = None,
+    model_factory: Optional[BoundModelFactory] = None,
 ):
     """
     Create machine learning expert agent using DataManagerV2.
@@ -191,14 +201,22 @@ def machine_learning_expert(
         delegation_tools: List of delegation tools for child agent handoffs
         workspace_path: Optional workspace path for LLM configuration
     """
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params(agent_name)
+    strict_binding = validate_inference_binding(inference_context, model_factory)
+    model_params = {}
+    if not strict_binding:
+        settings = get_settings()
+        model_params = settings.get_agent_llm_params(agent_name)
     llm = create_llm(
         agent_name,
         model_params,
         provider_override=provider_override,
         model_override=model_override,
         workspace_path=workspace_path,
+        **(
+            {"inference_context": inference_context, "model_factory": model_factory}
+            if strict_binding
+            else {}
+        ),
     )
 
     # Normalize callbacks to a flat list
@@ -276,7 +294,8 @@ def machine_learning_expert(
                     "clustered": any(
                         c in adata.obs.columns
                         for c in ["leiden", "louvain", "seurat_clusters", "cluster"]
-                    ) or any(
+                    )
+                    or any(
                         c.startswith(("leiden_", "louvain_", "RNA_snn_res"))
                         for c in adata.obs.columns
                     ),
@@ -334,7 +353,10 @@ def machine_learning_expert(
             logger.error(f"Error checking ML-ready modalities: {e}")
             return f"Error checking ML-ready modalities: {str(e)}"
 
-    check_ml_ready_modalities.metadata = {"categories": ["UTILITY"], "provenance": False}
+    check_ml_ready_modalities.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     check_ml_ready_modalities.tags = ["UTILITY"]
 
     @tool
@@ -691,13 +713,16 @@ def machine_learning_expert(
             if include_labels and label_column:
                 if label_column not in adata.obs.columns:
                     _label_candidates = {
-                        "condition", "cell_type", "treatment", "group",
-                        "leiden", "louvain", "seurat_clusters",
+                        "condition",
+                        "cell_type",
+                        "treatment",
+                        "group",
+                        "leiden",
+                        "louvain",
+                        "seurat_clusters",
                     }
                     potential_labels = [
-                        col
-                        for col in adata.obs.columns
-                        if col in _label_candidates
+                        col for col in adata.obs.columns if col in _label_candidates
                     ]
                     if potential_labels:
                         label_column = potential_labels[0]
@@ -906,7 +931,10 @@ def machine_learning_expert(
             logger.error(f"Error creating ML analysis summary: {e}")
             return f"Error creating ML summary: {str(e)}"
 
-    create_ml_analysis_summary.metadata = {"categories": ["UTILITY"], "provenance": False}
+    create_ml_analysis_summary.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     create_ml_analysis_summary.tags = ["UTILITY"]
 
     # -------------------------
