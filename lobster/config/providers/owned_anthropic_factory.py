@@ -32,7 +32,7 @@ def _owned_sdk():
         refusal = InferenceRefused("context")
         refusal.add_note(
             "Owned Anthropic inference requires lobster-ai[anthropic] "
-            f"with anthropic{QUALIFIED_ANTHROPIC_SDK} and httpx2>=2.0.0,<3."
+            f"with anthropic{QUALIFIED_ANTHROPIC_SDK} and httpx2>=2.0.0."
         )
         raise refusal from None
     return httpx2, ControlledAnthropicClient, ControlledChatAnthropic

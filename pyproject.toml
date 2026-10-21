@@ -90,7 +90,7 @@ dependencies = [
 # =============================================================================
 # LLM Providers (one required, installed via `lobster init`)
 # =============================================================================
-anthropic = ["langchain-anthropic>=0.3.20", "httpx2>=2.0.0,<3"]
+anthropic = ["langchain-anthropic>=0.3.20", "httpx2>=2.0.0"]
 bedrock = ["langchain-aws>=0.1.0", "boto3>=1.26.0"]
 ollama = ["langchain-ollama>=0.3.10", "ollama>=0.6.0"]
 gemini = ["langchain-google-genai>=4.1.2"]
