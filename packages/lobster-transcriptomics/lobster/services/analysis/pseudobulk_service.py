@@ -21,8 +21,8 @@ from lobster.core import (
     PseudobulkError,
 )
 from lobster.core.adapters.pseudobulk_adapter import PseudobulkAdapter
-from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.provenance import ProvenanceTracker
+from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -693,7 +693,7 @@ import pandas as pd
 import numpy as np
 
 # Group cells by sample and cell type
-groups = adata.obs.groupby(['{{ sample_col }}', '{{ celltype_col }}']).groups
+groups = adata.obs.groupby([{{ sample_col | string | repr }}, {{ celltype_col | string | repr }}]).groups
 
 # Aggregate expression for each group
 pseudobulk_data = []

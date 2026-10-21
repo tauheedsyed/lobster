@@ -523,7 +523,7 @@ n_factors = {{ n_factors }}
 min_overlap_fraction = {{ min_overlap_fraction }}
 memory_threshold_gb = {{ memory_threshold_gb }}
 gpu_mode = {{ gpu_mode }}
-convergence_mode = "{{ convergence_mode }}"
+convergence_mode = {{ convergence_mode | string | repr }}
 n_iterations = {{ n_iterations }}
 random_state = {{ random_state }}
 

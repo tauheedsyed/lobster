@@ -1091,7 +1091,6 @@ class TestPseudobulkIR:
 
     def test_pseudobulk_ir_code_template_renders(self, pseudobulk_service):
         """Test Jinja2 code template rendering."""
-        from jinja2 import Template
 
         ir = pseudobulk_service._create_pseudobulk_ir(
             sample_col="sample_id",
@@ -1100,8 +1099,7 @@ class TestPseudobulkIR:
             min_cells=10,
         )
 
-        template = Template(ir.code_template)
-        rendered = template.render(**ir.parameters)
+        rendered = ir.render()
 
         # Verify rendering works
         assert isinstance(rendered, str)

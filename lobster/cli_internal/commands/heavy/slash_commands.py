@@ -306,7 +306,7 @@ def extract_available_commands() -> Dict[str, str]:
                         if cmd not in command_descriptions:
                             command_descriptions[cmd] = f"Execute {cmd} command"
 
-    except Exception:
+    except Exception:  # nosec B110 - static command list is the fallback
         # Fallback to static definitions if AST parsing fails (silent)
         pass
 
@@ -512,7 +512,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                     display_meta=HTML(f"<dim>{meta}</dim>"),
                                     style="class:completion.dataset",
                                 )
-                except Exception:
+                except Exception:  # nosec B110 - tab completion is best-effort
                     pass
 
             elif text.startswith("/workspace remove "):
@@ -542,7 +542,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                         display=HTML(f"<ansired>{name}</ansired>"),
                                         style="class:completion.modality",
                                     )
-                except Exception:
+                except Exception:  # nosec B110 - tab completion is best-effort
                     pass
 
             elif text.startswith("/restore "):
@@ -587,7 +587,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                     display_meta=HTML(f"<dim>{meta}</dim>"),
                                     style="class:completion.modality",
                                 )
-                except Exception:
+                except Exception:  # nosec B110 - tab completion is best-effort
                     pass
 
             elif text == "/config" or text == "/config ":
@@ -638,7 +638,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                 display_meta=HTML(f"<dim>{meta}</dim>"),
                                 style="class:completion.model",
                             )
-                    except Exception:
+                    except Exception:  # nosec B110 - tab completion is best-effort
                         pass
 
                 elif text == "/config provider":
@@ -699,7 +699,7 @@ if PROMPT_TOOLKIT_AVAILABLE:
                                     display_meta=HTML(f"<dim>{meta}</dim>"),
                                     style="class:completion.model",
                                 )
-                    except Exception:
+                    except Exception:  # nosec B110 - tab completion is best-effort
                         # Silent fail for tab completion
                         pass
 
@@ -1649,7 +1649,7 @@ def _build_help_blocks(*, protocol_friendly: bool = False) -> list[OutputBlock]:
                 ["/config", "Provider/model settings"],
                 ["/plots", "List generated plots"],
                 ["/read <file>", "Load data file"],
-                ["/pipeline export", "Export as Jupyter notebook"],
+                ["/pipeline export [--replay]", "Export as Jupyter notebook"],
                 ["/tokens", "Token usage & costs"],
                 ["/clear", "Clear screen"],
                 ["/exit", "Exit"],
@@ -2582,9 +2582,21 @@ when they are started by agents or analysis workflows.
         subcommand = parts[1] if len(parts) > 1 else None
 
         if subcommand == "export":
-            name = parts[2] if len(parts) > 2 else None
-            description = " ".join(parts[3:]) if len(parts) > 3 else None
-            return pipeline_export(client, output, name, description)
+            from lobster.cli_internal.commands.light.pipeline_commands import (
+                parse_export_args,
+            )
+
+            # Arguments come from the original text, so the name keeps its case.
+            try:
+                name, description, mode, force = parse_export_args(
+                    original_command.split()[2:]
+                )
+            except ValueError as e:
+                _render_structured_output(output, [alert_block(str(e), level="error")])
+                return f"Export failed: {e}"
+            return pipeline_export(
+                client, output, name, description, mode=mode, force=force
+            )
         elif subcommand == "list":
             return pipeline_list(client, output)
         elif subcommand == "run":
@@ -2816,7 +2828,7 @@ when they are started by agents or analysis workflows.
                 if hasattr(client, "_save_session_json"):
                     try:
                         client._save_session_json()
-                    except Exception:
+                    except Exception:  # nosec B110 - session autosave is best-effort
                         pass
                 raise KeyboardInterrupt
             return None
@@ -2825,7 +2837,7 @@ when they are started by agents or analysis workflows.
             if hasattr(client, "_save_session_json"):
                 try:
                     client._save_session_json()
-                except Exception:
+                except Exception:  # nosec B110 - session autosave is best-effort
                     pass
             display_goodbye()
 
@@ -2915,6 +2927,10 @@ def _command_restore(client, output, pattern: str = "recent") -> Optional[str]:
 
 
 _UNKNOWN_COMMAND = object()  # Sentinel for unrecognized commands
+
+
+class _CommandFailed(Exception):
+    """A command ran and already reported its own failure; exit nonzero."""
 
 
 def _dispatch_command(cmd_str: str, client, output):
@@ -3082,13 +3098,33 @@ def _dispatch_command(cmd_str: str, client, output):
                             style="info",
                         )
 
-                return None
+                raise _CommandFailed(
+                    "Pipeline export requires a session with analysis history."
+                )
 
-            # Provenance loaded - delegate to existing function
-            # Pass defaults since `lobster command` may run non-interactively
-            return pipeline_export(
-                client, output, name="analysis_workflow", description=""
+            from lobster.cli_internal.commands.light.pipeline_commands import (
+                parse_export_args,
             )
+
+            try:
+                name, description, mode, force = parse_export_args(
+                    args.split() if args else []
+                )
+            except ValueError as e:
+                output.print(str(e), style="error")
+                raise _CommandFailed(str(e)) from e
+            # Defaults instead of prompts: `lobster command` runs non-interactively.
+            result = pipeline_export(
+                client,
+                output,
+                name=name or "analysis_workflow",
+                description=description or "",
+                mode=mode,
+                force=force,
+            )
+            if not (result or "").startswith("Exported notebook:"):
+                raise _CommandFailed(result or "Export failed")
+            return result
 
         elif sub == "run":
             # Similar check for pipeline run
@@ -3407,6 +3443,20 @@ def command_cmd_impl(
 
     except typer.Exit:
         raise
+    except _CommandFailed as e:
+        # The command already printed its error; only JSON needs the envelope.
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "command": cmd_str,
+                        "data": output.to_dict(),
+                        "error": str(e),
+                    }
+                )
+            )
+        raise typer.Exit(1)
     except Exception as e:
         if json_output:
             print(
@@ -3447,7 +3497,10 @@ def vector_search_cmd_impl(query_text: str, top_k=None, pretty: bool = True):
         raise typer.Exit(1)
 
 
-def serve_impl(port: int = 8000, host: str = "0.0.0.0"):
+def serve_impl(
+    port: int = 8000,
+    host: str = "0.0.0.0",  # nosec B104 - API server; bind address is set with --host
+):
     """Start the agent system as an API server (extracted from cli.py)."""
     from typing import Optional
 

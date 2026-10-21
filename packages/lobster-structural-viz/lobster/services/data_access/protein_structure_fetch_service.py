@@ -399,8 +399,8 @@ class ProteinStructureFetchService:
 import requests
 from pathlib import Path
 
-pdb_id = "{{ pdb_id }}"
-format = "{{ format }}"
+pdb_id = {{ pdb_id | string | repr }}
+format = {{ format | string | repr }}
 
 # Download structure file
 download_url = f"https://files.rcsb.org/download/{pdb_id}.{format}"
@@ -467,8 +467,8 @@ print(f"File size: {output_file.stat().st_size / 1024:.1f} KB")
 import requests
 import pandas as pd
 
-gene_column = "{{ gene_column }}"
-organism = "{{ organism }}"
+gene_column = {{ gene_column | string | repr }}
+organism = {{ organism | string | repr }}
 max_structures = {{ max_structures_per_gene }}
 
 # Search PDB for each gene

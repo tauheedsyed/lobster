@@ -253,15 +253,15 @@ print("=" * 60)
 # ============================================================
 # Input Validation
 # ============================================================
-if "{{ target_column }}" not in adata.obs.columns:
-    raise ValueError(f"Target column '{{ target_column }}' not found in adata.obs")
+if {{ target_column | string | repr }} not in adata.obs.columns:
+    raise ValueError(f"Target column '{ {{ target_column | repr }} }' not found in adata.obs")
 
 # Prepare data
 {% if feature_space_key %}
-# Using integrated feature space: {{ feature_space_key }}
-X = adata.obsm["{{ feature_space_key }}"]
+# Using integrated feature space: {{ feature_space_key | string | repr }}
+X = adata.obsm[{{ feature_space_key | string | repr }}]
 feature_names = [f"Factor_{i+1}" for i in range(X.shape[1])]
-print(f"Feature space: {X.shape[1]} factors from '{{ feature_space_key }}'")
+print(f"Feature space: {X.shape[1]} factors from '{ {{ feature_space_key | repr }} }'")
 {% else %}
 X = adata.X
 if hasattr(X, "toarray"):
@@ -269,12 +269,12 @@ if hasattr(X, "toarray"):
 feature_names = adata.var_names.tolist()
 {% endif %}
 
-y = adata.obs["{{ target_column }}"].values
+y = adata.obs[{{ target_column | string | repr }}].values
 n_samples = X.shape[0]
 n_total_features = X.shape[1]
 
 print(f"\\nInput: {n_samples} samples x {n_total_features} features")
-print(f"Target: '{{ target_column }}'")
+print(f"Target: '{ {{ target_column | repr }} }'")
 
 # Encode categorical target if needed
 if y.dtype == object or str(y.dtype) == "category":
@@ -540,15 +540,15 @@ from sklearn.linear_model import LogisticRegression, Lasso
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 # Validate target column
-if "{{ target_column }}" not in adata.obs.columns:
-    raise ValueError(f"Target column '{{ target_column }}' not found in adata.obs")
+if {{ target_column | string | repr }} not in adata.obs.columns:
+    raise ValueError(f"Target column '{ {{ target_column | repr }} }' not found in adata.obs")
 
 # Prepare data
 {% if feature_space_key %}
-# Using integrated feature space: {{ feature_space_key }}
-X = adata.obsm["{{ feature_space_key }}"]
+# Using integrated feature space: {{ feature_space_key | string | repr }}
+X = adata.obsm[{{ feature_space_key | string | repr }}]
 feature_names = [f"Factor_{i+1}" for i in range(X.shape[1])]
-print(f"Feature space: {X.shape[1]} factors from '{{ feature_space_key }}'")
+print(f"Feature space: {X.shape[1]} factors from '{ {{ feature_space_key | repr }} }'")
 {% else %}
 X = adata.X
 if hasattr(X, "toarray"):
@@ -556,7 +556,7 @@ if hasattr(X, "toarray"):
 feature_names = adata.var_names.tolist()
 {% endif %}
 
-y = adata.obs["{{ target_column }}"].values
+y = adata.obs[{{ target_column | string | repr }}].values
 
 # Scale features for L1 regularization
 scaler = StandardScaler()
@@ -609,7 +609,7 @@ selected_features = [feature_names[i] for i in np.where(selected_mask)[0]]
 adata.var["lasso_coefficient"] = coef
 adata.var["lasso_selected"] = selected_mask
 
-print(f"LASSO selected {n_selected}/{len(feature_names)} features (alpha={{ alpha }})")
+print(f"LASSO selected {n_selected}/{len(feature_names)} features (alpha={ {{ alpha | repr }} })")
 """
 
         return AnalysisStep(
@@ -709,9 +709,9 @@ print("=" * 60)
 
 # Extract data matrix
 {% if feature_space_key %}
-# Using integrated feature space: {{ feature_space_key }}
-X = adata.obsm["{{ feature_space_key }}"]
-print(f"Feature space: {X.shape[1]} factors from '{{ feature_space_key }}'")
+# Using integrated feature space: {{ feature_space_key | string | repr }}
+X = adata.obsm[{{ feature_space_key | string | repr }}]
+print(f"Feature space: {X.shape[1]} factors from '{ {{ feature_space_key | repr }} }'")
 {% else %}
 X = adata.X
 {% endif %}
@@ -795,7 +795,7 @@ percentile_equivalent = (variances < threshold_value).sum() / len(variances) * 1
 print(f"  This threshold is at the {percentile_equivalent:.1f}th percentile")
 {% else %}
 threshold_value = np.percentile(variances, {{ percentile }})
-print(f"\\nUsing {{ percentile }}th percentile threshold: {threshold_value:.6f}")
+print(f"\\nUsing { {{ percentile | repr }} }th percentile threshold: {threshold_value:.6f}")
 {% endif %}
 
 # ============================================================
@@ -1261,11 +1261,11 @@ print(f"{'=' * 60}")
             "probability_threshold": probability_threshold,
             "n_total_features": n_total_features,
             "n_selected_features": n_selected,
-            "avg_selection_probability": float(
-                np.mean(selection_probability[selected_mask])
-            )
-            if n_selected > 0
-            else 0.0,
+            "avg_selection_probability": (
+                float(np.mean(selection_probability[selected_mask]))
+                if n_selected > 0
+                else 0.0
+            ),
             "used_fallback": n_selected_by_threshold == 0,
             "top_features": top_features_info,
         }
@@ -1499,12 +1499,12 @@ print(f"{'=' * 60}")
             "n_selected_features": int(n_selected),
             "n_removed_features": int(n_removed),
             "removal_rate": float(n_removed / len(selected_mask)),
-            "min_variance_kept": float(variances[selected_mask].min())
-            if n_selected > 0
-            else None,
-            "max_variance_removed": float(variances[~selected_mask].max())
-            if n_removed > 0
-            else None,
+            "min_variance_kept": (
+                float(variances[selected_mask].min()) if n_selected > 0 else None
+            ),
+            "max_variance_removed": (
+                float(variances[~selected_mask].max()) if n_removed > 0 else None
+            ),
             "chunked": chunked,
         }
 

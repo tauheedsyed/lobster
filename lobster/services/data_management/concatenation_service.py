@@ -805,14 +805,14 @@ class ConcatenationService:
             else "[f'sample_{i}' for i in range(n_samples)]"
         )
         code_template = f"""# Concatenate samples
-# Join type: {{{{ join_type }}}} ({"inner join = common genes only" if join_type == "inner" else "outer join = all genes, fill missing with 0"})
+# Join type: {{{{ join_type | string | repr }}}} ({"inner join = common genes only" if join_type == "inner" else "outer join = all genes, fill missing with 0"})
 concatenated_adata = ad.concat(
     sample_adatas,
     axis=0,
     join={{{{ join_type }}}},
     merge='unique',
     {"fill_value=0," if join_type == "outer" else ""}
-    label='{{{{ batch_key }}}}',
+    label={{{{ batch_key | string | repr }}}},
     keys={sample_ids_str},
 )
 print(f"Concatenated {{len(sample_adatas)}} samples: {{concatenated_adata.n_obs}} cells × {{concatenated_adata.n_vars}} genes")

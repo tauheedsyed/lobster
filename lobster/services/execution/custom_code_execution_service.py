@@ -15,7 +15,7 @@ SECURITY MODEL:
 
 import ast
 import json
-import subprocess
+import subprocess  # nosec B404 - subprocess used with fixed argument lists
 import sys
 import time
 import uuid
@@ -318,13 +318,16 @@ class CustomCodeExecutionService:
         exec_id = uuid.uuid4().hex[:12]
         exec_cache = self.data_manager.workspace_path / "cache" / "execution" / exec_id
         exec_cache.mkdir(parents=True, exist_ok=True)
-        materialized_dir = self.data_manager.workspace_path / "cache" / "execution" / "materialized"
+        materialized_dir = (
+            self.data_manager.workspace_path / "cache" / "execution" / "materialized"
+        )
         materialized_dir.mkdir(parents=True, exist_ok=True)
 
         # Preflight: detect all modalities referenced in code (fails fast on unknown paths)
         required_modalities = self._detect_required_modalities(code, modality_name)
         alias_map = {}
         from lobster.core.interfaces.locality import _safe_filename
+
         for name in required_modalities:
             try:
                 local_path = self._materialize_modality(name, materialized_dir)
@@ -339,8 +342,8 @@ class CustomCodeExecutionService:
             ws = str(self.data_manager.workspace_path)
             alias_map[f"{ws}/modalities/{safe}.h5ad"] = real
             alias_map[f"{ws}/data/{safe}.h5ad"] = real
-            alias_map[f"/tmp/workspace/modalities/{safe}.h5ad"] = real
-            alias_map[f"/tmp/workspace/data/{safe}.h5ad"] = real
+            alias_map[f"/tmp/workspace/modalities/{safe}.h5ad"] = real  # nosec B108
+            alias_map[f"/tmp/workspace/data/{safe}.h5ad"] = real  # nosec B108
             alias_map[f"data/{safe}.h5ad"] = real
             alias_map[f"{safe}.h5ad"] = real
 
@@ -417,7 +420,7 @@ class CustomCodeExecutionService:
                 finally:
                     try:
                         modified_path.unlink(missing_ok=True)
-                    except Exception:
+                    except Exception:  # nosec B110 - best-effort cleanup
                         pass
 
         # Step 4b: Read plot manifest and register captured Plotly figures
@@ -435,8 +438,13 @@ class CustomCodeExecutionService:
                     try:
                         json_resolved = json_path.resolve()
                         cache_resolved = exec_cache.resolve()
-                        if cache_resolved not in json_resolved.parents and json_resolved != cache_resolved:
-                            logger.warning(f"Plot JSON path outside exec_cache, skipping: {json_path}")
+                        if (
+                            cache_resolved not in json_resolved.parents
+                            and json_resolved != cache_resolved
+                        ):
+                            logger.warning(
+                                f"Plot JSON path outside exec_cache, skipping: {json_path}"
+                            )
                             continue
                     except (OSError, ValueError):
                         continue
@@ -483,7 +491,7 @@ class CustomCodeExecutionService:
             import shutil
 
             shutil.rmtree(exec_cache, ignore_errors=True)
-        except Exception:
+        except Exception:  # nosec B110 - best-effort cleanup
             pass
 
         # Step 4b: Save large outputs to files (DeepAgents pattern)
@@ -687,9 +695,9 @@ class CustomCodeExecutionService:
 
         # Regex patterns for h5ad file access
         patterns = [
-            r'''(?:read_h5ad|\.read)\s*\(\s*['"](.*?\.h5ad)['"]\s*''',
-            r'''Path\s*\(\s*['"](.*?\.h5ad)['"]\s*\)''',
-            r'''h5py\.File\s*\(\s*['"](.*?\.h5ad)['"]\s*''',
+            r"""(?:read_h5ad|\.read)\s*\(\s*['"](.*?\.h5ad)['"]\s*""",
+            r"""Path\s*\(\s*['"](.*?\.h5ad)['"]\s*\)""",
+            r"""h5py\.File\s*\(\s*['"](.*?\.h5ad)['"]\s*""",
         ]
         h5ad_refs = []
         for pattern in patterns:
@@ -798,7 +806,11 @@ class CustomCodeExecutionService:
         Returns:
             Python code string that sets up context
         """
-        exec_cache_str = str(exec_cache_path) if exec_cache_path else str(workspace_path / "cache" / "execution")
+        exec_cache_str = (
+            str(exec_cache_path)
+            if exec_cache_path
+            else str(workspace_path / "cache" / "execution")
+        )
         alias_map_repr = repr(alias_map or {})
         setup_code = f"""
 # Auto-generated context setup for Lobster custom code execution
@@ -916,8 +928,13 @@ modalities = []
         # Add modality loading if specified
         if modality_name:
             from lobster.core.interfaces.locality import _safe_filename
+
             safe_mod_name = _safe_filename(modality_name)
-            materialized_dir_str = str(Path(exec_cache_str).parent / "materialized") if exec_cache_path else str(workspace_path / "cache" / "execution" / "materialized")
+            materialized_dir_str = (
+                str(Path(exec_cache_str).parent / "materialized")
+                if exec_cache_path
+                else str(workspace_path / "cache" / "execution" / "materialized")
+            )
             setup_code += f"""
 # Load specified modality (check materialized cache first, then exec cache)
 try:
@@ -1308,7 +1325,9 @@ if 'result' in dir() and result is not None:
                 "PATH": _os.environ.get("PATH", ""),
                 "HOME": _os.environ.get("HOME", ""),
                 "USER": _os.environ.get("USER", ""),
-                "TMPDIR": _os.environ.get("TMPDIR", "/tmp"),
+                "TMPDIR": _os.environ.get(
+                    "TMPDIR", "/tmp"
+                ),  # nosec B108 - path alias, not a temp file
                 "LANG": _os.environ.get("LANG", "en_US.UTF-8"),
                 "LC_ALL": _os.environ.get("LC_ALL", ""),
                 # Python-specific (empty PYTHONPATH prevents hijacking)
@@ -1316,7 +1335,7 @@ if 'result' in dir() and result is not None:
                 "PYTHONHOME": _os.environ.get("PYTHONHOME", ""),
             }
 
-            proc_result = subprocess.run(
+            proc_result = subprocess.run(  # nosec B603 - argument list, no shell
                 [sys.executable, str(script_path)],
                 cwd=str(workspace_path),
                 capture_output=True,
@@ -1442,7 +1461,7 @@ if 'result' in dir() and result is not None:
 from pathlib import Path
 import sys
 
-WORKSPACE = Path('{{ workspace_path }}')
+WORKSPACE = Path({{ workspace_path | string | repr }})
 sys.path.append(str(WORKSPACE))
 
 # OUTPUT_DIR: Recommended directory for CSV/TSV/Excel exports

@@ -1671,7 +1671,7 @@ Use this mapping to apply consistent annotations to similar datasets."""
                     "vs = VectorSearchService()\n"
                     "# For each cluster, build query from marker genes and match to Cell Ontology\n"
                     "matches = vs.match_ontology(\n"
-                    '    "{{ query_text }}", "cell_ontology", k={{ k }}\n'
+                    '    {{ query_text | string | repr }}, "cell_ontology", k={{ k }}\n'
                     ")\n"
                     "# Filter by min_confidence={{ min_confidence }}\n"
                     '# Apply top match to adata.obs["cell_type"]'

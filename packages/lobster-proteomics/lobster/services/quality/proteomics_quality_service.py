@@ -1435,7 +1435,7 @@ n_samples, n_proteins = X.shape
 detection_rate = 1.0 - (np.isnan(X).sum(axis=0) / n_samples)
 passes = detection_rate >= {{ min_detection_rate }}
 
-# Compute variability ({{ method }})
+# Compute variability ({{ method | string | repr }})
 variability = np.full(n_proteins, np.nan)
 for j in range(n_proteins):
     if not passes[j]:

@@ -513,7 +513,7 @@ class ModalityManagementService:
             ),
             library="lobster",
             imports=[],
-            code_template="""# List modalities{{ " matching '" ~ filter_pattern ~ "'" if filter_pattern else "" }}
+            code_template="""# List modalities{{ (" matching " ~ (filter_pattern | string | repr)) if filter_pattern else "" }}
 # Read-only introspection recorded from the original session. It changed no state,
 # so the replay has nothing to re-run: the session's registry does not exist here.
 print("provenance: modalities listed here (read-only, no-op in replay)")
@@ -539,10 +539,10 @@ print("provenance: modalities listed here (read-only, no-op in replay)")
             description=f"Retrieve detailed information for modality '{modality_name}'",
             library="lobster",
             imports=[],
-            code_template="""# Inspect modality: '{{ modality_name }}'
+            code_template="""# Inspect modality: {{ modality_name | string | repr }}
 # Read-only introspection recorded from the original session. It changed no state.
 # The closest equivalent available here is the working object's own shape.
-print("provenance: modality '{{ modality_name }}' inspected here (read-only)")
+print({{ ("provenance: modality '" ~ modality_name ~ "' inspected here (read-only)") | repr }})
 print(f"current working object: {adata.n_obs} x {adata.n_vars}")
 """,
             parameters={"modality_name": modality_name},
@@ -570,7 +570,7 @@ print(f"current working object: {adata.n_obs} x {adata.n_vars}")
             description=f"Remove modality '{modality_name}' from workspace",
             library="lobster",
             imports=[],
-            code_template="""# Remove modality: '{{ modality_name }}'
+            code_template="""# Remove modality: {{ modality_name | string | repr }}
 # Recorded state change from the original session.
 #
 # remove_modality() drops a NAMED REGISTRY ENTRY from the session's modality
@@ -578,9 +578,9 @@ print(f"current working object: {adata.n_obs} x {adata.n_vars}")
 # entry, so there is nothing here to delete — and deleting `adata` would destroy
 # the object the remaining cells need.
 #
-# Effect in the original session: '{{ modality_name }}' was unavailable from this
+# Effect in the original session: {{ modality_name | string | repr }} was unavailable from this
 # point on. If you are re-deriving the session's artefact set, do not expect it.
-print("provenance: modality '{{ modality_name }}' removed here (no-op in replay)")
+print({{ ("provenance: modality '" ~ modality_name ~ "' removed here (no-op in replay)") | repr }})
 """,
             parameters={"modality_name": modality_name},
             parameter_schema={
@@ -603,10 +603,10 @@ print("provenance: modality '{{ modality_name }}' removed here (no-op in replay)
             description=f"Validate compatibility between {len(modality_names)} modalities",
             library="lobster",
             imports=[],
-            code_template="""# Validate modality compatibility: {{ modality_names }}
+            code_template="""# Validate modality compatibility: {{ modality_names | string | repr }}
 # Read-only check recorded from the original session. It changed no state, and it
 # compared registry entries that do not exist in this notebook.
-print("provenance: compatibility checked here for {{ modality_names }} (read-only)")
+print({{ ("provenance: compatibility checked here for " ~ modality_names ~ " (read-only)") | repr }})
 """,
             parameters={"modality_names": modality_names},
             parameter_schema={
@@ -634,24 +634,24 @@ print("provenance: compatibility checked here for {{ modality_names }} (read-onl
             # regardless of whether a curated notebook would publish it.
             replayable=True,
             imports=["import anndata as ad", "from pathlib import Path"],
-            code_template="""# Load modality '{{ modality_name }}' from file
+            code_template="""# Load modality {{ modality_name | string | repr }} from file
 # Recorded data entry point from the original session, loaded with the
-# '{{ adapter }}' adapter (dataset_type='{{ dataset_type }}').
+# {{ adapter | string | repr }} adapter (dataset_type={{ dataset_type | string | repr }}).
 #
 # The read is attempted directly rather than through the adapter, because a
 # notebook has no live session to hold the modality registry. It is guarded: a
 # missing file prints and continues instead of aborting the replay, since the
 # original path is specific to the machine the session ran on.
-_src = Path(r"{{ file_path }}")
+_src = Path({{ file_path | string | repr }})
 if _src.exists() and _src.suffix == ".h5ad":
     _loaded = ad.read_h5ad(_src)
-    print(f"Loaded '{{ modality_name }}': {_loaded.n_obs} x {_loaded.n_vars}")
+    print(f"Loaded '{ {{ modality_name | repr }} }': {_loaded.n_obs} x {_loaded.n_vars}")
 elif _src.exists():
-    print("provenance: '{{ modality_name }}' came from "
-          f"{_src.name} via the '{{ adapter }}' adapter; "
+    print({{ ("provenance: '" ~ modality_name ~ "' came from ") | repr }}
+          f"{_src.name} via the '{ {{ adapter | repr }} }' adapter; "
           "load it with that adapter to reproduce this step")
 else:
-    print(f"provenance: '{{ modality_name }}' was loaded here from {_src} "
+    print(f"provenance: '{ {{ modality_name | repr }} }' was loaded here from {_src} "
           "(not present; supply it to reproduce this step)")
 """,
             parameters={

@@ -7,7 +7,7 @@ threshold optimization, and risk stratification for biomedical data.
 Requires: pip install lobster-ml[survival]
 """
 
-import pickle
+import pickle  # nosec B403 - pickle of local model files
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -217,9 +217,9 @@ from sksurv.metrics import concordance_index_censored
 
 # 1. Extract feature matrix
 {% if feature_space_key %}
-# Using integrated feature space: {{ feature_space_key }}
-X = adata.obsm["{{ feature_space_key }}"]
-print(f"Feature space: {X.shape[1]} factors from '{{ feature_space_key }}'")
+# Using integrated feature space: {{ feature_space_key | string | repr }}
+X = adata.obsm[{{ feature_space_key | string | repr }}]
+print(f"Feature space: {X.shape[1]} factors from '{ {{ feature_space_key | repr }} }'")
 {% else %}
 X = adata.X
 if hasattr(X, "toarray"):
@@ -231,8 +231,8 @@ if hasattr(X, "toarray"):
 print(f"Feature matrix: {X.shape[0]} samples x {X.shape[1]} features")
 
 # 2. Prepare survival data (structured array format)
-events = adata.obs["{{ event_column }}"].astype(bool).values
-times = adata.obs["{{ time_column }}"].values
+events = adata.obs[{{ event_column | string | repr }}].astype(bool).values
+times = adata.obs[{{ time_column | string | repr }}].values
 y = np.array(
     [(event, time) for event, time in zip(events, times)],
     dtype=[("event", bool), ("time", float)]
@@ -251,7 +251,7 @@ coxnet_init = CoxnetSurvivalAnalysis(
 )
 coxnet_init.fit(X, y)
 candidate_alphas = coxnet_init.alphas_
-print(f"Testing {len(candidate_alphas)} candidate alphas via {{ cv_folds }}-fold CV")
+print(f"Testing {len(candidate_alphas)} candidate alphas via { {{ cv_folds | repr }} }-fold CV")
 
 # Step 3b: Cross-validate to select best alpha
 gcv = GridSearchCV(
@@ -309,8 +309,8 @@ print("   For publication, report test set or CV C-index instead")
 # X_test = test_adata.X
 # if hasattr(X_test, "toarray"):
 #     X_test = X_test.toarray()
-# events_test = test_adata.obs["{{ event_column }}"].astype(bool).values
-# times_test = test_adata.obs["{{ time_column }}"].values
+# events_test = test_adata.obs[{{ event_column | string | repr }}].astype(bool).values
+# times_test = test_adata.obs[{{ time_column | string | repr }}].values
 # risk_scores_test = model.predict(X_test)
 # c_result_test = concordance_index_censored(events_test, times_test, risk_scores_test)
 # print(f"\\nTest C-index: {c_result_test[0]:.3f} (UNBIASED)")
@@ -493,12 +493,12 @@ import numpy as np
 from sklearn.metrics import matthews_corrcoef, confusion_matrix
 
 # 1. Extract survival data and risk scores
-risk_scores = adata.obs["{{ risk_score_column }}"].values.copy()
-times = adata.obs["{{ time_column }}"].values.copy()
-events = adata.obs["{{ event_column }}"].astype(bool).values.copy()
+risk_scores = adata.obs[{{ risk_score_column | string | repr }}].values.copy()
+times = adata.obs[{{ time_column | string | repr }}].values.copy()
+events = adata.obs[{{ event_column | string | repr }}].astype(bool).values.copy()
 
 print(f"Optimizing threshold for {len(risk_scores)} samples")
-print(f"Time horizon: {{ time_horizon }}")
+print(f"Time horizon: { {{ time_horizon | repr }} }")
 
 # 2. Handle censored-before-horizon samples
 {% if exclude_early_censored %}
@@ -536,7 +536,7 @@ print(f"Testing {len(thresholds)} candidate thresholds")
 
 # 5. Subsampling threshold optimization
 # NOTE: This is subsampling (replace=False), NOT bootstrap (replace=True)
-print(f"Running {{ n_iterations }} subsampling iterations...")
+print(f"Running { {{ n_iterations | repr }} } subsampling iterations...")
 all_mccs = []
 
 for i in range({{ n_iterations }}):
@@ -558,7 +558,7 @@ for i in range({{ n_iterations }}):
     all_mccs.append(mccs)
 
     if (i + 1) % 20 == 0:
-        print(f"  Subsampling iteration {i + 1}/{{ n_iterations }}")
+        print(f"  Subsampling iteration {i + 1}/{ {{ n_iterations | repr }} }")
 
 # 6. Find best threshold (maximum mean MCC across subsamples)
 all_mccs = np.array(all_mccs)
@@ -708,8 +708,8 @@ from sksurv.compare import compare_survival
 {% endif %}
 
 # 1. Extract survival data
-times = adata.obs["{{ time_column }}"].values
-events = adata.obs["{{ event_column }}"].astype(bool).values
+times = adata.obs[{{ time_column | string | repr }}].values
+events = adata.obs[{{ event_column | string | repr }}].astype(bool).values
 
 n_events = events.sum()
 n_censored = len(events) - n_events
@@ -717,7 +717,7 @@ print(f"Survival data: {len(events)} samples, {n_events} events, {n_censored} ce
 
 {% if group_column %}
 # 2. Group-stratified Kaplan-Meier analysis
-group_column = "{{ group_column }}"
+group_column = {{ group_column | string | repr }}
 groups = adata.obs[group_column].unique()
 print(f"Stratifying by {group_column}: {len(groups)} groups")
 
@@ -1256,9 +1256,11 @@ print(f"\\nHazard ratio extraction complete")
 
             # Store reference in adata.uns (NOT the model itself)
             adata.uns["model_reference"] = {
-                "model_type": "CoxPHSurvivalAnalysis"
-                if not regularized
-                else "CoxnetSurvivalAnalysis",
+                "model_type": (
+                    "CoxPHSurvivalAnalysis"
+                    if not regularized
+                    else "CoxnetSurvivalAnalysis"
+                ),
                 "model_path": str(model_path),
                 "timestamp": timestamp,
                 "n_features": X.shape[1],
@@ -1781,9 +1783,11 @@ print(f"\\nHazard ratio extraction complete")
             "n_nonzero_features": int(np.sum(np.abs(coef) > 1e-8)),
             "top_features": top_features,
             "max_hazard_ratio": float(hazard_ratios.max()),
-            "min_hazard_ratio": float(hazard_ratios[hazard_ratios > 0].min())
-            if np.any(hazard_ratios > 0)
-            else None,
+            "min_hazard_ratio": (
+                float(hazard_ratios[hazard_ratios > 0].min())
+                if np.any(hazard_ratios > 0)
+                else None
+            ),
         }
 
         ir = self._create_hazard_ratios_ir(top_n=top_n)
@@ -1795,7 +1799,9 @@ print(f"\\nHazard ratio extraction complete")
         return {
             "sksurv_available": self._sksurv_available,
             "ready": self._sksurv_available,
-            "install_command": "pip install lobster-ml[survival]"
-            if not self._sksurv_available
-            else None,
+            "install_command": (
+                "pip install lobster-ml[survival]"
+                if not self._sksurv_available
+                else None
+            ),
         }

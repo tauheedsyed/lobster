@@ -521,7 +521,7 @@ class PeptideLibraryService:
             ),
             library="pandas",
             code_template=(
-                "# Activities found in the {{ database }} lookup (sequence -> activities).\n"
+                "# Activities found in the {{ database | string | repr }} lookup (sequence -> activities).\n"
                 "# Live databases change, so the recorded hits are re-applied here.\n"
                 "known_activities = {{ known_activities | repr }}\n"
                 "adata.obs['known_activities'] = (\n"

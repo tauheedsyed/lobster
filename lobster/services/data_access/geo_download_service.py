@@ -480,11 +480,11 @@ class GEODownloadService(IDownloadService):
             description=f"Load GEO dataset {geo_id} from downloaded H5AD file",
             library="anndata",
             imports=["import anndata as ad"],
-            code_template="""# Load GEO dataset {{ dataset_id }}
+            code_template="""# Load GEO dataset {{ dataset_id | string | repr }}
 # Originally downloaded via Lobster AI DownloadOrchestrator
 # Run this notebook from the workspace root directory
-adata = ad.read_h5ad("{{ raw_file }}")
-print(f"Loaded {{ dataset_id }}: {adata.n_obs} observations × {adata.n_vars} variables")
+adata = ad.read_h5ad({{ raw_file | string | repr }})
+print(f"Loaded { {{ dataset_id | repr }} }: {adata.n_obs} observations × {adata.n_vars} variables")
 """,
             parameters=parameters,
             parameter_schema=parameter_schema,

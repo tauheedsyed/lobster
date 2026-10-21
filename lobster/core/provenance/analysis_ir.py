@@ -819,9 +819,10 @@ def create_data_saving_ir(
         ),
     }
 
-    # Jinja2 template with parameter placeholders
+    # Jinja2 template with parameter placeholders. filename_suffix reaches Jinja
+    # as a parameter so it is written as a Python literal, not as source text.
     code_template = f"""# Save processed data
-output_path = f"{{{output_prefix_param}}}_{filename_suffix}.h5ad"
+output_path = f"{{{output_prefix_param}}}_{{ {{{{ filename_suffix | repr }}}} }}.h5ad"
 adata.write_h5ad(output_path, compression={{% if compression %}}{{{{ compression | tojson }}}}{{% else %}}None{{% endif %}})
 print(f"Saved processed data to: {{output_path}}")
 """
@@ -836,6 +837,7 @@ print(f"Saved processed data to: {{output_path}}")
         parameters={
             output_prefix_param: "results",
             "compression": compression,
+            "filename_suffix": filename_suffix,
         },
         parameter_schema=parameter_schema,
         input_entities=["adata"],

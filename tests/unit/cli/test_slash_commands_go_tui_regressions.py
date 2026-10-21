@@ -198,7 +198,7 @@ class _DummyClient:
                         ),
                     }
                 ],
-                "export_notebook": lambda _self, name, description="": workspace_path
+                "export_notebook": lambda _self, name, description="", filter_strategy="successful": workspace_path
                 / "notebooks"
                 / f"{name}.ipynb",
                 "run_notebook": lambda _self, notebook_name, input_modality, dry_run=False: (
@@ -2454,16 +2454,16 @@ def test_pipeline_export_protocol_mode_renders_structured_output(tmp_path):
     client = _DummyClient(tmp_path)
 
     summary = slash_commands._execute_command(
-        "/pipeline export analysis_workflow Demo notebook",
+        "/pipeline export analysis_workflow Demo notebook --force",
         client,
-        original_command="/pipeline export analysis_workflow Demo notebook",
+        original_command="/pipeline export analysis_workflow Demo notebook --force",
         output=output,
     )
 
     expected_path = tmp_path / "notebooks" / "analysis_workflow.ipynb"
     assert summary == f"Exported notebook: {expected_path}"
     assert output.messages[0] == (None, "Export Session as Jupyter Notebook")
-    assert output.messages[1] == (None, "Exporting notebook...")
+    assert output.messages[1] == (None, "Exporting notebook (successful mode)...")
     assert output.messages[2] == (
         "success",
         f"Notebook exported: {expected_path}",

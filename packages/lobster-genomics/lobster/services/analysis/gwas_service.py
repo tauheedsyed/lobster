@@ -1492,7 +1492,7 @@ for i in range(grm.shape[0]):
 
 adata.uns['related_pairs'] = related_pairs
 adata.uns['kinship_threshold'] = {{ kinship_threshold }}
-print(f"Kinship: {len(related_pairs)} related pairs (threshold={{ kinship_threshold }})")
+print(f"Kinship: {len(related_pairs)} related pairs (threshold={ {{ kinship_threshold | repr }} })")
 """
 
         return AnalysisStep(

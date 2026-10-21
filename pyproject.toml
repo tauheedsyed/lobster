@@ -72,6 +72,9 @@ dependencies = [
     # Jupyter notebook support for pipeline replay
     "nbformat>=5.9.0",
     "papermill>=2.4.0",
+    # Kernel papermill runs the notebook in; without it /pipeline run fails
+    # with "No such kernel named python3" (papermill does not bring one).
+    "ipykernel>=6.0",
     # Template rendering (scaffold)
     "jinja2>=3.1",
     # Utilities
@@ -526,7 +529,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [tool.bumpversion]
-current_version = "1.1.428"
+current_version = "1.1.429"
 commit = true
 tag = true
 

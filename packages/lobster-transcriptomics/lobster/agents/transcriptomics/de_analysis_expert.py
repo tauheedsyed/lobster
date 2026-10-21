@@ -383,7 +383,9 @@ def _iteration_results_key(iteration_info: Dict[str, Any]) -> str:
     )
 
 
-def _iteration_record_ir(iteration_info: Dict[str, Any], current_iter: int) -> AnalysisStep:
+def _iteration_record_ir(
+    iteration_info: Dict[str, Any], current_iter: int
+) -> AnalysisStep:
     """IR for iterate_de_analysis: snapshot the results and record the iteration.
 
     The DE run itself is recorded separately by run_de_with_formula's IR, which
@@ -775,7 +777,10 @@ def de_analysis_expert(
             logger.error(f"Unexpected error in pseudobulk creation: {e}")
             return f"Unexpected error: {str(e)}"
 
-    create_pseudobulk_matrix.metadata = {"categories": ["PREPROCESS"], "provenance": True}
+    create_pseudobulk_matrix.metadata = {
+        "categories": ["PREPROCESS"],
+        "provenance": True,
+    }
     create_pseudobulk_matrix.tags = ["PREPROCESS"]
 
     @tool
@@ -1083,9 +1088,9 @@ def de_analysis_expert(
                     code_template=(
                         "from pydeseq2.dds import DeseqDataSet\n"
                         "from pydeseq2.ds import DeseqStats\n"
-                        "dds = DeseqDataSet(adata=adata, design_factors='{{ groupby }}')\n"
+                        "dds = DeseqDataSet(adata=adata, design_factors={{ groupby | string | repr }})\n"
                         "dds.deseq2()\n"
-                        "stat_res = DeseqStats(dds, contrast=['{{ groupby }}', '{{ group2 }}', '{{ group1 }}'])\n"
+                        "stat_res = DeseqStats(dds, contrast=[{{ groupby | string | repr }}, {{ group2 | string | repr }}, {{ group1 | string | repr }}])\n"
                         "stat_res.summary()\n"
                         "results_df = stat_res.results_df"
                     ),
@@ -1233,7 +1238,10 @@ def de_analysis_expert(
             logger.error(f"Unexpected error in differential expression: {e}")
             return f"Unexpected error: {str(e)}"
 
-    run_differential_expression.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    run_differential_expression.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+    }
     run_differential_expression.tags = ["ANALYZE"]
 
     @tool
@@ -1341,7 +1349,10 @@ def de_analysis_expert(
             logger.error(f"Error validating experimental design: {e}")
             return f"Error: {str(e)}"
 
-    validate_experimental_design.metadata = {"categories": ["QUALITY"], "provenance": True}
+    validate_experimental_design.metadata = {
+        "categories": ["QUALITY"],
+        "provenance": True,
+    }
     validate_experimental_design.tags = ["QUALITY"]
 
     @tool
@@ -1573,9 +1584,9 @@ def de_analysis_expert(
                 },
                 parameter_schema={},
                 code_template=(
-                    "# Formula: {{ formula }}\n"
-                    "# Main variable: {{ groupby }}\n"
-                    "# Covariates: {{ covariates }}"
+                    "# Formula: {{ formula | string | repr }}\n"
+                    "# Main variable: {{ groupby | string | repr }}\n"
+                    "# Covariates: {{ covariates | string | repr }}"
                 ),
                 imports=[],
             )
@@ -1691,7 +1702,10 @@ def de_analysis_expert(
         )
         return "DEPRECATED: Use suggest_de_formula for formula construction and validation."
 
-    construct_de_formula_interactive.metadata = {"categories": ["UTILITY"], "provenance": False}
+    construct_de_formula_interactive.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     construct_de_formula_interactive.tags = ["UTILITY"]
 
     @tool
@@ -2768,9 +2782,9 @@ def de_analysis_expert(
                 },
                 parameter_schema={},
                 code_template=(
-                    "results_df = adata.uns['{{ de_results_key }}']['results_df']\n"
-                    "results_df = results_df.sort_values('{{ sort_by }}')\n"
-                    "results_df.to_{{ output_format }}('{{ output_path }}', index=True)"
+                    "results_df = adata.uns[{{ de_results_key | string | repr }}]['results_df']\n"
+                    "results_df = results_df.sort_values({{ sort_by | string | repr }})\n"
+                    "results_df.to_{{ output_format }}({{ output_path | string | repr }}, index=True)"
                 ),
                 imports=["pandas"],
             )
@@ -2944,9 +2958,9 @@ def de_analysis_expert(
                 code_template=(
                     "from pydeseq2.dds import DeseqDataSet\n"
                     "from pydeseq2.ds import DeseqStats\n"
-                    "dds = DeseqDataSet(adata=adata, design_factors='{{ group_key }}')\n"
+                    "dds = DeseqDataSet(adata=adata, design_factors={{ group_key | string | repr }})\n"
                     "dds.deseq2()\n"
-                    "stat_res = DeseqStats(dds, contrast=['{{ group_key }}', '{{ group2 }}', '{{ group1 }}'])\n"
+                    "stat_res = DeseqStats(dds, contrast=[{{ group_key | string | repr }}, {{ group2 | string | repr }}, {{ group1 | string | repr }}])\n"
                     "stat_res.summary()\n"
                     "results_df = stat_res.results_df"
                 ),
@@ -3397,11 +3411,11 @@ def de_analysis_expert(
                 parameter_schema={},
                 code_template=(
                     "# Extract and export DE results\n"
-                    "results_df = adata.uns['{{ de_results_key }}']['results_df'].copy()\n"
+                    "results_df = adata.uns[{{ de_results_key | string | repr }}]['results_df'].copy()\n"
                     "{% if padj_threshold < 1.0 %}results_df = results_df[results_df['padj'] <= {{ padj_threshold }}]\n{% endif %}"
                     "{% if lfc_threshold > 0 %}results_df = results_df[abs(results_df['log2FoldChange']) >= {{ lfc_threshold }}]\n{% endif %}"
                     "results_df = results_df.sort_values('padj')\n"
-                    "results_df.to_{{ output_format }}('{{ output_path }}', index=True)"
+                    "results_df.to_{{ output_format }}({{ output_path | string | repr }}, index=True)"
                 ),
                 imports=["pandas"],
             )
@@ -3451,7 +3465,10 @@ def de_analysis_expert(
             logger.error(f"Unexpected error in extract_and_export_de_results: {e}")
             return f"Unexpected error: {str(e)}"
 
-    extract_and_export_de_results.metadata = {"categories": ["UTILITY"], "provenance": False}
+    extract_and_export_de_results.metadata = {
+        "categories": ["UTILITY"],
+        "provenance": False,
+    }
     extract_and_export_de_results.tags = ["UTILITY"]
 
     # -------------------------

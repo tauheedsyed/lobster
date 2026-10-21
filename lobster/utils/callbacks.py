@@ -1333,8 +1333,18 @@ class TokenTrackingCallback(BaseCallbackHandler):
     )
 
     def _is_local_model(self, model: str) -> bool:
-        """Whether an unpriced model is unpriced *because it is free*."""
+        """Whether an unpriced model is unpriced *because it is free*.
+
+        Local (Ollama) ids are bare (``llama3:8b``, ``qwen2.5-7b``). A vendor-prefixed
+        ``vendor/model`` id is a hosted model (e.g. OpenRouter) and is never assumed
+        free, even when its name contains a local-model marker; only an explicit
+        ``ollama`` id or OpenRouter's ``:free`` suffix counts as free.
+        """
         lowered = (model or "").lower()
+        if "ollama" in lowered or lowered.endswith(":free"):
+            return True
+        if "/" in lowered:
+            return False
         return any(marker in lowered for marker in self._LOCAL_MODEL_MARKERS)
 
     def _calculate_cost(

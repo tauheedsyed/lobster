@@ -591,14 +591,14 @@ adata.obsm['X_pca_harmony'] = corrected
 integrated_key = 'X_pca_harmony'
 {% else %}
 # ComBat batch correction
-sc.pp.combat(adata, key='{{ batch_key }}')
+sc.pp.combat(adata, key={{ batch_key | string | repr }})
 sc.tl.pca(adata, n_comps={{ n_pcs }})
 integrated_key = 'X_pca'
 {% endif %}
 
 # Compute batch silhouette score (lower = better mixing)
 X_int = adata.obsm[integrated_key][:, :{{ n_pcs }}]
-batch_labels = adata.obs['{{ batch_key }}'].values
+batch_labels = adata.obs[{{ batch_key | string | repr }}].values
 sil = silhouette_score(X_int, batch_labels)
 print(f"Batch silhouette: {sil:.3f}")
 
@@ -813,7 +813,7 @@ sc.tl.diffmap(adata, n_comps={{ n_dcs }})
 {% if root_cell is not none %}
 adata.uns['iroot'] = {{ root_cell }}
 {% elif root_group is not none %}
-group_mask = adata.obs['{{ cluster_key }}'].astype(str) == '{{ root_group }}'
+group_mask = adata.obs[{{ cluster_key | string | repr }}].astype(str) == {{ root_group | string | repr }}
 group_indices = np.where(group_mask)[0]
 dc1_values = adata.obsm['X_diffmap'][group_indices, 0]
 adata.uns['iroot'] = int(group_indices[np.argmin(dc1_values)])
@@ -825,7 +825,7 @@ adata.uns['iroot'] = int(np.argmin(adata.obsm['X_diffmap'][:, 0]))
 sc.tl.dpt(adata)
 
 # Compute PAGA graph
-sc.tl.paga(adata, groups='{{ cluster_key }}')
+sc.tl.paga(adata, groups={{ cluster_key | string | repr }})
 
 # Results stored in:
 # - adata.obs['dpt_pseudotime']: Pseudotime values
@@ -1595,6 +1595,7 @@ print(f"Annotated {adata.obs['cell_type'].nunique()} cell types "
             # Create IR for provenance tracking
             ir = self._create_marker_genes_ir(
                 groupby=groupby,
+                groups=groups,
                 method=method,
                 n_genes=n_genes,
                 min_fold_change=min_fold_change,
@@ -1616,8 +1617,13 @@ print(f"Annotated {adata.obs['cell_type'].nunique()} cell types "
         min_fold_change: float,
         min_pct: float,
         max_out_pct: float,
+        groups: Optional[List[str]] = None,
     ) -> AnalysisStep:
-        """Create AnalysisStep IR for marker gene detection with filtering."""
+        """Create AnalysisStep IR for marker gene detection with filtering.
+
+        ``groups`` restricts which groups are compared (and their order); it is
+        passed only when the session passed it, as the service does.
+        """
 
         code_template = """
 # Marker gene detection with specificity filtering
@@ -1626,9 +1632,12 @@ import scanpy as sc
 # Step 1: Rank genes by differential expression
 sc.tl.rank_genes_groups(
     adata,
-    groupby='{{ groupby }}',
-    method='{{ method }}',
+    groupby={{ groupby | string | repr }},
+    method={{ method | string | repr }},
     n_genes={{ n_genes }},
+{%- if groups is not none %}
+    groups={{ groups | repr }},
+{%- endif %}
 )
 
 # Step 2: Filter for marker specificity
@@ -1657,6 +1666,7 @@ sc.tl.filter_rank_genes_groups(
             imports=["import scanpy as sc"],
             parameters={
                 "groupby": groupby,
+                "groups": list(groups) if groups is not None else None,
                 "method": method,
                 "n_genes": n_genes,
                 "min_fold_change": min_fold_change,
