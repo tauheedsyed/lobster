@@ -16,42 +16,27 @@ from lobster.config.inference_context import (
     RequestDescriptor,
     UsageOutcome,
 )
-from lobster.config.providers.controlled_bedrock_client import (
-    ControlledBedrockClient,
-    ControlledChatBedrockConverse,
-)
 from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
 from lobster.core.exceptions import InferenceRefused
-from tests.unit.config.test_native_request_hooks import (
+from tests.unit.config._native_inference_helpers import (
     BEDROCK_MODEL,
+    Authorizer,
     HookProbe,
     bedrock_model,
+    require_bedrock,
 )
 
 pytestmark = pytest.mark.no_auto_config
 
 
-class Authorizer:
-    def __init__(self):
-        self.descriptors = []
-        self.outcomes = []
-        self.refusal = None
-        self.finalization_refusal = None
-
-    def before_request(self, descriptor):
-        self.descriptors.append(descriptor)
-        if self.refusal is not None:
-            raise self.refusal
-        return object()
-
-    def after_request(self, permit, outcome):
-        self.outcomes.append((permit, outcome))
-        if self.finalization_refusal is not None:
-            raise self.finalization_refusal
-
-
 @pytest.fixture
 def controlled():
+    require_bedrock()
+    from lobster.config.providers.controlled_bedrock_client import (
+        ControlledBedrockClient,
+        ControlledChatBedrockConverse,
+    )
+
     probe = HookProbe()
     model = bedrock_model(probe)
     context = InferenceContext(
@@ -277,7 +262,7 @@ def test_usage_rejects_untrusted_nonusage_fields(raw):
 def test_unknown_native_ttl_keeps_counts_but_requires_reconciliation(controlled):
     from botocore.awsrequest import AWSResponse
 
-    from tests.unit.config.test_native_request_hooks import FakeRawResponse
+    from tests.unit.config._native_inference_helpers import FakeRawResponse
 
     model, owner, probe, authorizer, _ = controlled
     original = owner._client._endpoint.http_session.send
@@ -441,7 +426,7 @@ async def test_async_executor_request_drains_before_cancel_is_reported(controlle
 async def test_async_executor_stream_read_drains_and_closes_before_cancel(controlled):
     from botocore.awsrequest import AWSResponse
 
-    from tests.unit.config.test_native_request_hooks import (
+    from tests.unit.config._native_inference_helpers import (
         FakeRawResponse,
         encode_event,
     )

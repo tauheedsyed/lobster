@@ -12,27 +12,30 @@ from lobster.config.inference_context import INFERENCE_BINDING_VERSION, Inferenc
 from lobster.config.providers.request_auth import canonical_refusal, refusal_spec
 from lobster.core.exceptions import InferenceRefused
 
-# Qualification baseline: Cloud constraints-prod-*.txt declares
-# anthropic==1.7.0 and httpx2==2.13.0. Patch updates retain this minor contract.
-QUALIFIED_ANTHROPIC_SDK = ">=1.7.0,<1.8"
+# HTTPX2-based native transport requires Anthropic SDK 1.7.0 or newer.
+# Cloud constraints-prod-*.txt still pins 1.7.0; newer SDKs are qualified separately.
+QUALIFIED_ANTHROPIC_SDK = ">=1.7.0"
 
-# Check the optional transport and SDK domain before importing SDK consumers.
-try:
-    import httpx2
 
-    if not SpecifierSet(QUALIFIED_ANTHROPIC_SDK).contains(version("anthropic")):
-        raise ImportError("Unqualified Anthropic SDK version")
-    from lobster.config.providers.controlled_anthropic_client import (
-        ControlledAnthropicClient,
-        ControlledChatAnthropic,
-    )
-except (ImportError, InvalidVersion):
-    refusal = InferenceRefused("context")
-    refusal.add_note(
-        "Owned Anthropic inference requires lobster-ai[anthropic] "
-        f"with anthropic{QUALIFIED_ANTHROPIC_SDK} and httpx2>=2.0.0,<3."
-    )
-    raise refusal from None
+def _owned_sdk():
+    """Validate optional native dependencies only when a model is requested."""
+    try:
+        import httpx2
+
+        if not SpecifierSet(QUALIFIED_ANTHROPIC_SDK).contains(version("anthropic")):
+            raise ImportError("Unqualified Anthropic SDK version")
+        from lobster.config.providers.controlled_anthropic_client import (
+            ControlledAnthropicClient,
+            ControlledChatAnthropic,
+        )
+    except (ImportError, InvalidVersion):
+        refusal = InferenceRefused("context")
+        refusal.add_note(
+            "Owned Anthropic inference requires lobster-ai[anthropic] "
+            f"with anthropic{QUALIFIED_ANTHROPIC_SDK} and httpx2>=2.0.0,<3."
+        )
+        raise refusal from None
+    return httpx2, ControlledAnthropicClient, ControlledChatAnthropic
 
 
 def _options(value):
@@ -175,6 +178,7 @@ class OwnedAnthropicFactory:
             }
             if "additional_model_request_fields" in options:
                 raise InferenceRefused("context")
+            httpx2, ControlledAnthropicClient, ControlledChatAnthropic = _owned_sdk()
             authorizer = self._authorizer_factory(component, context)
 
             sync_transport, async_transport = (

@@ -127,6 +127,14 @@ def research_agent(
         delegation_tools = filtered_delegation_tools
 
     strict_binding = validate_inference_binding(inference_context, model_factory)
+    binding_kwargs = {
+        name: value
+        for name, value in (
+            ("inference_context", inference_context),
+            ("model_factory", model_factory),
+        )
+        if value is not None
+    }
     capture_inference_binding(
         data_manager, inference_context, model_factory, inherit=False
     )
@@ -184,8 +192,7 @@ def research_agent(
 
             _data_expert = DataExpertAssistant(
                 data_manager=data_manager,
-                inference_context=inference_context,
-                model_factory=model_factory,
+                **binding_kwargs,
             )
             logger.debug("Lazy-loaded DataExpertAssistant")
         return _data_expert
@@ -200,8 +207,7 @@ def research_agent(
 
             _metadata_validator = MetadataValidationService(
                 data_manager=data_manager,
-                inference_context=inference_context,
-                model_factory=model_factory,
+                **binding_kwargs,
             )
             logger.debug("Lazy-loaded MetadataValidationService")
         return _metadata_validator

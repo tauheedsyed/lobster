@@ -160,11 +160,9 @@ class DataExpertAssistant(InferenceBoundHelper):
                 from lobster.core.workspace import resolve_workspace
 
                 llm_params = self.settings.get_agent_llm_params("data_expert_assistant")
-                workspace_path = (
-                    self.data_manager.workspace_path
-                    if self.data_manager is not None
-                    else resolve_workspace(explicit_path=None, create=False)
-                )
+                # The manager is retained for the stale-binding guard only.
+                # Unbound workspace resolution keeps the ordinary assistant policy.
+                workspace_path = resolve_workspace(explicit_path=None, create=False)
                 self._llm = create_llm(
                     "data_expert_assistant", llm_params, workspace_path=workspace_path
                 )

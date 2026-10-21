@@ -5,16 +5,25 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from tests.unit.config._native_inference_helpers import (
+    BEDROCK_MODEL,
+    HookProbe,
+    bedrock_model,
+    require_agents,
+    require_bedrock,
+    require_optional,
+)
+
+# Both cases exercise the GEO facade and the actual research helper/native SDK.
+require_bedrock()
+require_agents("data_expert_agent")
+require_optional("scanpy", extra="transcriptomics")
+
 from lobster.config.inference_context import INFERENCE_BINDING_VERSION, InferenceContext
 from lobster.config.inference_runtime import capture_inference_binding
 from lobster.core.exceptions import InferenceRefused
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.data_access.geo_download_service import GEODownloadService
-from tests.unit.config.test_native_request_hooks import (
-    BEDROCK_MODEL,
-    HookProbe,
-    bedrock_model,
-)
 
 pytestmark = pytest.mark.no_auto_config
 

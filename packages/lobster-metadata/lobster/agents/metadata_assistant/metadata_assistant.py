@@ -253,6 +253,14 @@ def metadata_assistant(
         Compiled LangGraph agent with metadata tools
     """
     strict_binding = validate_inference_binding(inference_context, model_factory)
+    binding_kwargs = {
+        name: value
+        for name, value in (
+            ("inference_context", inference_context),
+            ("model_factory", model_factory),
+        )
+        if value is not None
+    }
     capture_inference_binding(
         data_manager, inference_context, model_factory, inherit=False
     )
@@ -286,8 +294,7 @@ def metadata_assistant(
     sample_mapping_service = SampleMappingService(data_manager=data_manager)
     metadata_standardization_service = MetadataStandardizationService(
         data_manager=data_manager,
-        inference_context=inference_context,
-        model_factory=model_factory,
+        **binding_kwargs,
     )
 
     # Initialize optional microbiome services if available
@@ -930,8 +937,7 @@ def metadata_assistant(
 
                 validation_service = MetadataValidationService(
                     data_manager=data_manager,
-                    inference_context=inference_context,
-                    model_factory=model_factory,
+                    **binding_kwargs,
                 )
 
                 result = validation_service.validate_sample_metadata(

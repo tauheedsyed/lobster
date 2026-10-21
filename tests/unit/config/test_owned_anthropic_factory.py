@@ -8,14 +8,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
-import httpx2
 import pytest
 import pytest_asyncio
 
 from lobster.config.inference_context import InferenceContext, RequestDescriptor
-from lobster.config.providers.owned_anthropic_factory import OwnedAnthropicFactory
 from lobster.config.providers.request_auth import ExpiringRequestAuth, RequestAuth
 from lobster.core.exceptions import InferenceRefused
+from tests.unit.config._native_inference_helpers import require_anthropic
 
 pytestmark = pytest.mark.no_auto_config
 MODEL = "claude-sonnet-4-5-20250929"
@@ -50,6 +49,8 @@ class Endpoint:
         self.force_error = False
 
     def send(self, request):
+        import httpx2
+
         # Keep only nonsecret evidence; do not retain request/header objects.
         assert hmac.compare_digest(
             request.headers["x-api-key"], self.secrets[self.expected]
@@ -120,6 +121,11 @@ class Endpoint:
 
 @pytest_asyncio.fixture
 async def bound(monkeypatch):
+    require_anthropic()
+    import httpx2
+
+    from lobster.config.providers.owned_anthropic_factory import OwnedAnthropicFactory
+
     endpoint, hooks = Endpoint(), LocalHooks()
     clock = [time.time()]
     renewals = []
@@ -479,6 +485,8 @@ async def test_close_before_native_response_assignment_cannot_abandon_obligation
 ):
     from threading import Event
 
+    import httpx2
+
     factory, context, endpoint, hooks, _, _, _ = bound
     entered, release = Event(), Event()
 
@@ -717,6 +725,8 @@ async def test_closed_raw_never_reparses_or_releases_buffered_output(
 async def test_drain_reports_late_finalizer_failure_before_raw_assignment(bound):
     from threading import Event
 
+    import httpx2
+
     factory, context, endpoint, hooks, _, _, _ = bound
     entered, release = Event(), Event()
 
@@ -853,13 +863,43 @@ async def test_close_wins_during_native_parse_and_loser_never_publishes(
 
 
 @pytest.mark.asyncio
-async def test_auth_views_are_immutable_and_not_serializable(bound):
-    factory, _, endpoint, _, auth, _, _ = bound
-    value = auth.get()
-    for obj in (value, auth, factory):
+async def test_auth_views_are_immutable_and_not_serializable():
+    from lobster.config.providers.owned_anthropic_factory import OwnedAnthropicFactory
+
+    # No native model/transport is needed to prove authority immutability.
+    secrets = [uuid4().hex, uuid4().hex]
+
+    def refresh(current):
+        return RequestAuth(secrets[1], expires_at=time.time() + 300.0, generation=2)
+
+    async def arefresh(current):
+        return refresh(current)
+
+    auth = ExpiringRequestAuth(
+        initial=RequestAuth(secrets[0], expires_at=time.time() + 300.0),
+        refresh=refresh,
+        arefresh=arefresh,
+    )
+    factory = OwnedAnthropicFactory(
+        context=InferenceContext(
+            "anthropic", MODEL, "binding-a", "version-a", 200000, 137
+        ),
+        base_url="https://binding.example/native",
+        request_auth=auth,
+        authorizer_factory=lambda component, context: LocalHooks(),
+        validate_request=lambda component, view: None,
+        describe_request=lambda component, view: None,
+        error_decoder=lambda view: None,
+        request_headers=lambda descriptor: {},
+    )
+    try:
+        value = auth.get()
+        for obj in (value, auth, factory):
+            with pytest.raises(TypeError):
+                pickle.dumps(obj)
+            for token in secrets:
+                assert token not in repr(obj)
         with pytest.raises(TypeError):
-            pickle.dumps(obj)
-        for token in endpoint.secrets:
-            assert token not in repr(obj)
-    with pytest.raises(TypeError):
-        value.expires_at = time.time() + 900
+            value.expires_at = time.time() + 900
+    finally:
+        await factory.aclose()

@@ -6,7 +6,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from botocore.exceptions import ClientError
-from langchain_aws import ChatBedrockConverse
 
 from lobster.config.providers.gateway_bedrock_client import GatewayBedrockClient
 from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
@@ -153,6 +152,9 @@ def test_explicit_close_is_idempotent_before_consumption(gateway_transport):
 
 @pytest.mark.parametrize("events", [EVENTS[:2], EVENTS])
 def test_actual_chat_bedrock_stream_propagates_incomplete(gateway_transport, events):
+    ChatBedrockConverse = pytest.importorskip(
+        "langchain_aws", reason="Native model parsing requires lobster-ai[bedrock]"
+    ).ChatBedrockConverse
     gateway, transport, clients = gateway_transport(list(map(json.dumps, events)))
     model = ChatBedrockConverse(
         model_id="anthropic.claude-sonnet-4-5-20250929-v1:0",

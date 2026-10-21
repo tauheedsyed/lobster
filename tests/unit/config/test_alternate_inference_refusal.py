@@ -4,11 +4,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from lobster.config.inference_context import InferenceContext
+from lobster.config.inference_context import INFERENCE_BINDING_VERSION, InferenceContext
 from lobster.config.inference_runtime import capture_inference_binding
 from lobster.core.exceptions import InferenceRefused
 from lobster.services.execution import sdk_delegation_service as sdk
-from tests.unit.config.test_specialist_inference_binding import Factory
+
+
+class Factory:
+    capability_version = INFERENCE_BINDING_VERSION
+
+    def create(self, *, component, context):
+        raise AssertionError("Bound delegation must refuse before model construction")
+
 
 pytestmark = pytest.mark.no_auto_config
 

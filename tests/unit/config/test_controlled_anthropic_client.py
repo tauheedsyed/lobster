@@ -6,28 +6,25 @@ from uuid import uuid4
 
 import pytest
 
+from tests.unit.config._native_inference_helpers import (
+    ANTHROPIC_MODEL,
+    AsyncAuthorizer,
+    HookProbe,
+    anthropic_model,
+    require_anthropic,
+)
+
+# This module contains only real Anthropic SDK/model cases.
+require_anthropic()
+
 from lobster.config.inference_context import InferenceContext, RequestDescriptor
 from lobster.config.providers.controlled_anthropic_client import (
     ControlledAnthropicClient,
     ControlledChatAnthropic,
 )
 from lobster.core.exceptions import InferenceRefused
-from tests.unit.config.test_controlled_bedrock_client import Authorizer
-from tests.unit.config.test_native_request_hooks import (
-    ANTHROPIC_MODEL,
-    HookProbe,
-    anthropic_model,
-)
 
 pytestmark = pytest.mark.no_auto_config
-
-
-class AsyncAuthorizer(Authorizer):
-    async def abefore_request(self, descriptor):
-        return self.before_request(descriptor)
-
-    async def aafter_request(self, permit, outcome):
-        return self.after_request(permit, outcome)
 
 
 @pytest.fixture

@@ -2,14 +2,9 @@
 
 import ast
 import importlib
-import tomllib
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip(
-    "langchain_aws", reason="Native binding tests require the Bedrock provider extra"
-)
 
 from lobster.config.agent_registry import (
     get_agent_registry_config,
@@ -19,6 +14,13 @@ from lobster.config.inference_context import INFERENCE_BINDING_VERSION, Inferenc
 from lobster.config.providers.bedrock_builder import build_bedrock_converse
 from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
 from lobster.core.runtime.data_manager import DataManagerV2
+from tests.unit.config._native_inference_helpers import (
+    official_agents,
+)
+from tests.unit.config._native_inference_helpers import (
+    pytest_generate_tests as pytest_generate_tests,
+)
+from tests.unit.config._native_inference_helpers import require_agents, require_bedrock
 
 pytestmark = pytest.mark.no_auto_config
 
@@ -48,26 +50,13 @@ class Factory:
         )
 
 
-def pytest_generate_tests(metafunc):
-    if "name" in metafunc.fixturenames:
-        root = Path(__file__).resolve().parents[3]
-        names = []
-        for path in sorted((root / "packages").glob("*/pyproject.toml")):
-            metadata = tomllib.loads(path.read_text())
-            names.extend(
-                metadata.get("project", {})
-                .get("entry-points", {})
-                .get("lobster.agents", {})
-            )
-        assert len(names) == 22
-        metafunc.parametrize("name", sorted(names))
-
-
 def test_installed_factory_uses_supplied_binding_without_settings(
     name, tmp_path, monkeypatch
 ):
+    require_bedrock()
+    require_agents(name)
     config = get_agent_registry_config(name)
-    assert config is not None, f"Required test package for {name} must be installed"
+    assert config is not None, f"Installed official package {name} did not register"
     factory_function = import_agent_factory(config.factory_function)
     module = importlib.import_module(factory_function.__module__)
 
@@ -126,6 +115,8 @@ def test_all_repository_specialist_signatures_support_explicit_pair():
 def test_all_official_installed_factories_build_in_one_real_graph(
     tmp_path, monkeypatch
 ):
+    require_bedrock()
+    require_agents(*official_agents())
     from langgraph.store.memory import InMemoryStore
 
     from lobster.agents import graph

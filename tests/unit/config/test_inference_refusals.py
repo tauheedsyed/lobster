@@ -6,13 +6,10 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-pytest.importorskip(
-    "langchain_aws", reason="Native refusal tests require the Bedrock provider extra"
-)
-
 from lobster.config.providers.bedrock_builder import build_bedrock_converse
 from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
 from lobster.core.exceptions import InferenceRefused
+from tests.unit.config._native_inference_helpers import require_agents, require_bedrock
 
 CATEGORIES = ("context", "auth", "policy", "budget", "provider", "accounting")
 MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -38,6 +35,7 @@ def no_network(monkeypatch):
 
 
 def refusing_model(refusal):
+    require_bedrock()
     runtime = RefusingRuntime(refusal)
     model = build_bedrock_converse(
         model_id=MODEL_ID,
@@ -51,6 +49,7 @@ def refusing_model(refusal):
 @pytest.mark.parametrize("category", CATEGORIES)
 @pytest.mark.parametrize("operation", ("detect_modality", "extract_strategy_config"))
 def test_data_helper_refusal_does_not_return_none(category, operation):
+    require_agents("data_expert_agent")
     from lobster.agents.data_expert.assistant import DataExpertAssistant
 
     refusal = InferenceRefused(category)
@@ -138,6 +137,7 @@ def test_refusal_exposes_only_fixed_safe_message():
 
 @pytest.mark.parametrize("category", CATEGORIES)
 def test_queue_strategy_refusal_does_not_use_heuristics(category, tmp_path):
+    require_agents("data_expert_agent")
     from lobster.agents.data_expert.assistant import DataExpertAssistant
     from lobster.services.data_access.geo_queue_preparer import GEOQueuePreparer
 
@@ -182,6 +182,7 @@ def test_content_validation_refusal_is_not_an_error_string(
 def test_sample_storage_refusal_does_not_guess_a_modality(
     category, operation, monkeypatch, tmp_path
 ):
+    require_agents("data_expert_agent")
     from lobster.agents.data_expert.assistant import DataExpertAssistant
     from lobster.services.data_access.geo.concatenation import SampleConcatenator
 
@@ -204,6 +205,7 @@ def test_sample_storage_refusal_does_not_guess_a_modality(
 
 @pytest.mark.parametrize("category", CATEGORIES)
 def test_disease_extraction_refusal_does_not_become_unknown(category):
+    require_agents("metadata_assistant")
     from lobster.agents.metadata_assistant.config import extract_disease_with_llm
 
     refusal = InferenceRefused(category)
@@ -227,6 +229,7 @@ def test_structured_ui_helper_refusal_does_not_become_text_input(category):
 
 
 def test_data_helper_uses_owning_workspace(monkeypatch, tmp_path):
+    require_agents("data_expert_agent")
     from lobster.agents.data_expert import assistant
     from lobster.core import workspace
 
@@ -237,21 +240,28 @@ def test_data_helper_uses_owning_workspace(monkeypatch, tmp_path):
         requests.append((agent_name, workspace_path))
         return model
 
-    def no_ambient_workspace(**kwargs):
-        raise AssertionError("Unexpected ambient workspace lookup")
+    ordinary_workspace = tmp_path / "ordinary"
+    resolutions = []
+
+    def ordinary_resolution(**kwargs):
+        resolutions.append(kwargs)
+        return ordinary_workspace
 
     monkeypatch.setattr(assistant, "create_llm", create)
-    monkeypatch.setattr(workspace, "resolve_workspace", no_ambient_workspace)
+    monkeypatch.setattr(workspace, "resolve_workspace", ordinary_resolution)
+    # The manager tracks stale bindings; unbound workspace policy stays ordinary.
     helper = assistant.DataExpertAssistant(
-        data_manager=SimpleNamespace(workspace_path=tmp_path)
+        data_manager=SimpleNamespace(workspace_path=tmp_path / "owner")
     )
     assert helper.llm is model
     assert helper.llm is model
-    assert requests == [("data_expert_assistant", tmp_path)]
+    assert requests == [("data_expert_assistant", ordinary_workspace)]
+    assert resolutions == [{"explicit_path": None, "create": False}]
 
 
 @pytest.mark.parametrize("kind", ("cause", "context", "group", "nested_group"))
 def test_wrapped_refusals_survive_helper_recovery(kind):
+    require_agents("data_expert_agent")
     from lobster.agents.data_expert.assistant import DataExpertAssistant
 
     refusal = InferenceRefused("accounting")

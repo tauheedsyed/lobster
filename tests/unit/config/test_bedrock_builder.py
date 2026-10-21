@@ -8,13 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip(
-    "langchain_aws",
-    reason="Converse transport tests require the Bedrock provider extra",
-)
-
 from lobster.config.providers.bedrock_builder import build_bedrock_converse
 from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
+from tests.unit.config._native_inference_helpers import require_bedrock
 
 MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
@@ -74,6 +70,7 @@ def no_network(monkeypatch):
 
 @pytest.fixture
 def model_and_runtime():
+    require_bedrock()
     runtime = FakeRuntime()
     model = build_bedrock_converse(
         model_id=MODEL_ID,

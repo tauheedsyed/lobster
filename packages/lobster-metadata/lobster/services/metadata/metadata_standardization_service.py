@@ -162,10 +162,17 @@ class MetadataStandardizationService:
             data_manager: DataManagerV2 instance for modality access
         """
         self.data_manager = data_manager
+        binding_kwargs = {
+            name: value
+            for name, value in (
+                ("inference_context", inference_context),
+                ("model_factory", model_factory),
+            )
+            if value is not None
+        }
         self.metadata_validator = MetadataValidationService(
             data_manager,
-            inference_context=inference_context,
-            model_factory=model_factory,
+            **binding_kwargs,
         )
 
         # Schema registry mapping modality types to Pydantic schemas

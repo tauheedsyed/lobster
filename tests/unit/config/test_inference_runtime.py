@@ -33,6 +33,7 @@ from lobster.config.providers.bedrock_builder import build_bedrock_converse
 from lobster.config.providers.gateway_bedrock_stub import StubBedrockControlClient
 from lobster.core.exceptions import InferenceRefused
 from lobster.core.runtime.data_manager import DataManagerV2
+from tests.unit.config._native_inference_helpers import require_agents, require_bedrock
 
 pytestmark = pytest.mark.no_auto_config
 
@@ -74,6 +75,7 @@ class Factory:
         self.runtime = NativeRuntime()
 
     def create(self, *, component, context):
+        require_bedrock()
         self.calls.append((component, context))
         return build_bedrock_converse(
             model_id=context.model_id,
@@ -108,19 +110,24 @@ def no_ambient(monkeypatch):
     monkeypatch.setattr(context_management, "resolve_context_window", forbidden)
     for name in AGENTS:
         config = get_agent_registry_config(name)
-        assert config is not None, f"Required agent package {name} must be installed"
+        if config is None:
+            # Absent optional packages are checked by the execution path that
+            # actually needs them, not by this configuration-poisoning fixture.
+            continue
         factory = import_agent_factory(config.factory_function)
         monkeypatch.setattr(
             importlib.import_module(factory.__module__), "get_settings", forbidden
         )
-    for module in (
-        "lobster.agents.data_expert.assistant",
-        "lobster.services.metadata.metadata_validation_service",
-    ):
+    modules = ["lobster.services.metadata.metadata_validation_service"]
+    if get_agent_registry_config("data_expert_agent") is not None:
+        modules.append("lobster.agents.data_expert.assistant")
+    for module in modules:
         monkeypatch.setattr(importlib.import_module(module), "get_settings", forbidden)
 
 
 def build(manager, context, factory, **kwargs):
+    require_bedrock()
+    require_agents(*AGENTS)
     return create_bioinformatics_graph(
         manager,
         subscription_tier="enterprise",
@@ -132,12 +139,18 @@ def build(manager, context, factory, **kwargs):
     )
 
 
-def helpers():
-    from lobster.agents.data_expert.assistant import DataExpertAssistant
+def helpers(cls_index=None):
     from lobster.services.metadata.metadata_validation_service import (
         MetadataValidationService,
     )
 
+    if cls_index == 1:
+        return MetadataValidationService
+    require_agents("data_expert_agent")
+    from lobster.agents.data_expert.assistant import DataExpertAssistant
+
+    if cls_index == 0:
+        return DataExpertAssistant
     return DataExpertAssistant, MetadataValidationService
 
 
@@ -200,8 +213,8 @@ def test_cached_and_uncached_helpers_refuse_after_identical_rebuild(
     manager = DataManagerV2(workspace_path=tmp_path)
     first, second = Factory(), Factory()
     old_graph, _ = build(manager, context, first)
-    cached = helpers()[cls_index](manager)
-    uninitialized = helpers()[cls_index](manager)
+    cached = helpers(cls_index)(manager)
+    uninitialized = helpers(cls_index)(manager)
     old_model = cached.llm
     new_graph, _ = build(manager, context, second)
     assert cached._llm is None
@@ -210,7 +223,7 @@ def test_cached_and_uncached_helpers_refuse_after_identical_rebuild(
             _ = helper.llm
     with pytest.raises(InferenceRefused):
         old_graph.invoke({"messages": [("user", "obsolete graph")]})
-    fresh = helpers()[cls_index](manager)
+    fresh = helpers(cls_index)(manager)
     assert fresh.llm is not old_model
     new_graph.invoke({"messages": [("user", "current graph")]})
     assert not first.runtime.requests
@@ -221,7 +234,7 @@ def test_cached_and_uncached_helpers_refuse_after_identical_rebuild(
 def test_helper_partial_and_conflicting_pairs_refuse(cls_index, context, tmp_path):
     manager = DataManagerV2(workspace_path=tmp_path)
     factory = Factory()
-    cls = helpers()[cls_index]
+    cls = helpers(cls_index)
     with pytest.raises(InferenceRefused):
         cls(manager, inference_context=context)
     capture_inference_binding(manager, context, factory)
@@ -417,7 +430,7 @@ def test_unbound_helper_cannot_downgrade_after_owner_gets_binding(
     cls_index, context, tmp_path
 ):
     manager = DataManagerV2(workspace_path=tmp_path)
-    helper = helpers()[cls_index](manager)
+    helper = helpers(cls_index)(manager)
     capture_inference_binding(manager, context, Factory())
     with pytest.raises(InferenceRefused):
         _ = helper.llm
