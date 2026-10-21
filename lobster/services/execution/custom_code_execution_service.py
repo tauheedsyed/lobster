@@ -26,6 +26,7 @@ from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.execution.execution_context_builder import ExecutionContextBuilder
 from lobster.utils.logger import get_logger
+from lobster.utils.subprocess_env import minimal_child_env
 
 logger = get_logger(__name__)
 
@@ -1323,23 +1324,8 @@ if 'result' in dir() and result is not None:
             timeout_seconds = context.get("timeout", DEFAULT_TIMEOUT)
             logger.debug(f"Executing code in subprocess (timeout={timeout_seconds}s)")
 
-            # SECURITY: Filter environment variables to prevent credential leakage
-            # Only pass safe, necessary variables to subprocess
-            import os as _os
-
-            safe_env = {
-                "PATH": _os.environ.get("PATH", ""),
-                "HOME": _os.environ.get("HOME", ""),
-                "USER": _os.environ.get("USER", ""),
-                "TMPDIR": _os.environ.get(
-                    "TMPDIR", "/tmp"
-                ),  # nosec B108 # Fallback value for the child environment; nothing is created here.
-                "LANG": _os.environ.get("LANG", "en_US.UTF-8"),
-                "LC_ALL": _os.environ.get("LC_ALL", ""),
-                # Python-specific (empty PYTHONPATH prevents hijacking)
-                "PYTHONPATH": "",
-                "PYTHONHOME": _os.environ.get("PYTHONHOME", ""),
-            }
+            # Preserve the established child environment policy shared by tools.
+            safe_env = minimal_child_env()
 
             proc_result = subprocess.run(  # nosec B603 # Fixed argv (current interpreter + generated script path); no shell, no caller-supplied command.
                 [sys.executable, str(script_path)],
