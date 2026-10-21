@@ -3686,12 +3686,12 @@ notebook-replay = [{ name = "ipykernel", specifier = "==7.4.0" }]
 
 [[package]]
 name = "lobster-ai-tui"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-ai-tui" }
 
 [[package]]
 name = "lobster-drug-discovery"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-drug-discovery" }
 dependencies = [
     { name = "anndata" },
@@ -3743,7 +3743,7 @@ provides-extras = ["chemistry", "docking", "plm", "full"]
 
 [[package]]
 name = "lobster-genomics"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-genomics" }
 dependencies = [
     { name = "anndata" },
@@ -3783,7 +3783,7 @@ provides-extras = ["genebe"]
 
 [[package]]
 name = "lobster-metabolomics"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-metabolomics" }
 dependencies = [
     { name = "anndata" },
@@ -3808,7 +3808,7 @@ requires-dist = [
 
 [[package]]
 name = "lobster-proteomics"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-proteomics" }
 dependencies = [
     { name = "anndata" },
@@ -3846,7 +3846,7 @@ provides-extras = ["network-analysis"]
 
 [[package]]
 name = "lobster-research"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-research" }
 dependencies = [
     { name = "lobster-ai" },
@@ -3863,7 +3863,7 @@ requires-dist = [
 
 [[package]]
 name = "lobster-transcriptomics"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-transcriptomics" }
 dependencies = [
     { name = "anndata" },
@@ -3909,7 +3909,7 @@ provides-extras = ["seurat-v3", "doublet-detection", "batch-integration"]
 
 [[package]]
 name = "lobster-vector"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-vector" }
 dependencies = [
     { name = "lobster-ai" },
@@ -3961,7 +3961,7 @@ provides-extras = ["chromadb", "openai", "local", "cohere", "graph", "full"]
 
 [[package]]
 name = "lobster-visualization"
-version = "1.1.432"
+version = "1.1.433"
 source = { editable = "packages/lobster-visualization" }
 dependencies = [
     { name = "lobster-ai" },
