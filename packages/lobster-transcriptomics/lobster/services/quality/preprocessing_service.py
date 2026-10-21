@@ -635,6 +635,14 @@ def calculate_deviance(count_matrix, target_block_nnz=20_000_000):
         if block.nnz == 0:
             continue
         values = block.data.astype(np.float64, copy=False)
+        # Raw counts only: negative or non-finite values mean the matrix was
+        # normalized, log-transformed or scaled upstream, so stop instead of
+        # silently dropping them (which would change the selected genes).
+        if values.size and (not np.isfinite(values).all() or values.min() < 0):
+            raise ValueError(
+                "calculate_deviance expects RAW COUNTS (non-negative, finite); "
+                "pass adata.raw.X or adata.layers['counts']"
+            )
         cell_totals[start:start + block.shape[0]] += np.bincount(
             block.row, weights=values, minlength=block.shape[0]
         )
@@ -652,9 +660,8 @@ def calculate_deviance(count_matrix, target_block_nnz=20_000_000):
             continue
 
         x = block.data.astype(np.float64, copy=False)
-        # Strictly positive only: an explicit stored zero would give 0 * log(0) = NaN,
-        # and a negative value (log-transformed data passed by mistake) log(negative).
-        # Unobserved counts contribute exactly zero, since x*log(x) -> 0 as x -> 0.
+        # Strictly positive only: an explicit stored zero would give 0 * log(0) = NaN
+        # (negatives were rejected above). Unobserved counts contribute exactly zero, since x*log(x) -> 0 as x -> 0.
         positive = x > 0
         x, rows, cols = x[positive], block.row[positive], block.col[positive]
         if x.size == 0:
