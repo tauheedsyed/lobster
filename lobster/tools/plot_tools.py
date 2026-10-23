@@ -287,7 +287,7 @@ def create_plot_tools(data_manager, workspace_path: Path) -> List[Callable]:
         suffix = f" (sampled to {SAMPLE_THRESHOLD} rows)" if sampled else ""
         return (
             f"Plot registered: {plot_id} | {title} | {len(df)} rows{suffix}"
-            " | shown to the user | "
+            " | registered for display | "
             + _describe_save(plot_manager, plot_id, save_result)
         )
 

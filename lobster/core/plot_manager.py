@@ -10,6 +10,7 @@ Lobster's standard service pattern and enable provenance tracking.
 """
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -53,7 +54,17 @@ def _one_line_reason(exc: BaseException, limit: int = 200) -> str:
 
     Some exporters (Kaleido) put the reason on the line after a leading
     newline, which made the log and any relay look like an empty reason.
+    Filesystem errors keep only their description and the file name: the
+    reason is shown to the model, which must not see absolute paths.
     """
+    if isinstance(exc, OSError) and exc.filename is not None:
+        # str(exc) would embed the full path; never fall back to it here.
+        description = (exc.strerror or "").strip() or type(exc).__name__
+        filename = exc.filename
+        if isinstance(filename, bytes):
+            filename = os.fsdecode(filename)
+        name = Path(filename).name if isinstance(filename, str) else ""
+        return (f"{description}: {name}" if name else description)[:limit]
     for line in str(exc).splitlines():
         line = line.strip().rstrip(",;:").strip()
         if line:

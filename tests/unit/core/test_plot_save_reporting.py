@@ -87,6 +87,25 @@ def test_one_line_reason_falls_back_to_type_name():
     assert _one_line_reason(RuntimeError("  \n ")) == "RuntimeError"
 
 
+@pytest.mark.parametrize(
+    "exc, expected",
+    [
+        (
+            PermissionError(13, "Permission denied", "/abs/ws/p.html"),
+            "Permission denied: p.html",
+        ),
+        (PermissionError(13, None, "/abs/ws/p.html"), "PermissionError: p.html"),
+        (OSError(28, "No space left", b"/abs/ws/p.png"), "No space left: p.png"),
+        (OSError(9, "Bad file descriptor", 7), "Bad file descriptor"),
+        (OSError("\ndisk full"), "disk full"),
+    ],
+)
+def test_one_line_reason_for_os_errors_never_shows_a_path(exc, expected):
+    reason = _one_line_reason(exc)
+    assert reason == expected
+    assert "/abs/" not in reason
+
+
 def test_one_line_reason_is_bounded():
     assert len(_one_line_reason(ValueError("x" * 1000))) == 200
 
@@ -130,7 +149,7 @@ def test_tool_names_saved_path_and_png_skip(tmp_path, no_png):
     out = _invoke(_tool(tmp_path, pm))
 
     assert out.startswith("Plot registered: plot_1 | Simple Bar Chart | 3 rows")
-    assert "shown to the user" in out
+    assert "registered for display" in out
     assert "saved: plots/plot_1_Simple_Bar_Chart" in out
     saved_rel = out.split("saved: ")[1].split(" |")[0]
     assert (tmp_path / saved_rel).is_file()
@@ -174,6 +193,59 @@ def test_tool_reports_failed_html_without_a_path(tmp_path, monkeypatch):
 
     assert "file not saved: disk full" in out
     assert "| saved:" not in out and ".html" not in out
+
+
+def test_reason_for_filesystem_error_hides_absolute_path(tmp_path, monkeypatch):
+    import plotly.io as pio
+
+    def _denied(_fig, path, *_a, **_k):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(pio, "write_html", _denied)
+    pm = PlotManager(workspace_path=tmp_path, min_save_interval=0)
+
+    out = _invoke(_tool(tmp_path, pm))
+
+    assert "file not saved: Permission denied: plot_1_Simple_Bar_Chart.html" in out
+    assert str(tmp_path) not in out
+
+
+def test_tool_reports_the_current_plot_not_an_earlier_one(tmp_path, monkeypatch):
+    """An earlier plot saved fine; the current one fails: no path is named."""
+    import plotly.io as pio
+
+    real_write_html = pio.write_html
+
+    def _fail_second(fig, path, *a, **k):
+        if "Second" in str(path):
+            raise OSError("\nno space left")
+        return real_write_html(fig, path, *a, **k)
+
+    monkeypatch.setattr(pio, "write_html", _fail_second)
+    monkeypatch.setattr(pio, "write_image", lambda *_a, **_k: None)
+    pm = PlotManager(workspace_path=tmp_path, min_save_interval=0)
+    tool = _tool(tmp_path, pm)
+    first = _invoke(tool, title="First")
+
+    out = _invoke(tool, title="Second")
+
+    assert "saved: plots/plot_1_First" in first
+    assert out.startswith("Plot registered: plot_2 | Second")
+    assert "file not saved: no space left" in out
+    assert "plot_1" not in out
+
+
+def test_tool_reports_the_current_plot_after_history_eviction(tmp_path, no_png):
+    pm = PlotManager(workspace_path=tmp_path, max_plots_history=2, min_save_interval=0)
+    tool = _tool(tmp_path, pm)
+    for title in ("One", "Two"):
+        _invoke(tool, title=title)
+
+    out = _invoke(tool, title="Three")
+
+    assert out.startswith("Plot registered: plot_3 | Three")
+    assert "saved: plots/plot_3_Three.html" in out
+    assert (tmp_path / "plots" / "plot_3_Three.html").is_file()
 
 
 # --- workspace listing + artifact manifest ----------------------------------
