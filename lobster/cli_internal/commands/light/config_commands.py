@@ -1906,15 +1906,10 @@ LOBSTER_PROFILE=production
 # OR use custom configuration file
 # LOBSTER_CONFIG_FILE=config/custom_agent_config.json
 
-# Per-agent model overrides (optional)
-# Available models: claude-haiku, claude-sonnet, claude-sonnet-eu, claude-opus, claude-opus-eu, claude-3-7-sonnet, claude-3-7-sonnet-eu
-# LOBSTER_SUPERVISOR_MODEL=claude-haiku
-# LOBSTER_TRANSCRIPTOMICS_EXPERT_MODEL=claude-opus
-# LOBSTER_METHOD_AGENT_MODEL=claude-sonnet
-# LOBSTER_GENERAL_CONVERSATION_MODEL=claude-haiku
-
-# Global model override (overrides all agents)
-# LOBSTER_GLOBAL_MODEL=claude-sonnet
+# Model selection: use --model, or the workspace/global provider config
+# (lobster config). Per-agent models are set in the workspace config.
+# For AWS Bedrock, this sets the default model when nothing else chooses one:
+# LOBSTER_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-5-5
 
 # Per-agent temperature overrides
 # LOBSTER_SUPERVISOR_TEMPERATURE=0.5

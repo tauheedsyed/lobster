@@ -43,6 +43,8 @@ class BedrockProvider(ILLMProvider):
         AWS_BEDROCK_ACCESS_KEY: AWS access key ID
         AWS_BEDROCK_SECRET_ACCESS_KEY: AWS secret access key
         AWS_REGION: AWS region (optional, default: us-east-1)
+        LOBSTER_BEDROCK_MODEL_ID: Default model ID (optional). Used when no
+            explicit model, workspace config or global config chooses one.
 
     Attributes:
         KNOWN_MODELS: Static catalog of Claude models available via Bedrock
@@ -492,14 +494,22 @@ class BedrockProvider(ILLMProvider):
         """
         Get the default Bedrock model.
 
+        ``LOBSTER_BEDROCK_MODEL_ID`` wins when set, so a deployment can pin
+        its model without a config file. Otherwise the catalog default.
+
         Returns:
-            str: Default model ID (Claude Sonnet 4 via Bedrock)
+            str: Default model ID
 
         Example:
             >>> provider = BedrockProvider()
             >>> model_id = provider.get_default_model()
-            >>> # "anthropic.claude-sonnet-4-20250514-v1:0"
+            >>> # "global.anthropic.claude-sonnet-5-5"
         """
+        env_model = (os.environ.get("LOBSTER_BEDROCK_MODEL_ID") or "").strip()
+        if env_model:
+            logger.debug(f"Using LOBSTER_BEDROCK_MODEL_ID: {env_model}")
+            return env_model
+
         for model in self.KNOWN_MODELS:
             if model.is_default:
                 return model.name
