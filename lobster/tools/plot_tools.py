@@ -159,6 +159,44 @@ def _create_figure(plot_type: str, df, x: str, y: str, z: str, color: str, size:
     return fig
 
 
+def _relative_plot_path(plot_manager, file_path: str) -> str:
+    """Workspace-relative path of a saved plot file (e.g. plots/plot_1_x.html)."""
+    path = Path(file_path)
+    try:
+        return path.relative_to(Path(plot_manager.workspace_path)).as_posix()
+    except (TypeError, ValueError, AttributeError):
+        return f"plots/{path.name}"
+
+
+def _describe_save(plot_manager, plot_id: str, save_result) -> str:
+    """State what save_plots_to_workspace actually wrote for this plot.
+
+    The model relays this to the user, so it must never name a file that was
+    not written, and a skipped or failed save says why.
+    """
+    try:
+        _saved, stats, _ = save_result
+    except (TypeError, ValueError):
+        return "file save: result unknown"
+    stats = stats if isinstance(stats, dict) else {}
+
+    if stats.get("skipped"):
+        return f"file not saved: {stats.get('reason', 'skipped')}"
+
+    outcome = (stats.get("per_plot") or {}).get(str(plot_id))
+    if not outcome:
+        return "file save: result unknown"
+    if not outcome.get("html"):
+        return f"file not saved: {outcome.get('error') or 'unknown error'}"
+
+    parts = [f"saved: {_relative_plot_path(plot_manager, outcome['html'])}"]
+    if outcome.get("png"):
+        parts.append(f"png: {_relative_plot_path(plot_manager, outcome['png'])}")
+    elif outcome.get("png_skipped"):
+        parts.append(f"png: not saved ({outcome['png_skipped']})")
+    return " | ".join(parts)
+
+
 def create_plot_tools(data_manager, workspace_path: Path) -> List[Callable]:
     """Factory: create interactive plot tools bound to a data_manager and workspace.
 
@@ -244,10 +282,14 @@ def create_plot_tools(data_manager, workspace_path: Path) -> List[Callable]:
         if not plot_id:
             return f"ERROR: plot registration failed: {stats.get('error', 'unknown')}"
 
-        plot_manager.save_plots_to_workspace()
+        save_result = plot_manager.save_plots_to_workspace()
 
         suffix = f" (sampled to {SAMPLE_THRESHOLD} rows)" if sampled else ""
-        return f"Plot registered: {plot_id} | {title} | {len(df)} rows{suffix}"
+        return (
+            f"Plot registered: {plot_id} | {title} | {len(df)} rows{suffix}"
+            " | shown to the user | "
+            + _describe_save(plot_manager, plot_id, save_result)
+        )
 
     create_interactive_plot.metadata = {"categories": ["UTILITY"], "provenance": False}
     create_interactive_plot.tags = ["UTILITY"]

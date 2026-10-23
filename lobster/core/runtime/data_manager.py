@@ -2610,10 +2610,14 @@ class DataManagerV2:
         """
         List all files in the workspace organized by category.
 
+        Categories: data, exports, cache and plots. ``plots`` lists the
+        files PlotManager saved to ``<workspace>/plots``; the artifact
+        manifest relies on it to report saved plots.
+
         Returns:
             Dict[str, List[Dict[str, Any]]]: Files organized by category
         """
-        files_by_category = {"data": [], "exports": [], "cache": []}
+        files_by_category = {"data": [], "exports": [], "cache": [], "plots": []}
 
         # List data files
         for file_path in self.data_dir.iterdir():
@@ -2650,6 +2654,21 @@ class DataManagerV2:
                         "modified": file_path.stat().st_mtime,
                     }
                 )
+
+        # List saved plots (the directory exists only after the first save)
+        plots_dir = self.workspace_path / "plots"
+        if plots_dir.is_dir():
+            for file_path in plots_dir.iterdir():
+                if file_path.is_file():
+                    stat = file_path.stat()
+                    files_by_category["plots"].append(
+                        {
+                            "name": file_path.name,
+                            "path": str(file_path),
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime,
+                        }
+                    )
 
         return files_by_category
 

@@ -48,6 +48,19 @@ def _ensure_plotly():
     return _plotly_go, _plotly_io
 
 
+def _one_line_reason(exc: BaseException, limit: int = 200) -> str:
+    """First non-empty line of an exception message, bounded.
+
+    Some exporters (Kaleido) put the reason on the line after a leading
+    newline, which made the log and any relay look like an empty reason.
+    """
+    for line in str(exc).splitlines():
+        line = line.strip().rstrip(",;:").strip()
+        if line:
+            return line[:limit]
+    return type(exc).__name__
+
+
 class SuppressKaleidoLogging:
     """Context manager to suppress Kaleido's verbose logging during PNG export."""
 
@@ -425,7 +438,18 @@ class PlotManager:
             plots_dir.mkdir(exist_ok=True)
 
             saved_files = []
+            # Per-plot outcome, so a caller can tell the user exactly what was
+            # written: {"html": path|None, "png": path|None, "png_skipped": reason|None,
+            # "error": reason|None}
+            per_plot: Dict[str, Dict[str, Optional[str]]] = {}
             for plot_entry in self.latest_plots:
+                outcome: Dict[str, Optional[str]] = {
+                    "html": None,
+                    "png": None,
+                    "png_skipped": None,
+                    "error": None,
+                }
+                per_plot[str(plot_entry.get("id", "unknown"))] = outcome
                 try:
                     plot = plot_entry["figure"]
                     plot_id = plot_entry["id"]
@@ -452,6 +476,7 @@ class PlotManager:
                     _, pio_module = _ensure_plotly()
                     pio_module.write_html(plot, html_path)
                     saved_files.append(str(html_path))
+                    outcome["html"] = str(html_path)
 
                     # Store file path in entry for UI access
                     plot_entry["file_path"] = str(html_path)
@@ -467,9 +492,17 @@ class PlotManager:
                             with SuppressKaleidoLogging():
                                 pio_module.write_image(plot, png_path)
                             saved_files.append(str(png_path))
+                            outcome["png"] = str(png_path)
                         except Exception as e:
-                            logger.warning(f"Could not save PNG for {plot_id}: {e}")
+                            reason = _one_line_reason(e)
+                            outcome["png_skipped"] = reason
+                            logger.warning(
+                                f"Could not save PNG for {plot_id}: {reason}"
+                            )
                     else:
+                        outcome["png_skipped"] = (
+                            f"{n_cells:,} cells exceed the 50K PNG threshold"
+                        )
                         logger.info(
                             f"Skipped PNG export for {plot_id} ({n_cells:,} cells > 50K threshold)"
                         )
@@ -477,6 +510,7 @@ class PlotManager:
                     logger.info(f"Saved plot {plot_id} to workspace")
 
                 except Exception as e:
+                    outcome["error"] = _one_line_reason(e)
                     logger.error(
                         f"Failed to save plot {plot_entry.get('id', 'unknown')}: {e}"
                     )
@@ -484,6 +518,7 @@ class PlotManager:
             stats = {
                 "saved_count": len(saved_files),
                 "total_plots": len(self.latest_plots),
+                "per_plot": per_plot,
                 "workspace_path": str(plots_dir),
                 "timestamp": datetime.now().isoformat(),
             }
