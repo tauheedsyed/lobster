@@ -240,11 +240,16 @@ class BaseAdapter(IModalityAdapter):
         try:
             # Transpose if needed (common for genomics data where genes are rows)
             if transpose:
-                numeric_cols = set(df.select_dtypes(include=[np.number]).columns)
-                text_cols = [c for c in df.columns if c not in numeric_cols]
-                if text_cols and numeric_cols:
-                    # After a transpose every column would hold a text value
-                    # and the numeric filter below would drop the whole matrix.
+                transposed = df.T
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if (
+                    transposed.shape[1]
+                    and len(numeric_cols)
+                    and transposed.select_dtypes(include=[np.number]).shape[1] == 0
+                ):
+                    # Text values in some columns made every transposed column
+                    # non-numeric, so the filter below would drop the matrix.
+                    text_cols = [c for c in df.columns if c not in set(numeric_cols)]
                     shown = ", ".join(str(c) for c in text_cols[:5])
                     raise ValueError(
                         f"{len(text_cols)} text column(s) ({shown}) sit beside "
@@ -255,7 +260,7 @@ class BaseAdapter(IModalityAdapter):
                         "AnnData with rows as observations and the text "
                         "columns in obs."
                     )
-                df = df.T
+                df = transposed
 
             # Ensure numeric data
             numeric_df = df.select_dtypes(include=[np.number])

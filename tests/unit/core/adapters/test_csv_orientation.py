@@ -65,3 +65,16 @@ def test_all_numeric_csv_keeps_the_genes_as_rows_default(tmp_path, counts):
     adata = _load(path)
     assert adata.shape == (N_GENES, N_CELLS)
     assert list(adata.obs_names) == list(counts.columns)
+
+
+def test_numeric_categorical_columns_still_transpose():
+    from lobster.core.adapters.base import BaseAdapter
+
+    df = pd.DataFrame(
+        {"s1": pd.Categorical([1, 2]), "s2": [3, 4]},
+        index=pd.Index(["g1", "g2"]),
+    )
+    adapter = TranscriptomicsAdapter("single_cell")
+    adata = BaseAdapter._create_anndata_from_dataframe(adapter, df, transpose=True)
+    assert adata.shape == (2, 2)
+    assert list(adata.obs_names) == ["s1", "s2"]

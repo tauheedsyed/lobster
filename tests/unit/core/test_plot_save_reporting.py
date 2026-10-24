@@ -122,6 +122,8 @@ def test_one_line_reason_for_os_errors_never_shows_a_path(exc, expected):
         ("path:/home/someone/ws/plot.png bad", "path:plot.png bad"),
         ("\\\\server\\share\\dir\\p.png gone", "p.png gone"),
         ("/abs/dir/ trailing", "dir trailing"),
+        ("cannot read file:///Users/someone/ws/p.png", "cannot read file:p.png"),
+        ("//server/share/dir/p.png gone", "p.png gone"),
     ],
 )
 def test_one_line_reason_strips_directories_from_any_message(message, expected):

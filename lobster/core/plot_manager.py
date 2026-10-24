@@ -74,15 +74,18 @@ def _one_line_reason(exc: BaseException, limit: int = 200) -> str:
     return type(exc).__name__
 
 
-# URLs are left alone; only the text between them is scanned for paths.
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
+# URLs are left alone (file: URLs are paths); only the text between them is
+# scanned for paths. Paths containing spaces are only partly reduced.
+_URL = re.compile(
+    r"(?<![A-Za-z0-9+.-])(?![Ff][Ii][Ll][Ee]:)[A-Za-z][A-Za-z0-9+.-]*://\S+"
+)
 
 # An absolute path with at least one directory: POSIX ("/a/b"), Windows drive
-# ("C:\\a\\b") or UNC ("\\\\host\\share\\b"). Relative paths ("plots/x.html",
+# ("C:\\a\\b") or UNC ("\\\\host\\share\\b", "//host/share/b"). Relative paths ("plots/x.html",
 # "~/x") and bare slashes ("1 /2") do not match. Segments exclude separators,
 # so matching stays linear.
 _ABSOLUTE_PATH = re.compile(
-    r"(?<![\w.~\\/])(?:[A-Za-z]:[\\/]|\\\\|/)"
+    r"(?<![\w.~\\/])(?:[A-Za-z]:[\\/]|\\\\|/{1,3})"
     r"(?:[^\s'\"<>|:;,()\[\]{}\\/]+[\\/])+"
     r"[^\s'\"<>|:;,()\[\]{}\\/]*"
 )
