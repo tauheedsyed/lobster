@@ -11,6 +11,7 @@ Lobster's standard service pattern and enable provenance tracking.
 
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -54,7 +55,8 @@ def _one_line_reason(exc: BaseException, limit: int = 200) -> str:
 
     Some exporters (Kaleido) put the reason on the line after a leading
     newline, which made the log and any relay look like an empty reason.
-    Filesystem errors keep only their description and the file name: the
+    Filesystem errors keep only their description and the file name, and
+    any other message has absolute paths cut to their last component: the
     reason is shown to the model, which must not see absolute paths.
     """
     if isinstance(exc, OSError) and exc.filename is not None:
@@ -68,8 +70,45 @@ def _one_line_reason(exc: BaseException, limit: int = 200) -> str:
     for line in str(exc).splitlines():
         line = line.strip().rstrip(",;:").strip()
         if line:
-            return line[:limit]
+            return _strip_dirs(line)[:limit]
     return type(exc).__name__
+
+
+# URLs are left alone; only the text between them is scanned for paths.
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
+
+# An absolute path with at least one directory: POSIX ("/a/b"), Windows drive
+# ("C:\\a\\b") or UNC ("\\\\host\\share\\b"). Relative paths ("plots/x.html",
+# "~/x") and bare slashes ("1 /2") do not match. Segments exclude separators,
+# so matching stays linear.
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![\w.~\\/])(?:[A-Za-z]:[\\/]|\\\\|/)"
+    r"(?:[^\s'\"<>|:;,()\[\]{}\\/]+[\\/])+"
+    r"[^\s'\"<>|:;,()\[\]{}\\/]*"
+)
+
+
+def _last_component(path: str) -> str:
+    parts = [p for p in re.split(r"[\\/]+", path) if p]
+    return parts[-1] if parts else path
+
+
+def _strip_dirs(text: str) -> str:
+    """Replace absolute paths in an error message with their final component."""
+    pieces = []
+    last = 0
+    for url in _URL.finditer(text):
+        pieces.append(
+            _ABSOLUTE_PATH.sub(
+                lambda m: _last_component(m.group(0)), text[last : url.start()]
+            )
+        )
+        pieces.append(url.group(0))
+        last = url.end()
+    pieces.append(
+        _ABSOLUTE_PATH.sub(lambda m: _last_component(m.group(0)), text[last:])
+    )
+    return "".join(pieces)
 
 
 class SuppressKaleidoLogging:

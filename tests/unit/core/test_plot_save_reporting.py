@@ -106,6 +106,48 @@ def test_one_line_reason_for_os_errors_never_shows_a_path(exc, expected):
     assert "/abs/" not in reason
 
 
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        (
+            "Failed to write /Users/someone/ws/plots/plot_1.html: disk full",
+            "Failed to write plot_1.html: disk full",
+        ),
+        ("C:\\Users\\someone\\ws\\p.png not writable", "p.png not writable"),
+        ("path '/var/folders/ab/T/tmpx/file.json' bad", "path 'file.json' bad"),
+        (
+            "\nChrome is required at /opt/google/chrome/chrome",
+            "Chrome is required at chrome",
+        ),
+        ("path:/home/someone/ws/plot.png bad", "path:plot.png bad"),
+        ("\\\\server\\share\\dir\\p.png gone", "p.png gone"),
+        ("/abs/dir/ trailing", "dir trailing"),
+    ],
+)
+def test_one_line_reason_strips_directories_from_any_message(message, expected):
+    assert _one_line_reason(ValueError(message)) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "see https://plotly.com/python/static-image-export/ for help",
+        "saved under plots/plot_1.html",
+        "and / or 1 / 2",
+        "1 /2",
+        "~/plots/a.html",
+        "see https://example.org/a/b?next=/c/d for help",
+        "/srv",
+    ],
+)
+def test_one_line_reason_keeps_urls_relative_paths_and_slashes(message):
+    assert _one_line_reason(RuntimeError(message)) == message
+
+
+def test_one_line_reason_os_error_without_filename_strips_directories():
+    assert _one_line_reason(OSError("cannot open /tmp/x/y.png")) == "cannot open y.png"
+
+
 def test_one_line_reason_is_bounded():
     assert len(_one_line_reason(ValueError("x" * 1000))) == 200
 
