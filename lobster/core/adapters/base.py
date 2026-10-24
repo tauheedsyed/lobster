@@ -240,6 +240,21 @@ class BaseAdapter(IModalityAdapter):
         try:
             # Transpose if needed (common for genomics data where genes are rows)
             if transpose:
+                numeric_cols = set(df.select_dtypes(include=[np.number]).columns)
+                text_cols = [c for c in df.columns if c not in numeric_cols]
+                if text_cols and numeric_cols:
+                    # After a transpose every column would hold a text value
+                    # and the numeric filter below would drop the whole matrix.
+                    shown = ", ".join(str(c) for c in text_cols[:5])
+                    raise ValueError(
+                        f"{len(text_cols)} text column(s) ({shown}) sit beside "
+                        f"{len(numeric_cols)} numeric columns. This loader reads "
+                        "such a table as genes x samples, and transposing it "
+                        "would drop every value. If the rows are cells or "
+                        "samples, load the table with pandas and build the "
+                        "AnnData with rows as observations and the text "
+                        "columns in obs."
+                    )
                 df = df.T
 
             # Ensure numeric data
