@@ -1,7 +1,7 @@
 # Lobster AI Makefile
 # Professional build and development commands
 
-.PHONY: help install dev-install install-global uninstall-global test format lint clean docker-build docker-run release check-python setup-env
+.PHONY: help install dev-install install-global uninstall-global test format lint clean docker-build docker-run release check-python setup-env update-pricing
 
 # Configuration
 VENV_NAME := .venv
@@ -641,6 +641,10 @@ uninstall-global:
 	else \
 		echo "$(YELLOW)⚠️ No global lobster command found$(NC)"; \
 	fi
+
+# Reviewed, build-time market snapshot; never fetch prices at runtime.
+update-pricing:
+	uv run --no-project python scripts/update_pricing.py
 
 # Testing targets (require virtual environment)
 test: $(VENV_PATH)

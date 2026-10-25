@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Reviewed market-rate gaps; never commercial charge tariffs.",
+  "overrides": [
+    {
+      "provider": "gemini",
+      "model_id": "gemini-3-pro-preview",
+      "cost": {
+        "input": 2,
+        "output": 12,
+        "cache_read": null,
+        "cache_write": null,
+        "reasoning": null,
+        "context_over_200k": {"input": 4, "output": 18}
+      },
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
+      "checked_at": "2026-08-07",
+      "reviewer": "os-3jel",
+      "note": "Historical public pricing capture; cache rates were not recorded."
+    }
+  ]
+}

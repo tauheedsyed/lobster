@@ -1,0 +1,1250 @@
+{
+  "MODEL_PRICING": {
+    "MiniMaxAI/MiniMax-M2.5": {
+      "display_name": "MiniMax M2.5",
+      "input_per_million": 0.3,
+      "output_per_million": 1.2
+    },
+    "MiniMaxAI/MiniMax-M3": {
+      "display_name": "MiniMax M3",
+      "input_per_million": 0.3,
+      "output_per_million": 1.2
+    },
+    "NousResearch/Hermes-4-405B": {
+      "display_name": "Hermes 4 405B",
+      "input_per_million": 1.0,
+      "output_per_million": 3.0
+    },
+    "NousResearch/Hermes-4-70B": {
+      "display_name": "Hermes 4 70B",
+      "input_per_million": 0.13,
+      "output_per_million": 0.4
+    },
+    "Qwen/Qwen3-235B-A22B-Instruct-2507": {
+      "display_name": "Qwen3 235B A22B Instruct",
+      "input_per_million": 0.2,
+      "output_per_million": 0.6
+    },
+    "Qwen/Qwen3-30B-A3B-Instruct-2507": {
+      "display_name": "Qwen3 30B A3B Instruct",
+      "input_per_million": 0.1,
+      "output_per_million": 0.3
+    },
+    "Qwen/Qwen3-32B": {
+      "display_name": "Qwen3 32B",
+      "input_per_million": 0.1,
+      "output_per_million": 0.3
+    },
+    "Qwen/Qwen3-Next-80B-A3B-Thinking": {
+      "display_name": "Qwen3 Next 80B A3B Thinking",
+      "input_per_million": 0.15,
+      "output_per_million": 1.2
+    },
+    "Qwen/Qwen3.5-397B-A17B": {
+      "display_name": "Qwen3.5 397B A17B",
+      "input_per_million": 0.6,
+      "output_per_million": 3.6
+    },
+    "amazon/nova-pro-v1": {
+      "display_name": "Amazon Nova Pro",
+      "input_per_million": 0.8,
+      "output_per_million": 3.2
+    },
+    "anthropic.claude-opus-4-6-v1": {
+      "display_name": "Claude Opus 4.6 (Bedrock)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "anthropic/claude-3-5-haiku": {
+      "display_name": "Claude 3.5 Haiku",
+      "input_per_million": 0.8,
+      "output_per_million": 4.0
+    },
+    "anthropic/claude-sonnet-4-5": {
+      "display_name": "Claude Sonnet 4.5",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "claude-3-5-haiku-20241022": {
+      "display_name": "Claude 3.5 Haiku",
+      "input_per_million": 1.0,
+      "output_per_million": 5.0
+    },
+    "claude-3-5-sonnet-20241022": {
+      "display_name": "Claude 3.5 Sonnet",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "claude-fable-5-1": {
+      "display_name": "Claude Fable 5.1",
+      "input_per_million": 10.0,
+      "output_per_million": 50.0
+    },
+    "claude-haiku-5-5": {
+      "display_name": "Claude Haiku 5.5",
+      "input_per_million": 0.1,
+      "output_per_million": 0.5
+    },
+    "claude-opus-4-20250514": {
+      "display_name": "Claude Opus 4",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "claude-opus-5-5": {
+      "display_name": "Claude Opus 5.5",
+      "input_per_million": 4.0,
+      "output_per_million": 20.0
+    },
+    "claude-sonnet-4-20250514": {
+      "display_name": "Claude Sonnet 4",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "claude-sonnet-5-5": {
+      "display_name": "Claude Sonnet 5.5",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "cohere-command-r-plus": {
+      "display_name": "Cohere Command R+ (Azure AI)",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "cohere/command-r-plus": {
+      "display_name": "Command R+",
+      "input_per_million": 2.5,
+      "output_per_million": 10.0
+    },
+    "deepseek-ai/DeepSeek-V4-Pro": {
+      "display_name": "DeepSeek V4 Pro",
+      "input_per_million": 1.75,
+      "output_per_million": 3.5
+    },
+    "deepseek-r1": {
+      "display_name": "DeepSeek R1 (Azure AI)",
+      "input_per_million": 0.55,
+      "output_per_million": 2.19
+    },
+    "deepseek/deepseek-chat-v3-0324": {
+      "display_name": "DeepSeek Chat V3",
+      "input_per_million": 0.27,
+      "output_per_million": 1.1
+    },
+    "deepseek/deepseek-r1": {
+      "display_name": "DeepSeek R1",
+      "input_per_million": 0.55,
+      "output_per_million": 2.19
+    },
+    "gemini-3-flash-preview": {
+      "display_name": "Gemini 3 Flash",
+      "input_per_million": 0.5,
+      "output_per_million": 3.0
+    },
+    "gemini-3-pro-preview": {
+      "display_name": "Gemini 3 Pro",
+      "input_per_million": 2.0,
+      "output_per_million": 12.0
+    },
+    "global.anthropic.claude-fable-5-1": {
+      "display_name": "Claude Fable 5.1 (Bedrock global)",
+      "input_per_million": 10.0,
+      "output_per_million": 50.0
+    },
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": {
+      "display_name": "Claude Haiku 4.5 (Bedrock, global)",
+      "input_per_million": 1.0,
+      "output_per_million": 5.0
+    },
+    "global.anthropic.claude-haiku-5-5": {
+      "display_name": "Claude Haiku 5.5 (Bedrock global)",
+      "input_per_million": 0.1,
+      "output_per_million": 0.5
+    },
+    "global.anthropic.claude-opus-4-5-20251101-v1:0": {
+      "display_name": "Claude Opus 4.5 (Bedrock)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "global.anthropic.claude-opus-4-6-v1": {
+      "display_name": "Claude Opus 4.6 (Bedrock, global)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "global.anthropic.claude-opus-4-7": {
+      "display_name": "Claude Opus 4.7 (Bedrock, global)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "global.anthropic.claude-opus-4-8": {
+      "display_name": "Claude Opus 4.8 (Bedrock, global)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "global.anthropic.claude-opus-5": {
+      "display_name": "Claude Opus 5 (Bedrock, global)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "global.anthropic.claude-opus-5-5": {
+      "display_name": "Claude Opus 5.5 (Bedrock global)",
+      "input_per_million": 4.0,
+      "output_per_million": 20.0
+    },
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0": {
+      "display_name": "Claude Sonnet 4.5 (Bedrock, global)",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "global.anthropic.claude-sonnet-4-6": {
+      "display_name": "Claude Sonnet 4.6 (Bedrock, global)",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "global.anthropic.claude-sonnet-5-5": {
+      "display_name": "Claude Sonnet 5.5 (Omics-OS Cloud)",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "global.openai.gpt-6-astra": {
+      "display_name": "GPT-6 Astra (Bedrock global)",
+      "input_per_million": 10.0,
+      "output_per_million": 50.0
+    },
+    "global.openai.gpt-6-luna": {
+      "display_name": "GPT-6 Luna (Bedrock global)",
+      "input_per_million": 0.1,
+      "output_per_million": 0.5
+    },
+    "global.openai.gpt-6-sol": {
+      "display_name": "GPT-6 Sol (Bedrock global)",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "global.openai.gpt-6.1-sol": {
+      "display_name": "GPT-6.1 Sol (Bedrock global)",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "google/gemini-2.0-flash-001": {
+      "display_name": "Gemini 2.0 Flash",
+      "input_per_million": 0.1,
+      "output_per_million": 0.4
+    },
+    "google/gemini-2.5-pro-preview": {
+      "display_name": "Gemini 2.5 Pro Preview",
+      "input_per_million": 1.25,
+      "output_per_million": 10.0
+    },
+    "google/gemma-3-27b-it": {
+      "display_name": "Gemma 3 27B IT",
+      "input_per_million": 0.1,
+      "output_per_million": 0.3
+    },
+    "gpt-35-turbo": {
+      "display_name": "GPT-3.5 Turbo (Azure AI)",
+      "input_per_million": 0.5,
+      "output_per_million": 1.5
+    },
+    "gpt-4-turbo": {
+      "display_name": "GPT-4 Turbo (Azure AI)",
+      "input_per_million": 10.0,
+      "output_per_million": 30.0
+    },
+    "gpt-4o": {
+      "display_name": "GPT-4o",
+      "input_per_million": 2.5,
+      "output_per_million": 10.0
+    },
+    "gpt-4o-mini": {
+      "display_name": "GPT-4o Mini",
+      "input_per_million": 0.15,
+      "output_per_million": 0.6
+    },
+    "gpt-5.5-2026-04-23": {
+      "display_name": "GPT-5.5",
+      "input_per_million": 5.0,
+      "output_per_million": 30.0
+    },
+    "gpt-6-astra": {
+      "display_name": "GPT-6 Astra",
+      "input_per_million": 10.0,
+      "output_per_million": 50.0
+    },
+    "gpt-6-luna": {
+      "display_name": "GPT-6 Luna",
+      "input_per_million": 0.1,
+      "output_per_million": 0.5
+    },
+    "gpt-6-sol": {
+      "display_name": "GPT-6 Sol",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "gpt-6.1-sol": {
+      "display_name": "GPT-6.1 Sol",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "meta-llama/llama-3.1-8b-instruct": {
+      "display_name": "Llama 3.1 8B Instruct",
+      "input_per_million": 0.06,
+      "output_per_million": 0.06
+    },
+    "meta-llama/llama-3.3-70b-instruct": {
+      "display_name": "Llama 3.3 70B Instruct",
+      "input_per_million": 0.35,
+      "output_per_million": 0.4
+    },
+    "microsoft/phi-4": {
+      "display_name": "Phi-4",
+      "input_per_million": 0.07,
+      "output_per_million": 0.14
+    },
+    "mistral-large": {
+      "display_name": "Mistral Large (Azure AI)",
+      "input_per_million": 4.0,
+      "output_per_million": 12.0
+    },
+    "mistralai/mistral-large": {
+      "display_name": "Mistral Large",
+      "input_per_million": 2.0,
+      "output_per_million": 6.0
+    },
+    "mistralai/mistral-nemo": {
+      "display_name": "Mistral Nemo",
+      "input_per_million": 0.13,
+      "output_per_million": 0.13
+    },
+    "moonshotai/Kimi-K2.6": {
+      "display_name": "Kimi K2.6",
+      "input_per_million": 0.95,
+      "output_per_million": 4.0
+    },
+    "moonshotai/Kimi-K2.7-Code": {
+      "display_name": "Kimi K2.7 Code",
+      "input_per_million": 0.95,
+      "output_per_million": 4.0
+    },
+    "nvidia/Cosmos3-Super-Reasoner": {
+      "display_name": "Cosmos3 Super Reasoner",
+      "input_per_million": 0.1,
+      "output_per_million": 0.3
+    },
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": {
+      "display_name": "Nemotron 3 Nano 30B A3B",
+      "input_per_million": 0.06,
+      "output_per_million": 0.24
+    },
+    "nvidia/Nemotron-3-Nano-Omni": {
+      "display_name": "Nemotron 3 Nano Omni",
+      "input_per_million": 0.06,
+      "output_per_million": 0.24
+    },
+    "nvidia/Nemotron-3-Ultra-550b-a55b": {
+      "display_name": "Nemotron 3 Ultra 550B A55B",
+      "input_per_million": 1.0,
+      "output_per_million": 3.0
+    },
+    "nvidia/llama-3.1-nemotron-70b-instruct": {
+      "display_name": "Nemotron 70B",
+      "input_per_million": 0.35,
+      "output_per_million": 0.4
+    },
+    "nvidia/nemotron-3-super-120b-a12b": {
+      "display_name": "Nemotron 3 Super 120B A12B",
+      "input_per_million": 0.3,
+      "output_per_million": 0.9
+    },
+    "o1": {
+      "display_name": "o1 (Reasoning)",
+      "input_per_million": 15.0,
+      "output_per_million": 60.0
+    },
+    "o1-mini": {
+      "display_name": "o1 Mini",
+      "input_per_million": 3.0,
+      "output_per_million": 12.0
+    },
+    "o3-mini": {
+      "display_name": "o3 Mini",
+      "input_per_million": 1.1,
+      "output_per_million": 4.4
+    },
+    "openai/gpt-4o": {
+      "display_name": "GPT-4o",
+      "input_per_million": 2.5,
+      "output_per_million": 10.0
+    },
+    "openai/gpt-4o-mini": {
+      "display_name": "GPT-4o Mini",
+      "input_per_million": 0.15,
+      "output_per_million": 0.6
+    },
+    "openai/o1": {
+      "display_name": "o1 (Reasoning)",
+      "input_per_million": 15.0,
+      "output_per_million": 60.0
+    },
+    "openai/o3-mini": {
+      "display_name": "o3 Mini",
+      "input_per_million": 1.1,
+      "output_per_million": 4.4
+    },
+    "phi-4": {
+      "display_name": "Phi-4 (Azure AI)",
+      "input_per_million": 0.07,
+      "output_per_million": 0.14
+    },
+    "qwen/qwen-2.5-72b-instruct": {
+      "display_name": "Qwen 2.5 72B Instruct",
+      "input_per_million": 0.35,
+      "output_per_million": 0.4
+    },
+    "us.anthropic.claude-fable-5-1": {
+      "display_name": "Claude Fable 5.1 (Bedrock US)",
+      "input_per_million": 11.0,
+      "output_per_million": 55.0
+    },
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": {
+      "display_name": "Claude Haiku 4.5 (Bedrock)",
+      "input_per_million": 1.0,
+      "output_per_million": 5.0
+    },
+    "us.anthropic.claude-haiku-5-5": {
+      "display_name": "Claude Haiku 5.5 (Bedrock US)",
+      "input_per_million": 0.11,
+      "output_per_million": 0.55
+    },
+    "us.anthropic.claude-opus-4-5-20251101-v1:0": {
+      "display_name": "Claude Opus 4.5 (Bedrock, us)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "us.anthropic.claude-opus-4-6-v1": {
+      "display_name": "Claude Opus 4.6 (Bedrock, us)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "us.anthropic.claude-opus-4-7": {
+      "display_name": "Claude Opus 4.7 (Bedrock, us)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "us.anthropic.claude-opus-4-8": {
+      "display_name": "Claude Opus 4.8 (Bedrock, us)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "us.anthropic.claude-opus-5": {
+      "display_name": "Claude Opus 5 (Bedrock, us)",
+      "input_per_million": 5.0,
+      "output_per_million": 25.0
+    },
+    "us.anthropic.claude-opus-5-5": {
+      "display_name": "Claude Opus 5.5 (Bedrock US)",
+      "input_per_million": 4.4,
+      "output_per_million": 22.0
+    },
+    "us.anthropic.claude-sonnet-4-20250514-v1:0": {
+      "display_name": "Claude Sonnet 4 (Bedrock)",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0": {
+      "display_name": "Claude Sonnet 4.5 (Omics-OS Cloud)",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "us.anthropic.claude-sonnet-4-6": {
+      "display_name": "Claude Sonnet 4.6 (Bedrock)",
+      "input_per_million": 3.0,
+      "output_per_million": 15.0
+    },
+    "us.anthropic.claude-sonnet-5-5": {
+      "display_name": "Claude Sonnet 5.5 (Bedrock US)",
+      "input_per_million": 2.2,
+      "output_per_million": 11.0
+    },
+    "us.openai.gpt-6-astra": {
+      "display_name": "GPT-6 Astra (Bedrock US)",
+      "input_per_million": 11.0,
+      "output_per_million": 55.0
+    },
+    "us.openai.gpt-6-luna": {
+      "display_name": "GPT-6 Luna (Bedrock US)",
+      "input_per_million": 0.11,
+      "output_per_million": 0.55
+    },
+    "us.openai.gpt-6-sol": {
+      "display_name": "GPT-6 Sol (Bedrock US)",
+      "input_per_million": 2.2,
+      "output_per_million": 11.0
+    },
+    "us.openai.gpt-6.1-sol": {
+      "display_name": "GPT-6.1 Sol (Bedrock US)",
+      "input_per_million": 2.2,
+      "output_per_million": 11.0
+    },
+    "x-ai/grok-2-1212": {
+      "display_name": "Grok 2",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0
+    },
+    "zai-org/GLM-5.1": {
+      "display_name": "GLM-5.1",
+      "input_per_million": 1.4,
+      "output_per_million": 4.4
+    },
+    "zai-org/GLM-5.2": {
+      "display_name": "GLM-5.2",
+      "input_per_million": 1.4,
+      "output_per_million": 4.4
+    }
+  },
+  "after_error_duplicate": {
+    "latest": {
+      "cost_complete": false,
+      "latest_cost_usd": 0.0045,
+      "session_total_usd": 0.069,
+      "total_tokens": 31900,
+      "unpriced_invocations": 1
+    },
+    "minimal": "Session cost: >$0.069 (31.9k tokens, cost incomplete)",
+    "summary": {
+      "by_agent": {
+        "supervisor": {
+          "cost_usd": 0.069,
+          "input_tokens": 20000,
+          "invocation_count": 9,
+          "output_tokens": 900,
+          "total_tokens": 31900,
+          "unpriced_invocations": 1
+        }
+      },
+      "cost_complete": false,
+      "invocations": [
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 12100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0375,
+          "input_tokens": 12000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 12100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": null,
+          "input_tokens": 1000,
+          "model": "unpriced-model",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        },
+        {
+          "agent": "supervisor",
+          "cost_usd": 0.0045,
+          "input_tokens": 1000,
+          "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "output_tokens": 100,
+          "timestamp": "2026-01-01T00:00:00",
+          "tool": null,
+          "total_tokens": 1100
+        }
+      ],
+      "session_id": "same",
+      "total_cost_usd": 0.069,
+      "total_input_tokens": 20000,
+      "total_output_tokens": 900,
+      "total_tokens": 31900,
+      "unpriced_invocations": 1,
+      "unpriced_models": [
+        "unpriced-model"
+      ]
+    },
+    "verbose": "\ud83d\udcb0 31.9k tokens (>$0.069, 1 unpriced)\n  Supervisor                     31.9k"
+  },
+  "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "snapshots": [
+    {
+      "latest": {
+        "cost_complete": true,
+        "latest_cost_usd": 0.0045,
+        "session_total_usd": 0.0045,
+        "total_tokens": 1100,
+        "unpriced_invocations": 0
+      },
+      "minimal": "Session cost: $0.0045",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "invocation_count": 1,
+            "output_tokens": 100,
+            "total_tokens": 1100,
+            "unpriced_invocations": 0
+          }
+        },
+        "cost_complete": true,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.0045,
+        "total_input_tokens": 1000,
+        "total_output_tokens": 100,
+        "total_tokens": 1100,
+        "unpriced_invocations": 0,
+        "unpriced_models": []
+      },
+      "verbose": "\ud83d\udcb0 1.1k tokens ($0.0045)\n  Supervisor                     1.1k"
+    },
+    {
+      "latest": {
+        "cost_complete": true,
+        "latest_cost_usd": 0.0045,
+        "session_total_usd": 0.009,
+        "total_tokens": 2200,
+        "unpriced_invocations": 0
+      },
+      "minimal": "Session cost: $0.009",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.009,
+            "input_tokens": 2000,
+            "invocation_count": 2,
+            "output_tokens": 200,
+            "total_tokens": 2200,
+            "unpriced_invocations": 0
+          }
+        },
+        "cost_complete": true,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.009,
+        "total_input_tokens": 2000,
+        "total_output_tokens": 200,
+        "total_tokens": 2200,
+        "unpriced_invocations": 0,
+        "unpriced_models": []
+      },
+      "verbose": "\ud83d\udcb0 2.2k tokens ($0.009)\n  Supervisor                     2.2k"
+    },
+    {
+      "latest": {
+        "cost_complete": true,
+        "latest_cost_usd": 0.0045,
+        "session_total_usd": 0.0135,
+        "total_tokens": 14300,
+        "unpriced_invocations": 0
+      },
+      "minimal": "Session cost: $0.0135",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.0135,
+            "input_tokens": 3000,
+            "invocation_count": 3,
+            "output_tokens": 300,
+            "total_tokens": 14300,
+            "unpriced_invocations": 0
+          }
+        },
+        "cost_complete": true,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.0135,
+        "total_input_tokens": 3000,
+        "total_output_tokens": 300,
+        "total_tokens": 14300,
+        "unpriced_invocations": 0,
+        "unpriced_models": []
+      },
+      "verbose": "\ud83d\udcb0 14.3k tokens ($0.0135)\n  Supervisor                     14.3k"
+    },
+    {
+      "latest": {
+        "cost_complete": true,
+        "latest_cost_usd": 0.0375,
+        "session_total_usd": 0.051,
+        "total_tokens": 26400,
+        "unpriced_invocations": 0
+      },
+      "minimal": "Session cost: $0.051",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.051,
+            "input_tokens": 15000,
+            "invocation_count": 4,
+            "output_tokens": 400,
+            "total_tokens": 26400,
+            "unpriced_invocations": 0
+          }
+        },
+        "cost_complete": true,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0375,
+            "input_tokens": 12000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.051,
+        "total_input_tokens": 15000,
+        "total_output_tokens": 400,
+        "total_tokens": 26400,
+        "unpriced_invocations": 0,
+        "unpriced_models": []
+      },
+      "verbose": "\ud83d\udcb0 26.4k tokens ($0.051)\n  Supervisor                     26.4k"
+    },
+    {
+      "latest": {
+        "cost_complete": true,
+        "latest_cost_usd": 0.0045,
+        "session_total_usd": 0.0555,
+        "total_tokens": 27500,
+        "unpriced_invocations": 0
+      },
+      "minimal": "Session cost: $0.0555",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.0555,
+            "input_tokens": 16000,
+            "invocation_count": 5,
+            "output_tokens": 500,
+            "total_tokens": 27500,
+            "unpriced_invocations": 0
+          }
+        },
+        "cost_complete": true,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0375,
+            "input_tokens": 12000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.0555,
+        "total_input_tokens": 16000,
+        "total_output_tokens": 500,
+        "total_tokens": 27500,
+        "unpriced_invocations": 0,
+        "unpriced_models": []
+      },
+      "verbose": "\ud83d\udcb0 27.5k tokens ($0.0555)\n  Supervisor                     27.5k"
+    },
+    {
+      "latest": {
+        "cost_complete": true,
+        "latest_cost_usd": 0.0045,
+        "session_total_usd": 0.06,
+        "total_tokens": 28600,
+        "unpriced_invocations": 0
+      },
+      "minimal": "Session cost: $0.06",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.06,
+            "input_tokens": 17000,
+            "invocation_count": 6,
+            "output_tokens": 600,
+            "total_tokens": 28600,
+            "unpriced_invocations": 0
+          }
+        },
+        "cost_complete": true,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0375,
+            "input_tokens": 12000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.06,
+        "total_input_tokens": 17000,
+        "total_output_tokens": 600,
+        "total_tokens": 28600,
+        "unpriced_invocations": 0,
+        "unpriced_models": []
+      },
+      "verbose": "\ud83d\udcb0 28.6k tokens ($0.06)\n  Supervisor                     28.6k"
+    },
+    {
+      "latest": {
+        "cost_complete": false,
+        "latest_cost_usd": null,
+        "session_total_usd": 0.06,
+        "total_tokens": 29700,
+        "unpriced_invocations": 1
+      },
+      "minimal": "Session cost: >$0.06 (29.7k tokens, cost incomplete)",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.06,
+            "input_tokens": 18000,
+            "invocation_count": 7,
+            "output_tokens": 700,
+            "total_tokens": 29700,
+            "unpriced_invocations": 1
+          }
+        },
+        "cost_complete": false,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0375,
+            "input_tokens": 12000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": null,
+            "input_tokens": 1000,
+            "model": "unpriced-model",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.06,
+        "total_input_tokens": 18000,
+        "total_output_tokens": 700,
+        "total_tokens": 29700,
+        "unpriced_invocations": 1,
+        "unpriced_models": [
+          "unpriced-model"
+        ]
+      },
+      "verbose": "\ud83d\udcb0 29.7k tokens (>$0.06, 1 unpriced)\n  Supervisor                     29.7k"
+    },
+    {
+      "latest": {
+        "cost_complete": false,
+        "latest_cost_usd": null,
+        "session_total_usd": 0.06,
+        "total_tokens": 29700,
+        "unpriced_invocations": 1
+      },
+      "minimal": "Session cost: >$0.06 (29.7k tokens, cost incomplete)",
+      "summary": {
+        "by_agent": {
+          "supervisor": {
+            "cost_usd": 0.06,
+            "input_tokens": 18000,
+            "invocation_count": 7,
+            "output_tokens": 700,
+            "total_tokens": 29700,
+            "unpriced_invocations": 1
+          }
+        },
+        "cost_complete": false,
+        "invocations": [
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0375,
+            "input_tokens": 12000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 12100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": 0.0045,
+            "input_tokens": 1000,
+            "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          },
+          {
+            "agent": "supervisor",
+            "cost_usd": null,
+            "input_tokens": 1000,
+            "model": "unpriced-model",
+            "output_tokens": 100,
+            "timestamp": "2026-01-01T00:00:00",
+            "tool": null,
+            "total_tokens": 1100
+          }
+        ],
+        "session_id": "same",
+        "total_cost_usd": 0.06,
+        "total_input_tokens": 18000,
+        "total_output_tokens": 700,
+        "total_tokens": 29700,
+        "unpriced_invocations": 1,
+        "unpriced_models": [
+          "unpriced-model"
+        ]
+      },
+      "verbose": "\ud83d\udcb0 29.7k tokens (>$0.06, 1 unpriced)\n  Supervisor                     29.7k"
+    }
+  ]
+}

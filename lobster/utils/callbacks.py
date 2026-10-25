@@ -779,6 +779,19 @@ class TokenInvocation:
     total_tokens: int = 0
     #: ``None`` means the model had no pricing entry, distinct from a zero-valued cost.
     cost_usd: Optional[float] = 0.0
+    # Additive nominal evidence. Legacy input_tokens/cost_usd are NOT repriced.
+    logical_input_tokens: Optional[int] = None
+    logical_output_tokens: Optional[int] = None
+    run_id: Optional[str] = None
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    input_token_basis: Optional[str] = None
+    usage_source: Optional[str] = None
+    usage_complete: bool = False
+    provider: Optional[str] = None
+    provider_source: Optional[str] = None
+    requested_model: Optional[str] = None
 
 
 class TokenTrackingCallback(BaseCallbackHandler):
@@ -843,6 +856,11 @@ class TokenTrackingCallback(BaseCallbackHandler):
 
         # Detailed invocation log
         self.invocations: List[TokenInvocation] = []
+        # Only callbacks we actually receive are observable; SDK retries are not.
+        self.missing_usage_invocations = 0
+        self._usage_context: Dict[str, Dict[str, Optional[str]]] = {}
+        self._terminal_usage_runs: set[str] = set()
+        self.duplicate_usage_invocations = 0
 
         # Track current context (supervisor is always the first agent to run)
         self.current_agent: Optional[str] = "supervisor"
@@ -1006,6 +1024,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
         run_id = kwargs.get("run_id")
         detected_agent = self._extract_agent_name(serialized, kwargs)
         self._update_current_agent(detected_agent, run_id)
+        self._remember_usage_context(kwargs)
 
     def on_chat_model_start(
         self,
@@ -1052,6 +1071,24 @@ class TokenTrackingCallback(BaseCallbackHandler):
 
         detected_agent = self._extract_agent_name(serialized, kwargs_merged)
         self._update_current_agent(detected_agent, run_id)
+        self._remember_usage_context(kwargs_merged)
+
+    def _remember_usage_context(self, kwargs: Dict[str, Any]) -> None:
+        """Keep supplied identity per run; never infer a seller from a model name."""
+        metadata = kwargs.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            return
+        provider = metadata.get("provider") or metadata.get("ls_provider")
+        model = metadata.get("model_id") or metadata.get("ls_model_name")
+        self._usage_context[str(kwargs.get("run_id"))] = {
+            "provider": provider if isinstance(provider, str) else None,
+            "provider_source": (
+                ("metadata" if metadata.get("provider") else "ls_provider")
+                if isinstance(provider, str)
+                else None
+            ),
+            "requested_model": model if isinstance(model, str) else None,
+        }
 
     def on_tool_start(
         self, serialized: Dict[str, Any], input_str: str, **kwargs
@@ -1145,10 +1182,18 @@ class TokenTrackingCallback(BaseCallbackHandler):
         - AWS Bedrock: llm_output["usage"] or response_metadata
         - Standard LangChain: llm_output["token_usage"]["prompt_tokens"]
         """
+        duplicate = self._observe_terminal_usage(kwargs.get("run_id"))
         # Extract token usage from response
         usage = self._extract_token_usage(response)
         if not usage:
-            return  # No token data available, skip silently
+            self.missing_usage_invocations += 1
+            self._usage_context.pop(str(kwargs.get("run_id")), None)
+            return  # Preserve the legacy log and money; expose missing evidence.
+
+        context = self._usage_context.pop(str(kwargs.get("run_id")), {})
+        details = self._extract_usage_details(response, context.get("provider"))
+        if duplicate:
+            details["usage_complete"] = False
 
         # Extract model name
         model = self._extract_model_name(response)
@@ -1168,6 +1213,9 @@ class TokenTrackingCallback(BaseCallbackHandler):
             output_tokens=usage["output_tokens"],
             total_tokens=usage["total_tokens"],
             cost_usd=cost,
+            run_id=str(kwargs["run_id"]) if kwargs.get("run_id") is not None else None,
+            **details,
+            **context,
         )
         self.invocations.append(invocation)
 
@@ -1204,6 +1252,70 @@ class TokenTrackingCallback(BaseCallbackHandler):
         else:
             self.by_agent[agent_name]["cost_usd"] += cost
         self.by_agent[agent_name]["invocation_count"] += 1
+
+    def on_llm_error(
+        self, error: Union[Exception, KeyboardInterrupt], **kwargs
+    ) -> None:
+        """An observed failure without complete usage is not a free invocation."""
+        self._observe_terminal_usage(kwargs.get("run_id"))
+        self.missing_usage_invocations += 1
+        self._usage_context.pop(str(kwargs.get("run_id")), None)
+
+    def _observe_terminal_usage(self, run_id: Any) -> bool:
+        if run_id is None:
+            return False
+        identity = str(run_id)
+        duplicate = identity in self._terminal_usage_runs
+        if duplicate:
+            self.duplicate_usage_invocations += 1
+        self._terminal_usage_runs.add(identity)
+        return duplicate
+
+    def _extract_usage_details(
+        self, response: LLMResult, provider: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Use the public pure normalizer without repricing legacy counters."""
+        from lobster.pricing.usage import normalize_usage
+
+        generations = response.generations or []
+        message = (
+            getattr(generations[0][0], "message", None)
+            if generations and generations[0]
+            else None
+        )
+        metadata = getattr(message, "usage_metadata", None)
+        llm_output = response.llm_output or {}
+        message_metadata = getattr(message, "response_metadata", None)
+        raw = None
+        source = "raw_usage"
+        if isinstance(message_metadata, dict):
+            raw = message_metadata.get("usage") or message_metadata.get("token_usage")
+            if raw is not None:
+                source = "message_response_metadata"
+        if raw is None:
+            raw = llm_output.get("usage") or llm_output.get("token_usage")
+        if raw is None:
+            response_metadata = getattr(response, "response_metadata", None)
+            if isinstance(response_metadata, dict):
+                raw = response_metadata.get("usage") or response_metadata.get(
+                    "token_usage"
+                )
+                source = "response_metadata"
+        if isinstance(metadata, dict):
+            source = "langchain_usage_metadata"
+        normalized = normalize_usage(metadata, raw, provider)
+        return {
+            "logical_input_tokens": normalized.logical_input,
+            "logical_output_tokens": normalized.output_incl_reasoning,
+            "cache_read_tokens": normalized.cache_read,
+            "cache_write_tokens": normalized.cache_write,
+            "reasoning_tokens": normalized.reasoning,
+            "input_token_basis": normalized.basis,
+            "usage_source": source,
+            "usage_complete": normalized.complete
+            and len(generations) <= 1
+            and all(len(group) <= 1 for group in generations),
+        }
 
     def _extract_token_usage(self, response: LLMResult) -> Optional[Dict[str, int]]:
         """
@@ -1410,6 +1522,14 @@ class TokenTrackingCallback(BaseCallbackHandler):
             "cost_complete": self.unpriced_invocations == 0,
             "unpriced_invocations": self.unpriced_invocations,
             "unpriced_models": sorted(self._unpriced_models),
+            "missing_usage_invocations": self.missing_usage_invocations,
+            "pending_usage_invocations": len(self._usage_context),
+            "duplicate_usage_invocations": self.duplicate_usage_invocations,
+            "usage_complete": self.missing_usage_invocations == 0
+            and self.duplicate_usage_invocations == 0
+            and not self._usage_context
+            and all(inv.usage_complete for inv in self.invocations),
+            "attempt_coverage": "callback_only",
             "by_agent": {
                 agent: {
                     "input_tokens": stats["input_tokens"],
@@ -1430,6 +1550,18 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     "input_tokens": inv.input_tokens,
                     "output_tokens": inv.output_tokens,
                     "total_tokens": inv.total_tokens,
+                    "logical_input_tokens": inv.logical_input_tokens,
+                    "logical_output_tokens": inv.logical_output_tokens,
+                    "run_id": inv.run_id,
+                    "cache_read_tokens": inv.cache_read_tokens,
+                    "cache_write_tokens": inv.cache_write_tokens,
+                    "reasoning_tokens": inv.reasoning_tokens,
+                    "input_token_basis": inv.input_token_basis,
+                    "usage_source": inv.usage_source,
+                    "usage_complete": inv.usage_complete,
+                    "provider": inv.provider,
+                    "provider_source": inv.provider_source,
+                    "requested_model": inv.requested_model,
                     # Stays None for an unpriced invocation: round(None) would raise, and
                     # coercing to 0.0 here would reintroduce the bug at the report boundary.
                     "cost_usd": (
@@ -1561,6 +1693,10 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._unpriced_models = set()
         self.by_agent = {}
         self.invocations = []
+        self.missing_usage_invocations = 0
+        self._usage_context = {}
+        self._terminal_usage_runs = set()
+        self.duplicate_usage_invocations = 0
         self.current_agent = "supervisor"  # Supervisor is always first
         self.current_tool = None
         # Reset new tracking state
