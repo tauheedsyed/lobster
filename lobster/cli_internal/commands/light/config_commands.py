@@ -5,6 +5,7 @@ Extracted from cli.py to enable reuse across interfaces.
 All commands accept OutputAdapter for UI-agnostic rendering.
 """
 
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -22,6 +23,45 @@ from lobster.cli_internal.commands.output_adapter import (
     section_block,
     table_block,
 )
+
+logger = logging.getLogger(__name__)
+
+_NCBI_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+
+
+def _check_ncbi_eutils(api_key: Optional[str], timeout: float = 10.0) -> tuple:
+    """Run one NCBI E-utilities search; return (status, message) for config test.
+
+    The response is requested as JSON, so no XML parser touches network data.
+    The API key travels as a query parameter and is masked in any message.
+    """
+    import httpx
+
+    params = {"db": "pubmed", "term": "test", "retmax": "1", "retmode": "json"}
+    if api_key:
+        params["api_key"] = api_key
+
+    def masked(text: str) -> str:
+        return text.replace(api_key, "***") if api_key else text
+
+    try:
+        response = httpx.get(_NCBI_ESEARCH_URL, params=params, timeout=timeout)
+        payload = response.json()
+    except Exception as exc:
+        # Optional probe: any client or transport failure is a failed check.
+        return "fail", masked(str(exc) or type(exc).__name__)[:100]
+
+    if not isinstance(payload, dict):
+        return "fail", f"HTTP {response.status_code}: unexpected response"
+    result = payload.get("esearchresult")
+    error = payload.get("error") or (
+        result.get("ERROR") if isinstance(result, dict) else None
+    )
+    if error:
+        return "fail", masked(str(error))[:100]
+    if response.status_code != 200 or not isinstance(result, dict):
+        return "fail", f"HTTP {response.status_code}: unexpected response"
+    return "pass", "Connected"
 
 
 def _render_blocks(output: OutputAdapter, blocks: list[OutputBlock]) -> None:
@@ -522,9 +562,9 @@ def config_show(client: "AgentClient", output: OutputAdapter) -> Optional[str]:
                     model_source = "profile config"
 
             model_groups[(model_id, model_source)].append(agent_cfg.display_name)
-        except Exception:
+        except Exception as exc:
             # Skip agents with config errors
-            continue
+            logger.debug("Skipping model row for %s: %s", agent_name, exc)
 
     for (model_id, model_source), display_names in sorted(
         model_groups.items(),
@@ -1285,36 +1325,17 @@ def config_test_impl(output_json: bool = False):
     test_results["checks"]["ncbi_api"]["has_key"] = bool(ncbi_key)
 
     if ncbi_key or os.environ.get("NCBI_EMAIL"):
-        try:
-            import urllib.request
-            import xml.etree.ElementTree as ET
-
-            base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-            params = {"db": "pubmed", "term": "test", "retmax": "1", "retmode": "xml"}
-            if ncbi_key:
-                params["api_key"] = ncbi_key
-
-            url = f"{base_url}?" + "&".join([f"{k}={v}" for k, v in params.items()])
-            log("  Testing NCBI E-utilities...", "yellow")
-
-            with urllib.request.urlopen(url, timeout=10) as response:
-                root = ET.fromstring(response.read())
-                error = root.find(".//ERROR")
-                if error is not None:
-                    test_results["checks"]["ncbi_api"]["status"] = "fail"
-                    test_results["checks"]["ncbi_api"]["message"] = error.text
-                    log(f"❌ NCBI API Error: {error.text}", "red")
-                else:
-                    test_results["checks"]["ncbi_api"]["status"] = "pass"
-                    test_results["checks"]["ncbi_api"]["message"] = "Connected"
-                    log(
-                        f"✅ NCBI API: Connected {'(with API key)' if ncbi_key else ''}",
-                        "green",
-                    )
-        except Exception as e:
-            test_results["checks"]["ncbi_api"]["status"] = "fail"
-            test_results["checks"]["ncbi_api"]["message"] = str(e)[:60]
-            log(f"❌ NCBI API: {str(e)[:60]}", "red")
+        log("  Testing NCBI E-utilities...", "yellow")
+        status, message = _check_ncbi_eutils(ncbi_key)
+        test_results["checks"]["ncbi_api"]["status"] = status
+        test_results["checks"]["ncbi_api"]["message"] = message
+        if status == "pass":
+            log(
+                f"✅ NCBI API: Connected {'(with API key)' if ncbi_key else ''}",
+                "green",
+            )
+        else:
+            log(f"❌ NCBI API: {message}", "red")
     else:
         test_results["checks"]["ncbi_api"]["status"] = "skip"
         test_results["checks"]["ncbi_api"]["message"] = "Not configured (optional)"
@@ -1906,15 +1927,10 @@ LOBSTER_PROFILE=production
 # OR use custom configuration file
 # LOBSTER_CONFIG_FILE=config/custom_agent_config.json
 
-# Per-agent model overrides (optional)
-# Available models: claude-haiku, claude-sonnet, claude-sonnet-eu, claude-opus, claude-opus-eu, claude-3-7-sonnet, claude-3-7-sonnet-eu
-# LOBSTER_SUPERVISOR_MODEL=claude-haiku
-# LOBSTER_TRANSCRIPTOMICS_EXPERT_MODEL=claude-opus
-# LOBSTER_METHOD_AGENT_MODEL=claude-sonnet
-# LOBSTER_GENERAL_CONVERSATION_MODEL=claude-haiku
-
-# Global model override (overrides all agents)
-# LOBSTER_GLOBAL_MODEL=claude-sonnet
+# Model selection: use --model, or the workspace/global provider config
+# (lobster config). Per-agent models are set in the workspace config.
+# For AWS Bedrock, this sets the default model when nothing else chooses one:
+# LOBSTER_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-5-5
 
 # Per-agent temperature overrides
 # LOBSTER_SUPERVISOR_TEMPERATURE=0.5
