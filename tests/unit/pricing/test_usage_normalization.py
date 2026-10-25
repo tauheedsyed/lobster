@@ -165,11 +165,11 @@ def test_gemini_candidates_exclude_thoughts_but_prompt_includes_cache(camel):
         }
         if camel
         else {
-            "prompt_token_count": 1000,
-            "candidates_token_count": 60,
-            "thoughts_token_count": 40,
-            "cached_content_token_count": 800,
-            "total_token_count": 1100,
+            "prompt_token_count": 1000,  # nosec B105 - token-count fixture, not a credential
+            "candidates_token_count": 60,  # nosec B105 - token-count fixture, not a credential
+            "thoughts_token_count": 40,  # nosec B105 - token-count fixture, not a credential
+            "cached_content_token_count": 800,  # nosec B105 - token-count fixture, not a credential
+            "total_token_count": 1100,  # nosec B105 - token-count fixture, not a credential
         }
     )
     result = normalize_usage(raw_usage=usage, provider="gemini")

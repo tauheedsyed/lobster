@@ -52,7 +52,10 @@ def test_raw_anthropic_counts_cache_once_without_repricing(tracker):
     assert inv.logical_input_tokens == 12000
     assert inv.cache_read_tokens == 9000
     assert inv.cache_write_tokens == 2000
-    assert inv.input_token_basis == "exclusive"
+    assert (
+        inv.input_token_basis
+        == "exclusive"  # nosec B105 - token-count fixture, not a credential
+    )
     assert inv.usage_complete
     assert inv.cost_usd == pytest.approx(0.0045)
     assert tracker.total_cost_usd == pytest.approx(0.0045)
@@ -74,7 +77,10 @@ def test_langchain_input_and_reasoning_are_already_inclusive(tracker):
     assert inv.logical_input_tokens == 12000  # Not 23000.
     assert inv.output_tokens == 100  # Not 140.
     assert inv.reasoning_tokens == 40
-    assert inv.input_token_basis == "inclusive"
+    assert (
+        inv.input_token_basis
+        == "inclusive"  # nosec B105 - token-count fixture, not a credential
+    )
     assert inv.usage_source == "langchain_usage_metadata"
     assert inv.cost_usd == pytest.approx(0.0375)
     assert inv.usage_complete
