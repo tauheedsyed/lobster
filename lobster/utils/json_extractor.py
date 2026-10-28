@@ -5,6 +5,7 @@ This module provides robust JSON parsing that can extract valid JSON from mixed 
 which is common when LLMs add explanatory text before or after the requested JSON.
 """
 
+import hashlib
 import json
 import re
 from typing import Any, Dict, Optional
@@ -47,7 +48,7 @@ def extract_json_from_text(
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        logger.debug(f"Direct JSON parsing failed: {e}")
+        logger.debug("Direct JSON parsing failed: %s", type(e).__name__)
 
     # Strategy 2: Find JSON objects using regex patterns
     json_patterns = [
@@ -116,13 +117,18 @@ def extract_json_from_text(
                         continue
 
     # All strategies failed
-    logger.warning(f"Failed to extract JSON from text: {text[:200]}...")
+    logger.warning(
+        "Failed to extract JSON (type=%s, length=%d, sha256=%s)",
+        type(text).__name__,
+        len(text),
+        hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest(),
+    )
 
     if fallback_response is not None:
         logger.info("Using fallback response for JSON extraction failure")
         return fallback_response
 
-    raise ValueError(f"Could not extract valid JSON from text: {text[:100]}...")
+    raise ValueError("Could not extract valid JSON from response text")
 
 
 def safe_json_parse(text: str, expected_keys: Optional[list] = None) -> Dict[str, Any]:

@@ -41,7 +41,10 @@ def extract_text_from_llm_response(response: Any, *, allow_empty: bool = False) 
         blocks = getattr(response, "content_blocks", None)
         parts = _text_parts(blocks)
     except Exception as exc:
-        logger.debug("content_blocks extraction failed: %s; using raw content", exc)
+        logger.debug(
+            "content_blocks extraction failed: %s; using raw content",
+            type(exc).__name__,
+        )
         parts = []
     if not parts:
         if isinstance(response, dict):

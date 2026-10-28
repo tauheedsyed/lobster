@@ -6,6 +6,7 @@ LLM structured output for ambiguous/novel question patterns.
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import logging
 import re
@@ -152,14 +153,16 @@ def _llm_select_component(
     except Exception as error:
         reraise_inference_refusal(error)
         logger.debug(
-            "LLM component selection failed, falling back to text_input",
-            exc_info=True,
+            "LLM component selection failed (error_type=%s, response_length=0, response_sha256=%s)",
+            type(error).__name__,
+            hashlib.sha256(b"").hexdigest(),
         )
-        return ComponentSelection(
-            component="text_input",
-            data={"question": question},
-            fallback_prompt=question,
-        )
+    # Do not let a caller-side fallback failure chain model response values.
+    return ComponentSelection(
+        component="text_input",
+        data={"question": question},
+        fallback_prompt=question,
+    )
 
 
 def _has_threshold_context(ctx: Dict[str, Any]) -> bool:

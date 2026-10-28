@@ -12,6 +12,7 @@ replaced with vector database embedding searches for semantic field matching
 in a future release.
 """
 
+import hashlib
 import json
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -300,6 +301,7 @@ class MetadataValidationService(InferenceBoundHelper):
         Returns:
             MetadataValidationConfig object if successful, None otherwise
         """
+        response_text = ""
         try:
             # Normalize required fields
             normalized_required = [
@@ -408,8 +410,11 @@ IMPORTANT:
             try:
                 validation_dict = extract_json_from_text(response_text)
             except ValueError as e:
-                logger.error(f"Failed to parse JSON from LLM response: {e}")
-                logger.debug(f"Response text: {response_text[:500]}...")
+                logger.error(
+                    "Failed to parse JSON from helper response (error_type=%s, length=%d)",
+                    type(e).__name__,
+                    len(response_text),
+                )
 
                 # Create a fallback validation with warnings
                 validation_dict = {
@@ -511,22 +516,30 @@ IMPORTANT:
             raise
         except Exception as e:
             reraise_inference_refusal(e)
-            logger.warning(f"Failed to validate metadata for {geo_id}: {e}")
-
-            # Return a conservative validation result on error
-            return MetadataValidationConfig(
-                has_required_fields=False,
-                missing_fields=required_fields,
-                available_fields={},
-                sample_count_by_field={},
-                total_samples=metadata.get("n_samples", 0),
-                field_coverage={},
-                recommendation="manual_check",
-                severity=ValidationSeverity.WARNING,
-                blocking_issues=[],
-                confidence_score=0.0,
-                warnings=[f"Validation error: {str(e)}"],
+            logger.warning(
+                "Metadata validation failed (error_type=%s, response_length=%d, response_sha256=%s)",
+                type(e).__name__,
+                len(response_text),
+                hashlib.sha256(
+                    response_text.encode("utf-8", errors="surrogatepass")
+                ).hexdigest(),
             )
+
+        # Construct outside the handler so caller-side validation cannot chain
+        # the response-bearing helper exception into a caller traceback.
+        return MetadataValidationConfig(
+            has_required_fields=False,
+            missing_fields=required_fields,
+            available_fields={},
+            sample_count_by_field={},
+            total_samples=metadata.get("n_samples", 0),
+            field_coverage={},
+            recommendation="manual_check",
+            severity=ValidationSeverity.WARNING,
+            blocking_issues=[],
+            confidence_score=0.0,
+            warnings=["Metadata validation failed - manual validation recommended"],
+        )
 
     def format_validation_report(
         self, validation_config: MetadataValidationConfig, geo_id: str
