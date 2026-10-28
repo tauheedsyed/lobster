@@ -441,6 +441,7 @@ def _formula_de_ir(
     reference_levels: Optional[Dict[str, str]],
     alpha: float,
     lfc_threshold: float,
+    count_layer: Optional[str] = None,
 ) -> AnalysisStep:
     """IR for run_de_with_formula: design checks, pyDESeq2 run, results in uns."""
     contrast = list(contrast)
@@ -448,10 +449,14 @@ def _formula_de_ir(
         reference_levels.get(contrast[0]) if reference_levels else None
     )
     results_key = f"de_results_formula_{contrast[0]}_{contrast[1]}_vs_{contrast[2]}"
+    count_source = "layers['counts']" if count_layer else "X"
     return AnalysisStep(
         operation="pydeseq2.formula_differential_expression",
         tool_name="run_de_with_formula",
-        description=f"pyDESeq2 DE with formula {formula}: {contrast[1]} vs {contrast[2]}",
+        description=(
+            f"pyDESeq2 DE with formula {formula}: {contrast[1]} vs {contrast[2]}; "
+            f"whole-number counts from {count_source}"
+        ),
         library="pydeseq2",
         code_template=(
             _BULK_SERVICE_SETUP
@@ -479,6 +484,7 @@ def _formula_de_ir(
             "    pseudobulk_adata=adata,\n"
             "    formula={{ formula | repr }},\n"
             "    contrast={{ contrast | repr }},\n"
+            "    count_layer={{ count_layer | repr }},\n"
             "    alpha={{ alpha | repr }},\n"
             "    shrink_lfc=True,\n"
             "    n_cpus=1,\n"
@@ -492,6 +498,8 @@ def _formula_de_ir(
             "        'alpha': {{ alpha | repr }},\n"
             "        'lfc_threshold': {{ lfc_threshold | repr }},\n"
             "        'reference_levels': {{ reference_levels | repr }},\n"
+            "        'count_layer': {{ count_layer | repr }},\n"
+            "        'count_source': {{ count_source | repr }},\n"
             "    },\n"
             "}\n"
             "adata.uns['de_current_results_key'] = {{ results_key | repr }}"
@@ -505,6 +513,8 @@ def _formula_de_ir(
             "alpha": alpha,
             "lfc_threshold": lfc_threshold,
             "results_key": results_key,
+            "count_layer": count_layer,
+            "count_source": count_source,
         },
         parameter_schema={},
         input_entities=["adata"],
@@ -701,6 +711,59 @@ def de_analysis_expert(
     # -------------------------
     # HELPER FUNCTIONS
     # -------------------------
+    def _deseq2_count_source(adata) -> Tuple[Optional[str], Optional[str]]:
+        """Choose a finite non-negative whole-number matrix for pyDESeq2.
+
+        This numeric check does not establish raw-count provenance.
+        pyDESeq2 casts its input to int, so fractional normalized or
+        log-transformed values would be silently truncated. Returns
+        (count_layer, None), where count_layer None means adata.X, or
+        (None, refusal) when the available matrix fails validation.
+        """
+        from scipy import sparse
+
+        def is_counts(matrix) -> bool:
+            if sparse.issparse(matrix):
+                values = matrix.data
+                blocks = (
+                    values[start : start + 2**20]
+                    for start in range(0, values.size, 2**20)
+                )
+            else:
+                # Bound validation temporaries instead of copying the full matrix.
+                step = max(1, 2**20 // max(1, matrix.shape[1]))
+                blocks = (
+                    np.asarray(matrix[start : start + step])
+                    for start in range(0, matrix.shape[0], step)
+                )
+            return all(
+                np.all(np.isfinite(values))
+                and np.all(values >= 0)
+                and np.all(np.mod(values, 1) == 0)
+                for values in blocks
+            )
+
+        hint = (
+            "DESeq2 needs raw integer counts. Was this pseudobulk matrix "
+            "aggregated from normalized values? Rebuild it from raw counts, "
+            "using layer 'counts' (or load the count matrix), and run again."
+        )
+        if "counts" in adata.layers:
+            if is_counts(adata.layers["counts"]):
+                return "counts", None
+            return None, (
+                "**Raw counts required**: layer 'counts' contains non-finite, "
+                f"negative or non-integer values. {hint}"
+            )
+        if is_counts(adata.X):
+            return None, None
+        return None, (
+            "**Raw counts required**: the pseudobulk expression matrix does not "
+            "hold raw integer counts (non-finite, negative, normalized or "
+            "log-transformed values), and there is no 'counts' layer. "
+            f"{hint}"
+        )
+
     def _extract_raw_counts(adata) -> Tuple[pd.DataFrame, bool]:
         """
         Extract raw counts from AnnData, preferring adata.raw.X.
@@ -1062,7 +1125,9 @@ def de_analysis_expert(
         Auto-detects whether the data is pseudobulk (via adata.uns['pseudobulk_design']
         or adata.uns['formula_design']) and routes to the appropriate analysis method.
 
-        CRITICAL: Uses raw counts from adata.raw.X for DESeq2 accuracy.
+        CRITICAL: For pyDESeq2, require finite non-negative whole-number counts
+        from layer 'counts', or X if no counts layer is present; refuse other
+        values. The numeric check does not establish raw-count provenance.
         Validates minimum replicate requirements (3+ per group).
 
         For complex multi-factor designs with covariates, use run_de_with_formula instead.
@@ -1142,21 +1207,18 @@ def de_analysis_expert(
                 formula = f"~{groupby}"
                 contrast = [groupby, group2, group1]
 
-                # CRITICAL: Extract raw counts for DESeq2
-                count_matrix, used_raw = _extract_raw_counts(adata)
-
-                raw_warning = ""
-                if not used_raw:
-                    raw_warning = (
-                        "\n\n**WARNING**: Using adata.X instead of adata.raw.X. "
-                        "DESeq2 requires raw counts for accurate results."
-                    )
+                # CRITICAL: DESeq2 must run on raw integer counts
+                count_layer, refusal = _deseq2_count_source(adata)
+                if refusal:
+                    return refusal
+                count_source = "layers['counts']" if count_layer else "X"
 
                 results_df, analysis_stats = (
                     bulk_rnaseq_service.run_pydeseq2_from_pseudobulk(
                         pseudobulk_adata=adata,
                         formula=formula,
                         contrast=contrast,
+                        count_layer=count_layer,
                         alpha=alpha,
                         shrink_lfc=shrink_lfc,
                         n_cpus=1,
@@ -1173,7 +1235,9 @@ def de_analysis_expert(
                         "shrink_lfc": shrink_lfc,
                         "formula": formula,
                         "contrast": contrast,
-                        "used_raw_counts": used_raw,
+                        "used_integer_counts": True,
+                        "count_layer": count_layer,
+                        "count_source": count_source,
                         "method": "pydeseq2",
                     },
                 }
@@ -1186,7 +1250,9 @@ def de_analysis_expert(
                 )
 
                 if save_result:
-                    results_path = f"{modality_name}_de_results.csv"
+                    results_path = (
+                        data_manager.exports_dir / f"{modality_name}_de_results.csv"
+                    )
                     results_df.to_csv(results_path)
                     save_path = f"{modality_name}_with_de_results.h5ad"
                     data_manager.save_modality(modality_name, save_path)
@@ -1197,7 +1263,10 @@ def de_analysis_expert(
                 ir = AnalysisStep(
                     operation="pydeseq2.differential_expression",
                     tool_name="run_differential_expression",
-                    description=f"pyDESeq2 DE: {group2} vs {group1} in {groupby}",
+                    description=(
+                        f"pyDESeq2 DE: {group2} vs {group1} in {groupby}; "
+                        f"whole-number counts from {count_source}"
+                    ),
                     library="pydeseq2",
                     parameters={
                         "modality_name": modality_name,
@@ -1206,18 +1275,25 @@ def de_analysis_expert(
                         "group2": group2,
                         "alpha": alpha,
                         "shrink_lfc": shrink_lfc,
+                        "count_layer": count_layer,
+                        "count_source": count_source,
+                        "formula": formula,
+                        "contrast": contrast,
                     },
                     parameter_schema={},
                     code_template=(
-                        "from pydeseq2.dds import DeseqDataSet\n"
-                        "from pydeseq2.ds import DeseqStats\n"
-                        "dds = DeseqDataSet(adata=adata, design_factors={{ groupby | string | repr }})\n"
-                        "dds.deseq2()\n"
-                        "stat_res = DeseqStats(dds, contrast=[{{ groupby | string | repr }}, {{ group2 | string | repr }}, {{ group1 | string | repr }}])\n"
-                        "stat_res.summary()\n"
-                        "results_df = stat_res.results_df"
+                        _BULK_SERVICE_SETUP
+                        + "results_df, de_stats = bulk_service.run_pydeseq2_from_pseudobulk(\n"
+                        "    pseudobulk_adata=adata,\n"
+                        "    formula={{ formula | repr }},\n"
+                        "    contrast={{ contrast | repr }},\n"
+                        "    count_layer={{ count_layer | repr }},\n"
+                        "    alpha={{ alpha | repr }},\n"
+                        "    shrink_lfc={{ shrink_lfc | repr }},\n"
+                        "    n_cpus=1,\n"
+                        ")"
                     ),
-                    imports=["pydeseq2"],
+                    imports=[],
                 )
 
                 ir = _with_current_de_ir(ir, f"de_results_{contrast_name}")
@@ -1231,8 +1307,13 @@ def de_analysis_expert(
                         "method": "pydeseq2",
                         "alpha": alpha,
                         "shrink_lfc": shrink_lfc,
+                        "count_layer": count_layer,
+                        "count_source": count_source,
                     },
-                    description=f"pyDESeq2 analysis: {analysis_stats['n_significant_genes']} significant genes found",
+                    description=(
+                        f"pyDESeq2 analysis: {analysis_stats['n_significant_genes']} significant genes found; "
+                        f"whole-number counts from {count_source}"
+                    ),
                     ir=ir,
                     agent=agent_name,
                 )
@@ -1257,7 +1338,7 @@ def de_analysis_expert(
 - Method: pyDESeq2 (pseudobulk)
 - LFC shrinkage: {"Yes" if shrink_lfc else "No"}
 - Significance threshold: {alpha}
-- Used raw counts: {"Yes" if used_raw else "No (WARNING)"}{raw_warning}
+- Used whole-number counts from: {count_source}
 
 **Results stored in**: adata.uns['de_results_{contrast_name}']"""
 
@@ -1847,7 +1928,9 @@ def de_analysis_expert(
         """
         Run DE with a custom formula for complex multi-factor designs (covariates, interactions, batch correction).
 
-        Uses pyDESeq2 for analysis with RAW COUNTS from adata.raw.X.
+        Uses pyDESeq2 on finite non-negative whole-number counts: layer 'counts'
+        when present, otherwise the expression matrix. Other values are refused.
+        This numeric check does not establish raw-count provenance.
         For simple 2-group comparisons, use run_differential_expression instead.
 
         Args:
@@ -1866,6 +1949,10 @@ def de_analysis_expert(
 
             # Get the pseudobulk data
             adata = data_manager.get_modality(pseudobulk_modality)
+            count_layer, refusal = _deseq2_count_source(adata)
+            if refusal:
+                return refusal
+            count_source = "layers['counts']" if count_layer else "X"
 
             # Use stored formula if none provided
             if formula is None:
@@ -1935,6 +2022,7 @@ def de_analysis_expert(
                     pseudobulk_adata=adata,
                     formula=formula,
                     contrast=contrast,
+                    count_layer=count_layer,
                     alpha=alpha,
                     shrink_lfc=True,
                     n_cpus=1,
@@ -1961,6 +2049,8 @@ def de_analysis_expert(
                     "alpha": alpha,
                     "lfc_threshold": lfc_threshold,
                     "reference_levels": reference_levels,
+                    "count_layer": count_layer,
+                    "count_source": count_source,
                 },
             }
 
@@ -1974,7 +2064,10 @@ def de_analysis_expert(
 
             # Save results if requested
             if save_results:
-                results_path = f"{pseudobulk_modality}_formula_de_results.csv"
+                results_path = (
+                    data_manager.exports_dir
+                    / f"{pseudobulk_modality}_formula_de_results.csv"
+                )
                 results_df.to_csv(results_path)
 
                 modality_path = f"{pseudobulk_modality}_with_formula_results.h5ad"
@@ -1984,6 +2077,7 @@ def de_analysis_expert(
             response = "## Differential Expression Analysis Complete\n\n"
             response += response_prefix
             response += f"**Formula**: `{formula}`\n"
+            response += f"**Count matrix**: {count_source} (whole-number counts)\n"
             response += (
                 f"**Contrast**: {contrast[1]} vs {contrast[2]} (in {contrast[0]})\n\n"
             )
@@ -2028,10 +2122,20 @@ def de_analysis_expert(
                     "contrast": contrast,
                     "alpha": alpha,
                     "lfc_threshold": lfc_threshold,
+                    "count_layer": count_layer,
+                    "count_source": count_source,
                 },
-                description=f"Formula-based DE analysis: {analysis_stats['n_significant_genes']} significant genes",
+                description=(
+                    f"Formula-based DE analysis: {analysis_stats['n_significant_genes']} significant genes; "
+                    f"whole-number counts from {count_source}"
+                ),
                 ir=_formula_de_ir(
-                    formula, contrast, reference_levels, alpha, lfc_threshold
+                    formula,
+                    contrast,
+                    reference_levels,
+                    alpha,
+                    lfc_threshold,
+                    count_layer=count_layer,
                 ),
                 agent=agent_name,
             )
@@ -2865,12 +2969,7 @@ def de_analysis_expert(
 
             # Determine output path
             if output_path is None:
-                export_dir = (
-                    Path(data_manager.workspace) / "exports"
-                    if hasattr(data_manager, "workspace")
-                    else Path("exports")
-                )
-                export_dir.mkdir(parents=True, exist_ok=True)
+                export_dir = data_manager.exports_dir
 
                 suffix = "_filtered" if filtered_only else ""
                 clean_key = de_results_key.replace("de_results_", "")
@@ -2878,9 +2977,12 @@ def de_analysis_expert(
                     export_dir / f"de_results_{clean_key}{suffix}.{output_format}"
                 )
 
-            # Export
+            # Export (relative paths are rooted in the session exports directory)
             output_path_obj = Path(output_path)
+            if not output_path_obj.is_absolute():
+                output_path_obj = data_manager.exports_dir / output_path_obj
             output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            output_path = str(output_path_obj.resolve())
 
             if output_format == "xlsx":
                 try:
@@ -3491,21 +3593,19 @@ def de_analysis_expert(
 
             # Determine output path
             if output_path is None:
-                export_dir = (
-                    Path(data_manager.workspace) / "exports"
-                    if hasattr(data_manager, "workspace")
-                    else Path("exports")
-                )
-                export_dir.mkdir(parents=True, exist_ok=True)
+                export_dir = data_manager.exports_dir
 
                 clean_key = de_results_key.replace("de_results_", "")
                 output_path = str(
                     export_dir / f"de_publication_{clean_key}.{output_format}"
                 )
 
-            # Export
+            # Export (relative paths are rooted in the session exports directory)
             output_path_obj = Path(output_path)
+            if not output_path_obj.is_absolute():
+                output_path_obj = data_manager.exports_dir / output_path_obj
             output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            output_path = str(output_path_obj.resolve())
 
             if output_format == "xlsx":
                 try:

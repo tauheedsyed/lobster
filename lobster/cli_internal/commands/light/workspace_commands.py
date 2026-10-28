@@ -989,9 +989,11 @@ def workspace_status(
                         rows.append(["Var Columns", var_preview])
 
                     # Show layers
-                    if adata.layers:
-                        layers_str = ", ".join(list(adata.layers.keys()))
-                        rows.append(["Layers", layers_str])
+                    from lobster.core.utils.layer_keys import layer_names
+
+                    layers = layer_names(adata)
+                    if layers:
+                        rows.append(["Layers", ", ".join(layers)])
 
                     # Show obsm
                     if adata.obsm:

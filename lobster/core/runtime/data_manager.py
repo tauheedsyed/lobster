@@ -58,6 +58,7 @@ from lobster.core.provenance.provenance import ProvenanceTracker
 from lobster.core.queues.queue_storage import atomic_write_json, queue_file_lock
 from lobster.core.runtime.workspace import resolve_workspace
 from lobster.core.utils.h5ad_utils import validate_for_h5ad
+from lobster.core.utils.layer_keys import layer_names
 
 # Import for IR support (TYPE_CHECKING to avoid circular import)
 if TYPE_CHECKING:
@@ -2103,7 +2104,7 @@ class DataManagerV2:
                     "shape": adata.shape,
                     "obs_columns": list(adata.obs.columns)[:10],  # First 10 columns
                     "var_columns": list(adata.var.columns)[:10],  # First 10 columns
-                    "layers": list(adata.layers.keys()) if adata.layers else [],
+                    "layers": layer_names(adata),
                     "obsm": list(adata.obsm.keys()) if adata.obsm else [],
                 }
 
@@ -3007,11 +3008,7 @@ class DataManagerV2:
                             if hasattr(adata, "var") and adata.var is not None
                             else 0
                         ),
-                        "layers": (
-                            len(adata.layers)
-                            if hasattr(adata, "layers") and adata.layers
-                            else 0
-                        ),
+                        "layers": len(layer_names(adata)),
                         "memory_usage": self._get_safe_memory_usage(adata.X),
                         "is_sparse": self._is_sparse_matrix(adata.X),
                     }
@@ -3205,10 +3202,7 @@ class DataManagerV2:
     def _get_safe_layers(self, adata) -> list:
         """Safely get layer names."""
         try:
-            if hasattr(adata, "layers") and adata.layers is not None:
-                return list(adata.layers.keys())
-            else:
-                return []
+            return layer_names(adata)
         except Exception:
             return []
 
@@ -3544,10 +3538,9 @@ class DataManagerV2:
                     summary += f"- Observation metadata: {', '.join(list(adata.obs.columns)[:5])}\n"
                 if adata.var.columns.tolist():
                     summary += f"- Variable metadata: {', '.join(list(adata.var.columns)[:5])}\n"
-                if adata.layers:
-                    summary += (
-                        f"- Data layers: {', '.join(list(adata.layers.keys()))}\n"
-                    )
+                layers = layer_names(adata)
+                if layers:
+                    summary += f"- Data layers: {', '.join(layers)}\n"
                 summary += "\n"
 
         # Add processing log
@@ -3724,7 +3717,7 @@ class DataManagerV2:
                             "n_vars": adata.n_vars,
                             "obs_columns": adata.obs.columns.tolist(),
                             "var_columns": adata.var.columns.tolist(),
-                            "layers": list(adata.layers.keys()) if adata.layers else [],
+                            "layers": layer_names(adata),
                             "obsm_keys": list(adata.obsm.keys()) if adata.obsm else [],
                             "uns_keys": list(adata.uns.keys()) if adata.uns else [],
                             "is_sparse": hasattr(adata.X, "toarray"),

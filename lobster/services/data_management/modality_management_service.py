@@ -15,6 +15,7 @@ from scipy import sparse
 
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.provenance.analysis_ir import AnalysisStep
+from lobster.core.utils.layer_keys import layer_names
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -132,7 +133,7 @@ class ModalityManagementService:
                 "shape": {"n_obs": adata.n_obs, "n_vars": adata.n_vars},
                 "obs_columns": list(adata.obs.columns),
                 "var_columns": list(adata.var.columns),
-                "layers": list(adata.layers.keys()) if hasattr(adata, "layers") else [],
+                "layers": layer_names(adata),
                 "obsm_keys": list(adata.obsm.keys()) if hasattr(adata, "obsm") else [],
                 "varm_keys": list(adata.varm.keys()) if hasattr(adata, "varm") else [],
                 "uns_keys": list(adata.uns.keys()) if hasattr(adata, "uns") else [],

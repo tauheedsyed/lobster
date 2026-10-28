@@ -1062,6 +1062,13 @@ def annotation_expert(
                 export_data["cluster_to_celltype"] = cluster_mapping
                 export_data["cluster_column"] = cluster_col
 
+            # Relative outputs belong to the session exports directory.
+            output_path = Path(output_filename)
+            if not output_path.is_absolute():
+                output_path = data_manager.exports_dir / output_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_filename = str(output_path.resolve())
+
             # Export based on format
             if format.lower() == "json":
                 with open(output_filename, "w") as f:

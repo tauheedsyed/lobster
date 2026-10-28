@@ -30,6 +30,7 @@ from lobster.config.inference_runtime import capture_inference_binding
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
+from lobster.core.utils.layer_keys import layer_names
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -136,7 +137,7 @@ class SDKDelegationService:
                     "shape": f"{adata.n_obs} observations × {adata.n_vars} variables",
                     "obs_columns": list(adata.obs.columns)[:10],  # First 10
                     "var_columns": list(adata.var.columns)[:10],  # First 10
-                    "layers": list(adata.layers.keys()) if adata.layers else [],
+                    "layers": layer_names(adata),
                     "obsm_keys": list(adata.obsm.keys()) if adata.obsm else [],
                     "uns_keys": list(adata.uns.keys()) if adata.uns else [],
                 }

@@ -881,8 +881,10 @@ def _validate_gene_abundance(adata) -> "ValidationResult":
                 "This is unusual for shotgun metagenomics data."
             )
 
-    # Check for sparsity
-    if hasattr(adata.X, "data"):  # Sparse matrix
+    # Check for sparsity (a dense ndarray also has .data, a memoryview)
+    from scipy.sparse import issparse
+
+    if issparse(adata.X):  # Sparse matrix
         zero_pct = (adata.X.data == 0).sum() / adata.X.data.size * 100
     else:  # Dense matrix
         zero_pct = (adata.X == 0).sum() / adata.X.size * 100

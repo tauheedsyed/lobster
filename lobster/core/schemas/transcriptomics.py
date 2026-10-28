@@ -1055,6 +1055,7 @@ def _validate_gene_symbols(adata) -> "ValidationResult":
 def _validate_count_data(adata) -> "ValidationResult":
     """Validate count data characteristics."""
     import numpy as np
+    from scipy.sparse import issparse
 
     from lobster.core.interfaces.validator import ValidationResult
 
@@ -1071,11 +1072,16 @@ def _validate_count_data(adata) -> "ValidationResult":
     # Check for non-integer values in what should be count data
     if hasattr(adata.X, "dtype"):
         if np.issubdtype(adata.X.dtype, np.floating):
-            # Check if values are effectively integers
-            if hasattr(adata.X, "data"):  # Sparse matrix
-                non_int_values = (adata.X.data % 1 != 0).sum()
-            else:  # Dense matrix
-                non_int_values = (adata.X % 1 != 0).sum()
+            # Check if values are effectively integers. A dense ndarray also has
+            # a .data attribute (a memoryview), so test for sparse explicitly.
+            if issparse(adata.X):
+                non_int_values = int(np.count_nonzero(adata.X.data % 1))
+            else:  # Dense matrix, in row blocks to bound the temporary copy
+                step = max(1, 2**24 // max(1, adata.X.shape[1]))
+                non_int_values = sum(
+                    int(np.count_nonzero(adata.X[start : start + step] % 1))
+                    for start in range(0, adata.X.shape[0], step)
+                )
 
             if non_int_values > 0:
                 result.add_info(

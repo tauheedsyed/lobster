@@ -17,6 +17,7 @@ import mudata
 import numpy as np
 
 from lobster.core.backends.base import BaseBackend
+from lobster.core.utils.layer_keys import layer_names
 
 MUDATA_AVAILABLE = True
 
@@ -343,7 +344,7 @@ class MuDataBackend(BaseBackend):
                 "n_vars": mod_data.n_vars,
                 "obs_columns": list(mod_data.obs.columns),
                 "var_columns": list(mod_data.var.columns),
-                "layers": list(mod_data.layers.keys()) if mod_data.layers else [],
+                "layers": layer_names(mod_data),
                 "obsm": list(mod_data.obsm.keys()) if mod_data.obsm else [],
                 "varm": list(mod_data.varm.keys()) if mod_data.varm else [],
                 "uns": list(mod_data.uns.keys()) if mod_data.uns else [],

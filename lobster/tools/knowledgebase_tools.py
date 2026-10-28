@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 from langchain_core.tools import tool
 
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
+from lobster.core.utils.layer_keys import layer_names
 from lobster.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -636,7 +637,7 @@ def create_summarize_modality_tool(data_manager: DataManagerV2):
                     try:
                         adata = data_manager.get_modality(mod_name)
                         data_type = adata.uns.get("data_type", "unknown")
-                        layers = list(adata.layers.keys()) if adata.layers else []
+                        layers = layer_names(adata)
                         lines.append(
                             f"  - **{mod_name}** ({data_type}): "
                             f"{adata.n_obs:,} obs x {adata.n_vars:,} vars"
@@ -679,7 +680,7 @@ def create_summarize_modality_tool(data_manager: DataManagerV2):
                     f"**Source file:** {source_file}",
                     f"\n**obs columns ({len(adata.obs.columns)}):** {list(adata.obs.columns)}",
                     f"**var columns ({len(adata.var.columns)}):** {list(adata.var.columns)}",
-                    f"**Layers:** {list(adata.layers.keys()) if adata.layers else 'None'}",
+                    f"**Layers:** {layer_names(adata) or 'None'}",
                     f"**obsm keys:** {list(adata.obsm.keys()) if adata.obsm else 'None'}",
                     f"**uns keys:** {list(adata.uns.keys()) if adata.uns else 'None'}",
                     f"**QC metrics present:** {'Yes' if has_qc else 'No'}",

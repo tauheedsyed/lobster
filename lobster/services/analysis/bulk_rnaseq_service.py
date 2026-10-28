@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import anndata
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from lobster.core import FormulaError
 from lobster.core.provenance.analysis_ir import AnalysisStep
@@ -1618,19 +1619,16 @@ Next suggested step: Import quantification data with tximport for differential e
         try:
             logger.info("Running pyDESeq2 analysis on pseudobulk data")
 
-            # Extract count matrix
+            # Extract the selected counts without changing their dtype or labels.
             if count_layer and count_layer in pseudobulk_adata.layers:
-                count_matrix = pd.DataFrame(
-                    pseudobulk_adata.layers[count_layer].T,
-                    index=pseudobulk_adata.var_names,
-                    columns=pseudobulk_adata.obs_names,
-                )
+                counts = pseudobulk_adata.layers[count_layer]
             else:
-                count_matrix = pd.DataFrame(
-                    pseudobulk_adata.X.T,
-                    index=pseudobulk_adata.var_names,
-                    columns=pseudobulk_adata.obs_names,
-                )
+                counts = pseudobulk_adata.X
+            count_matrix = pd.DataFrame(
+                safe_toarray(counts.T) if sparse.issparse(counts) else counts.T,
+                index=pseudobulk_adata.var_names,
+                columns=pseudobulk_adata.obs_names,
+            )
 
             # Extract metadata
             metadata = pseudobulk_adata.obs.copy()

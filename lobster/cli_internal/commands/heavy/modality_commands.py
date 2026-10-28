@@ -267,9 +267,11 @@ def modalities_list(client: "AgentClient", output: OutputAdapter) -> Optional[st
                 mod_table_data["rows"].append(["Var Columns", var_preview])
 
             # Show layers
-            if adata.layers:
-                layers_str = ", ".join(list(adata.layers.keys()))
-                mod_table_data["rows"].append(["Layers", layers_str])
+            from lobster.core.utils.layer_keys import layer_names
+
+            layers = layer_names(adata)
+            if layers:
+                mod_table_data["rows"].append(["Layers", ", ".join(layers)])
 
             # Show obsm
             if adata.obsm:
@@ -477,9 +479,14 @@ def modality_describe(
         emit("\n[bold white]📦 Additional Data Structures[/bold white]", style="info")
 
         # Layers
-        if adata.layers:
-            emit(f"\n[cyan]Layers ({len(adata.layers)}):[/cyan]", style="info")
+        from lobster.core.utils.layer_keys import layer_names
+
+        layers = layer_names(adata)
+        if layers:
+            emit(f"\n[cyan]Layers ({len(layers)}):[/cyan]", style="info")
             for layer_name, layer_data in adata.layers.items():
+                if layer_name is None:  # .X alias, see layer_names()
+                    continue
                 layer_info = _get_matrix_info(layer_data)
                 emit(
                     f"  • {layer_name}: {layer_info['shape'][0]}×{layer_info['shape'][1]} {layer_info['dtype']}",

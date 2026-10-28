@@ -112,6 +112,16 @@ def _resolve_filesystem_root(
     return resolved
 
 
+def _display_names(keys, *, layers: bool = False) -> List[str]:
+    """AnnData keys/columns as display strings for tool output.
+
+    Keys and column labels need not be str (int columns, None). anndata>=0.13
+    lists ``.X`` in ``.layers`` under the key ``None``: that is not a layer, so it
+    is skipped for layers only.
+    """
+    return [str(key) for key in keys if not (layers and key is None)]
+
+
 def _resolve_relative_file_argument(file_root: Optional[Path], file_path: str) -> str:
     """Resolve relative user file inputs against the agent file root."""
     file_path_obj = Path(file_path)
@@ -541,24 +551,31 @@ You can now analyze this dataset using the appropriate analysis tools.
             response += f"**Shape**: {info['shape']['n_obs']} obs × {info['shape']['n_vars']} vars\n"
             response += f"**Sparse**: {info['is_sparse']}\n\n"
 
+            obs_columns = _display_names(info["obs_columns"])
+            var_columns = _display_names(info["var_columns"])
+            layers = _display_names(info["layers"], layers=True)
+            obsm_keys = _display_names(info["obsm_keys"])
+            varm_keys = _display_names(info["varm_keys"])
+            uns_keys = _display_names(info["uns_keys"])
+
             response += "**Observation Columns**:\n"
-            response += f"  {', '.join(info['obs_columns'][:10])}\n"
-            if len(info["obs_columns"]) > 10:
-                response += f"  ... and {len(info['obs_columns']) - 10} more\n"
+            response += f"  {', '.join(obs_columns[:10])}\n"
+            if len(obs_columns) > 10:
+                response += f"  ... and {len(obs_columns) - 10} more\n"
 
             response += "\n**Variable Columns**:\n"
-            response += f"  {', '.join(info['var_columns'][:10])}\n"
-            if len(info["var_columns"]) > 10:
-                response += f"  ... and {len(info['var_columns']) - 10} more\n"
+            response += f"  {', '.join(var_columns[:10])}\n"
+            if len(var_columns) > 10:
+                response += f"  ... and {len(var_columns) - 10} more\n"
 
-            if info["layers"]:
-                response += f"\n**Layers**: {', '.join(info['layers'])}\n"
-            if info["obsm_keys"]:
-                response += f"**Obsm Keys**: {', '.join(info['obsm_keys'])}\n"
-            if info["varm_keys"]:
-                response += f"**Varm Keys**: {', '.join(info['varm_keys'])}\n"
-            if info["uns_keys"]:
-                response += f"**Uns Keys**: {', '.join(info['uns_keys'])}\n"
+            if layers:
+                response += f"\n**Layers**: {', '.join(layers)}\n"
+            if obsm_keys:
+                response += f"**Obsm Keys**: {', '.join(obsm_keys)}\n"
+            if varm_keys:
+                response += f"**Varm Keys**: {', '.join(varm_keys)}\n"
+            if uns_keys:
+                response += f"**Uns Keys**: {', '.join(uns_keys)}\n"
 
             if info["quality_metrics"]:
                 response += f"\n**Quality Metrics**: {len(info['quality_metrics'])} metrics available\n"

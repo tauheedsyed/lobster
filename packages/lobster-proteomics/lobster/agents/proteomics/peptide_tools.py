@@ -502,7 +502,7 @@ def create_peptide_tools(
         if output_format == "csv":
             import re as _re
             safe_name = _re.sub(r'[^\w\-]', '_', modality_name)
-            csv_path = (workspace_path or Path(".")) / f"{safe_name}_report.csv"
+            csv_path = data_manager.exports_dir / f"{safe_name}_report.csv"
             adata.obs.to_csv(csv_path)
 
             data_manager.log_tool_usage(

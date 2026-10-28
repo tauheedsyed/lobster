@@ -528,8 +528,10 @@ def _validate_genotype_data(adata) -> "ValidationResult":
                 f"Genotype values > 2 found (max: {max_val}), possible multi-allelic sites"
             )
 
-        # Check missing data rate
-        if hasattr(gt, "data"):  # Sparse matrix
+        # Check missing data rate (a dense ndarray also has .data, a memoryview)
+        from scipy.sparse import issparse
+
+        if issparse(gt):  # Sparse matrix
             missing_count = (gt.data == -1).sum()
             total_count = gt.data.size
         else:  # Dense matrix
