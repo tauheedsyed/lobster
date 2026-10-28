@@ -81,7 +81,7 @@ dependencies = [
     "tomli_w>=1.0",
     "psutil>=7.0.0",
     # Go TUI (default chat UI on supported platforms)
-    'lobster-ai-tui~=1.1.0; platform_system != "Windows"',
+    'lobster-ai-tui~=1.2; platform_system != "Windows"',
 ]
 
 [project.optional-dependencies]
@@ -126,7 +126,7 @@ classic-tui = ["textual>=6.7.1"]
 # Semantic Vector Search (optional, installed via `lobster init`)
 # =============================================================================
 vector-search = [
-    "lobster-vector[chromadb,openai]~=1.1.0",
+    "lobster-vector[chromadb,openai]~=1.2",
 ]
 
 # =============================================================================
@@ -152,28 +152,28 @@ extended-data = [
 #   pip install lobster-ai[full]               # Everything
 # =============================================================================
 transcriptomics = [
-    "lobster-transcriptomics[batch-integration]~=1.1.0",
-    "lobster-research~=1.1.0",
-    "lobster-visualization~=1.1.0",
+    "lobster-transcriptomics[batch-integration]~=1.2",
+    "lobster-research~=1.2",
+    "lobster-visualization~=1.2",
 ]
 # Doublet detection requires scrublet → annoy (C++ compilation).
 # Install separately: pip install lobster-transcriptomics[doublet-detection]
 doublet-detection = [
-    "lobster-transcriptomics[doublet-detection]~=1.1.0",
+    "lobster-transcriptomics[doublet-detection]~=1.2",
 ]
 genomics = [
-    "lobster-genomics~=1.1.0",
-    "lobster-research~=1.1.0",
-    "lobster-visualization~=1.1.0",
+    "lobster-genomics~=1.2",
+    "lobster-research~=1.2",
+    "lobster-visualization~=1.2",
 ]
 proteomics = [
-    "lobster-proteomics[network-analysis]~=1.1.0",
-    "lobster-research~=1.1.0",
-    "lobster-visualization~=1.1.0",
+    "lobster-proteomics[network-analysis]~=1.2",
+    "lobster-research~=1.2",
+    "lobster-visualization~=1.2",
 ]
 research = [
-    "lobster-research~=1.1.0",
-    "lobster-visualization~=1.1.0",
+    "lobster-research~=1.2",
+    "lobster-visualization~=1.2",
 ]
 plink = [
     "bed-reader>=0.2.0",
@@ -523,7 +523,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [tool.bumpversion]
-current_version = "1.1.433"
+current_version = "1.2.0"
 commit = true
 tag = true
 

@@ -51,6 +51,15 @@ class TestPyprojectTemplate:
         deps = parsed["project"]["dependencies"]
         assert any("lobster-ai" in d for d in deps)
 
+    def test_lobster_ai_pin_tracks_engine_minor(self):
+        """The generated pin follows the engine's major.minor, so a version bump cannot leave it behind."""
+        from lobster.version import __version__
+
+        major, minor = __version__.split(".")[:2]
+        content = _render_template("pyproject.toml.j2", self.CONTEXT)
+        deps = tomllib.loads(content)["project"]["dependencies"]
+        assert f"lobster-ai~={major}.{minor}" in deps
+
     def test_state_entry_point(self):
         """Must have state entry point."""
         content = _render_template("pyproject.toml.j2", self.CONTEXT)
