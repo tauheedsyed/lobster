@@ -861,6 +861,10 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._usage_context: Dict[str, Dict[str, Optional[str]]] = {}
         self._terminal_usage_runs: set[str] = set()
         self.duplicate_usage_invocations = 0
+        # Sparse additive evidence: absent on every legacy/no-cache summary.
+        self._cache_cost_evidence: Dict[int, Dict[str, Any]] = {}
+        self._cache_provider_labels: Dict[str, Optional[str]] = {}
+        self._cache_identity_conflicts: set[str] = set()
 
         # Track current context (supervisor is always the first agent to run)
         self.current_agent: Optional[str] = "supervisor"
@@ -1080,7 +1084,18 @@ class TokenTrackingCallback(BaseCallbackHandler):
             return
         provider = metadata.get("provider") or metadata.get("ls_provider")
         model = metadata.get("model_id") or metadata.get("ls_model_name")
-        self._usage_context[str(kwargs.get("run_id"))] = {
+        identity = str(kwargs.get("run_id"))
+        label = metadata.get("ls_provider")
+        self._cache_provider_labels[identity] = (
+            label if isinstance(label, str) else None
+        )
+        if (
+            metadata.get("provider") is not None
+            and label is not None
+            and metadata["provider"] != label
+        ):
+            self._cache_identity_conflicts.add(identity)
+        self._usage_context[identity] = {
             "provider": provider if isinstance(provider, str) else None,
             "provider_source": (
                 ("metadata" if metadata.get("provider") else "ls_provider")
@@ -1183,6 +1198,10 @@ class TokenTrackingCallback(BaseCallbackHandler):
         - Standard LangChain: llm_output["token_usage"]["prompt_tokens"]
         """
         duplicate = self._observe_terminal_usage(kwargs.get("run_id"))
+        identity = str(kwargs.get("run_id"))
+        cache_provider = self._cache_provider_labels.pop(identity, None)
+        provider_conflict = identity in self._cache_identity_conflicts
+        self._cache_identity_conflicts.discard(identity)
         # Extract token usage from response
         usage = self._extract_token_usage(response)
         if not usage:
@@ -1198,10 +1217,69 @@ class TokenTrackingCallback(BaseCallbackHandler):
         # Extract model name
         model = self._extract_model_name(response)
 
-        # Calculate cost
-        cost = self._calculate_cost(
-            model, usage["input_tokens"], usage["output_tokens"]
+        # Keep the exact legacy calculation unless cache evidence supports a
+        # better-founded amount. Unknown cached dimensions retain today's cost.
+        from lobster.pricing.cache_cost import price_cache_usage
+        from lobster.pricing.usage import NormalizedUsage
+
+        metadata, raw, _ = self._usage_observations(response)
+        normalized = NormalizedUsage(
+            details["logical_input_tokens"],
+            details["logical_output_tokens"],
+            details["cache_read_tokens"],
+            details["cache_write_tokens"],
+            details["reasoning_tokens"],
+            details["input_token_basis"],
+            details["usage_complete"],
         )
+        decision = price_cache_usage(
+            normalized,
+            provider=cache_provider,
+            model_id=model,
+            usage_metadata=metadata,
+            raw_usage=raw,
+        )
+        if decision.status != "legacy" and (
+            provider_conflict
+            or (context.get("requested_model") and context["requested_model"] != model)
+        ):
+            from lobster.pricing.cache_cost import CacheCostDecision
+
+            decision = CacheCostDecision(
+                "legacy_fallback", None, "pricing_identity_conflict", None
+            )
+        if decision.status == "catalog":
+            cost = float(decision.cost)
+        else:
+            if (
+                decision.status == "legacy_fallback"
+                and model not in self.pricing_config
+                and not self._is_local_model(model)
+            ):
+                # The single typed cache warning replaces the generic model-value
+                # warning; the legacy unknown-price result remains exactly None.
+                self._unpriced_models.add(model)
+            cost = self._calculate_cost(
+                model, usage["input_tokens"], usage["output_tokens"]
+            )
+        if decision.status != "legacy":
+            evidence = {
+                "cache_cost_status": "unpriced" if cost is None else decision.status
+            }
+            if decision.reason:
+                evidence["cache_cost_reason"] = decision.reason
+            if decision.snapshot:
+                evidence["cache_cost_snapshot"] = decision.snapshot
+            self._cache_cost_evidence[len(self.invocations)] = evidence
+            if decision.status == "legacy_fallback":
+                logger.warning(
+                    "Cache cost fallback: reason=%s; logical_input_type=%s; "
+                    "cache_read_type=%s; cache_write_type=%s",
+                    decision.reason,
+                    type(normalized.logical_input).__name__,
+                    type(normalized.cache_read).__name__,
+                    type(normalized.cache_write).__name__,
+                )
 
         # Create invocation record
         invocation = TokenInvocation(
@@ -1260,6 +1338,8 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._observe_terminal_usage(kwargs.get("run_id"))
         self.missing_usage_invocations += 1
         self._usage_context.pop(str(kwargs.get("run_id")), None)
+        self._cache_provider_labels.pop(str(kwargs.get("run_id")), None)
+        self._cache_identity_conflicts.discard(str(kwargs.get("run_id")))
 
     def _observe_terminal_usage(self, run_id: Any) -> bool:
         if run_id is None:
@@ -1271,12 +1351,8 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._terminal_usage_runs.add(identity)
         return duplicate
 
-    def _extract_usage_details(
-        self, response: LLMResult, provider: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Use the public pure normalizer without repricing legacy counters."""
-        from lobster.pricing.usage import normalize_usage
-
+    def _usage_observations(self, response: LLMResult):
+        """Extract the existing metadata/native evidence without logging values."""
         generations = response.generations or []
         message = (
             getattr(generations[0][0], "message", None)
@@ -1303,7 +1379,24 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 source = "response_metadata"
         if isinstance(metadata, dict):
             source = "langchain_usage_metadata"
-        normalized = normalize_usage(metadata, raw, provider)
+        return metadata, raw, source
+
+    def _extract_usage_details(
+        self, response: LLMResult, provider: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Normalize counts, retaining literal inactive behavior and warnings."""
+        from lobster.pricing.cache_cost import (
+            cache_observations_active,
+            normalize_cache_observations,
+        )
+        from lobster.pricing.usage import normalize_usage
+
+        metadata, raw, source = self._usage_observations(response)
+        if cache_observations_active(metadata, raw):
+            normalized = normalize_cache_observations(metadata, raw, provider)
+        else:
+            normalized = normalize_usage(metadata, raw, provider)
+        generations = response.generations or []
         return {
             "logical_input_tokens": normalized.logical_input,
             "logical_output_tokens": normalized.output_incl_reasoning,
@@ -1567,8 +1660,9 @@ class TokenTrackingCallback(BaseCallbackHandler):
                     "cost_usd": (
                         None if inv.cost_usd is None else round(inv.cost_usd, 4)
                     ),
+                    **self._cache_cost_evidence.get(index, {}),
                 }
-                for inv in self.invocations
+                for index, inv in enumerate(self.invocations)
             ],
         }
 
@@ -1689,6 +1783,9 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self.total_output_tokens = 0
         self.total_tokens = 0
         self.total_cost_usd = 0.0
+        self._cache_cost_evidence.clear()
+        self._cache_provider_labels.clear()
+        self._cache_identity_conflicts.clear()
         self.unpriced_invocations = 0
         self._unpriced_models = set()
         self.by_agent = {}

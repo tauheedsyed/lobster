@@ -1,0 +1,62 @@
+{
+  "captured_at": "2026-10-27T17:22:18Z",
+  "source_sha256": "4800271885184130e4b279619419027879fed8f41c815326aa8e5b6a1127d436",
+  "calls": [
+    {
+      "model_id": "global.anthropic.claude-sonnet-5-5",
+      "api_type": "converse",
+      "usage": {
+        "inputTokens": 13,
+        "outputTokens": 5,
+        "totalTokens": 10820,
+        "cacheReadInputTokens": 0,
+        "cacheWriteInputTokens": 10802,
+        "cacheDetails": [
+          {
+            "ttl": "5m",
+            "inputTokens": 10802
+          }
+        ]
+      }
+    },
+    {
+      "model_id": "global.anthropic.claude-sonnet-5-5",
+      "api_type": "converse_stream",
+      "usage": {
+        "inputTokens": 13,
+        "outputTokens": 5,
+        "totalTokens": 10820,
+        "cacheReadInputTokens": 10802,
+        "cacheWriteInputTokens": 0
+      }
+    },
+    {
+      "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "api_type": "converse",
+      "usage": {
+        "inputTokens": 9,
+        "outputTokens": 5,
+        "totalTokens": 7215,
+        "cacheReadInputTokens": 0,
+        "cacheWriteInputTokens": 7201,
+        "cacheDetails": [
+          {
+            "ttl": "5m",
+            "inputTokens": 7201
+          }
+        ]
+      }
+    },
+    {
+      "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "api_type": "converse",
+      "usage": {
+        "inputTokens": 3610,
+        "outputTokens": 5,
+        "totalTokens": 3615,
+        "cacheReadInputTokens": 0,
+        "cacheWriteInputTokens": 0
+      }
+    }
+  ]
+}

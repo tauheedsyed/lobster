@@ -1,6 +1,7 @@
 """Shared ChatBedrockConverse construction for direct-AWS and gateway paths."""
 
 import logging
+import os
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -75,5 +76,12 @@ def build_bedrock_converse(
     logger.debug(
         f"Building ChatBedrockConverse: model={model_id}, gateway={client is not None}"
     )
+
+    if os.getenv("LOBSTER_BEDROCK_PROMPT_CACHE") == "1" and "anthropic." in model_id:
+        from lobster.config.providers.caching_bedrock_client import (
+            CachingChatBedrockConverse,
+        )
+
+        return CachingChatBedrockConverse(**params)
 
     return ChatBedrockConverse(**params)
