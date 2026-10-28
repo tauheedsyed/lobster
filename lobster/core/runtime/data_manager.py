@@ -9,6 +9,7 @@ flexible multi-omics data analysis with complete provenance tracking.
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -301,6 +302,162 @@ def estimate_anndata_bytes(adata: Any) -> int:
         total += _matrix_nbytes(getattr(raw, "X", None))
 
     return total
+
+
+def _png_readme_line(include_png: bool, png_included: int, png_not_copied: int) -> str:
+    """Inventory-driven PNG wording: NOT generated locally is not the same as NOT preserved.
+
+    ``include_png=False`` (``--no-png``) only disables generation; recorded PNG renditions
+    are always retained.
+    """
+    generation = (
+        "no new PNG was rendered locally (--no-png: generation disabled)"
+        if not include_png
+        else "no new PNG was rendered locally"
+    )
+    if png_included:
+        recorded = (
+            f"{png_included} already recorded PNG rendition(s) included with their exact "
+            "bytes (`png_renditions` in `plots/index.json`)"
+        )
+    elif png_not_copied:
+        recorded = "no recorded PNG rendition could be copied"
+    else:
+        recorded = "no PNG rendition is recorded for these revisions"
+    line = f"{recorded}; {generation}"
+    if png_not_copied:
+        line += (
+            f". {png_not_copied} recorded PNG rendition(s) were NOT copied: see "
+            "'Not copied' below"
+        )
+    if not png_included and not png_not_copied:
+        line += (
+            " (each index entry records `png: not_rendered_locally`). Open the HTML "
+            "view to export a PNG"
+        )
+    return line
+
+
+def _not_copied_section(
+    plots_index: List[Dict[str, Any]], legacy_names: Optional[List[str]] = ()
+) -> str:
+    """Visible list of everything this package could not copy (never only in index.json).
+
+    ``legacy_names``: flat (legacy) files in ``plots/``, which this export does not
+    support; ``None`` = they could not be listed.
+    """
+    from lobster.core.figures.listing import safe_label
+
+    lines = []
+    for info in plots_index:
+        ref = info.get("figure_ref")
+        if info.get("error"):
+            lines.append(f"- {ref}: figure not exported ({info['error']})")
+        if info.get("html_error"):
+            lines.append(f"- {ref}: HTML view not written ({info['html_error']})")
+        for png in info.get("png_errors", []):
+            lines.append(
+                f"- {ref}: recorded PNG {png['rendition_id']} not copied ({png['reason']})"
+            )
+    if legacy_names is None:
+        lines.append("- plots/: legacy plot files could not be listed")
+    for name in legacy_names or ():
+        lines.append(
+            f"- plots/{safe_label(name) or 'unnamed'}: legacy plot file, not supported "
+            "by this export (unchanged in the workspace)"
+        )
+    if not lines:
+        return ""
+    return (
+        "\n## Not copied\n\nThese saved items are NOT in this package; their state is "
+        "unchanged in the workspace.\n\n" + "\n".join(lines) + "\n"
+    )
+
+
+_SAFE_REF_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _ref_id(value: Any) -> str:
+    """A stored reference ID as display-safe text; anything else is ``unnamed``."""
+    if isinstance(value, str) and _SAFE_REF_ID.fullmatch(value):
+        return value
+    return "unnamed"
+
+
+def _lifecycle_refs_not_included(store: Any, record: Dict[str, Any]) -> List[Dict]:
+    """The lifecycle artifacts a revision references that a view package does NOT copy.
+
+    Read from the revision record and its execution record only: nothing is guessed. When
+    the execution record cannot be read, its entry carries ``unread`` (a safe reason) and
+    no code/activity entry is invented.
+    """
+    from lobster.core.figures.errors import safe_reason
+
+    refs: List[Dict[str, str]] = []
+    source = record.get("source")
+    if isinstance(source, dict) and source.get("source_id"):
+        refs.append({"kind": "source", "id": _ref_id(source["source_id"])})
+    execution = record.get("execution")
+    execution_id = (
+        execution.get("execution_id") if isinstance(execution, dict) else None
+    )
+    if not execution_id:
+        return refs
+    try:
+        executed = store.read_execution(execution_id)
+    except Exception as e:
+        refs.append(
+            {"kind": "execution", "id": _ref_id(execution_id), "unread": safe_reason(e)}
+        )
+        return refs
+    refs.append({"kind": "execution", "id": _ref_id(execution_id)})
+    if executed.get("code_id"):
+        refs.append({"kind": "code", "id": _ref_id(executed["code_id"])})
+    if executed.get("activity_record"):
+        refs.append({"kind": "activity", "id": _ref_id(executed.get("activity_id"))})
+    return refs
+
+
+def _describe_refs(refs: List[Dict[str, str]]) -> str:
+    """``source <id>; execution <id>; ...`` (an unread execution says what is unknown)."""
+    parts = []
+    for item in refs:
+        part = f"{item['kind']} {item['id']}"
+        if item.get("unread"):
+            part += f" (code/activity references unknown ({item['unread']}))"
+        parts.append(part)
+    return "; ".join(parts)
+
+
+_VIEW_PACKAGE_SCOPE = (
+    "This is a view package: each saved figure revision is copied as its exact "
+    "`revision.json`, `figure.json` and `config.json` bytes, with its views. The "
+    "lifecycle artifacts those revisions reference (source data, execution records, "
+    "code, activity records) are NOT copied, so this package is not a complete, "
+    "reloadable figure store. `provenance.json`, when present, is a session summary, "
+    "not those artifacts. They stay unchanged in the workspace."
+)
+
+
+def _not_included_section(plots_index: List[Dict[str, Any]]) -> str:
+    """Package scope + the per-revision lifecycle references this package does not copy."""
+    if not plots_index:
+        return ""
+    lines = [
+        f"- {info.get('figure_ref')}: {_describe_refs(info['not_included'])}"
+        for info in plots_index
+        if info.get("not_included")
+    ]
+    scope = "\n## Package scope\n\n" + _VIEW_PACKAGE_SCOPE + "\n"
+    if not lines:
+        return scope
+    return (
+        scope
+        + "\n## Not included: referenced lifecycle artifacts\n\nReferenced by the "
+        "revisions in this package and NOT copied into it:\n\n"
+        + "\n".join(lines)
+        + "\n"
+    )
 
 
 def _safe_filename(name: str) -> str:
@@ -602,6 +759,71 @@ class DataManagerV2:
         self._locality_provider = provider
 
     @property
+    def figure_store(self):
+        """The managed-figure authority for this workspace (contract §9).
+
+        Local default: :class:`lobster.core.figures.store.LocalFigureStore`. Cloud injects a
+        catalog-backed store with :meth:`set_figure_store`.
+        """
+        store = getattr(self, "_figure_store", None)
+        if store is None:
+            from lobster.core.figures.store import LocalFigureStore
+
+            store = LocalFigureStore(
+                self.workspace_path, session_id=str(self.session_id)
+            )
+            self._figure_store = store
+        return store
+
+    def set_figure_store(self, store) -> None:
+        """Register a custom figure store (e.g., Cloud catalog-backed)."""
+        self._figure_store = store
+
+    def resolve_input_identity(self, modality_name: str):
+        """Return the verified :class:`InputEdge` for a loaded modality, or None (contract §5.2).
+
+        Resolution order (as implemented): provider object identity → lineage
+        ``instance_id`` (store event) → None. Never random, never by name alone.
+        """
+        if modality_name not in self.modalities:
+            return None
+        return self.input_identity_of(modality_name, self.modalities[modality_name])
+
+    def input_identity_of(self, modality_name: str, adata: Any = None):
+        """The :class:`InputEdge` of ``adata``, the object actually used for ``modality_name``.
+
+        Same resolution order as :meth:`resolve_input_identity` (provider object identity →
+        the object's lineage ``instance_id``, a store event → None), applied to the given
+        object instead of a later lookup by name. ``adata=None`` (a provider file the data
+        manager does not hold) can only have a provider identity. Never random, never by
+        name alone; identifies a store event or stored object, not live content.
+        """
+        from lobster.core.figures.records import InputEdge
+
+        provider = self._locality_provider
+        if provider is not None and hasattr(provider, "dataset_identity"):
+            try:
+                ident = provider.dataset_identity(modality_name)
+            except Exception:  # provider failure must not invent identity
+                ident = None
+            if ident and ident.get("instance_id"):
+                return InputEdge(
+                    modality_name,
+                    str(ident["instance_id"]),
+                    str(ident.get("origin", "provider_object_version")),
+                    True,
+                )
+        if adata is None:
+            return None
+        lineage = (
+            getattr(adata, "uns", {}).get("lineage") if hasattr(adata, "uns") else None
+        )
+        instance_id = lineage.get("instance_id") if isinstance(lineage, dict) else None
+        if instance_id:
+            return InputEdge(modality_name, str(instance_id), "store_event", True)
+        return None
+
+    @property
     def notebook_exporter(self):
         """Lazy initialize notebook exporter."""
         if self._notebook_exporter is None and self._enable_notebooks:
@@ -627,6 +849,11 @@ class DataManagerV2:
                 workspace_path=self.workspace_path,
                 max_plots_history=self.max_plots_history,
                 enable_ir=self.provenance is not None,
+            )
+            self._plot_manager.configure_figure_lifecycle(
+                store_provider=lambda: self.figure_store,
+                identity_resolver=self.resolve_input_identity,
+                session_id_provider=lambda: self.session_id,
             )
         return self._plot_manager
 
@@ -2607,16 +2834,73 @@ class DataManagerV2:
             logger.error(f"Failed to save processed data: {e}")
             return None
 
+    @staticmethod
+    def _package_recorded_pngs(store, ref, dest: Path, rel: str, entry: Dict) -> int:
+        """Copy PNG renditions already recorded for ``ref`` (sha-verified); never render."""
+        from lobster.core.figures.errors import safe_reason
+
+        copied = 0
+        for rec in store.list_renditions(ref):
+            if (rec.get("settings") or {}).get("format") != "png":
+                continue
+            rendition_id = rec.get("rendition_id")
+            try:
+                data = store.read_rendition(ref, rendition_id)  # pending/changed raise
+            except Exception as e:
+                entry.setdefault("png_errors", []).append(
+                    {"rendition_id": rendition_id, "reason": safe_reason(e)}
+                )
+                continue
+            name = f"{rendition_id}.png"
+            (dest / name).write_bytes(data)
+            entry.setdefault("png_renditions", []).append(
+                {
+                    "rendition_id": rendition_id,
+                    "file": f"{rel}/{name}",
+                    "sha256": rec.get("sha256"),
+                    "settings": rec.get("settings"),
+                    "renderer": rec.get("renderer"),
+                }
+            )
+            copied += 1
+        return copied
+
+    def _saved_figure_records(self) -> List[Dict[str, Any]]:
+        """All saved revision records (metadata), restart-safe; empty without a plots dir.
+
+        Delegates to the one native reader (``listing.read_saved_figures``): a plots-folder
+        or catalog fault is a TYPED error, never an empty or partial list.
+        """
+        from lobster.core.figures.listing import read_saved_figures
+
+        return list(read_saved_figures(self.workspace_path, lambda: self.figure_store))
+
+    def _legacy_plot_names(self) -> Optional[List[str]]:
+        """Flat (legacy) files in ``plots/``, read-only; ``None`` if they cannot be listed."""
+        from lobster.core.figures.errors import safe_reason
+        from lobster.core.figures.listing import legacy_plot_files
+
+        try:
+            return sorted(legacy_plot_files(self.workspace_path))
+        except Exception as e:
+            logger.warning("Could not list legacy plot files: %s", safe_reason(e))
+            return None
+
     def list_workspace_files(self) -> Dict[str, List[Dict[str, Any]]]:
         """
         List all files in the workspace organized by category.
 
-        Categories: data, exports, cache and plots. ``plots`` lists the
-        files PlotManager saved to ``<workspace>/plots``; the artifact
-        manifest relies on it to report saved plots.
+        Categories: data, exports, cache and plots. ``plots`` lists managed figure
+        revisions (``<figure_id>/<revision_id>/figure.json`` with ``figure_ref``) and
+        read-only legacy flat files (``legacy: True``); the artifact manifest relies on
+        it to report saved plots.
 
         Returns:
             Dict[str, List[Dict[str, Any]]]: Files organized by category
+
+        Raises:
+            FigureError: the saved-figure inventory could not be read completely (typed,
+                e.g. ``StorageError``); a partial inventory is never returned as complete.
         """
         files_by_category = {"data": [], "exports": [], "cache": [], "plots": []}
 
@@ -2656,8 +2940,46 @@ class DataManagerV2:
                     }
                 )
 
-        # List saved plots (the directory exists only after the first save)
+        # Plots: managed revisions (from their records, restart-safe) + read-only legacy flat files.
+        # Managed entries are staged from the ONE native reader, which returns every record or
+        # raises a typed fault: a fault mid-scan is raised, never returned as a smaller,
+        # apparently complete inventory (legacy files do not hide it).
+        from lobster.core.figures.errors import FigureError, StorageError
+
         plots_dir = self.workspace_path / "plots"
+        try:
+            records = self._saved_figure_records()
+        except FigureError:
+            raise
+        except Exception:  # an untyped store fault: typed here, its text never shown
+            raise StorageError("saved figures could not be listed") from None
+        managed = []
+        for rec in records:
+            rel = f"{rec['figure_id']}/{rec['revision_id']}/figure.json"
+            file_path = plots_dir / rel
+            try:
+                stat = os.stat(file_path)
+            except (FileNotFoundError, NotADirectoryError):
+                stat = None  # listed from its record: recorded size, no mtime
+            except OSError:
+                raise StorageError("saved figure file unreadable") from None
+            managed.append(
+                {
+                    "name": rel,
+                    "path": str(file_path),
+                    "size": (
+                        stat.st_size if stat else rec.get("figure", {}).get("bytes", 0)
+                    ),
+                    "modified": stat.st_mtime if stat else None,
+                    "figure_ref": f"{rec['figure_id']}@{rec['revision_id']}",
+                    "label": rec.get("label"),
+                    "kind": (rec.get("change") or {}).get("kind"),
+                    "legacy": False,
+                    # "pending" = save confirmation pending (not active yet)
+                    "availability": rec.get("availability"),
+                }
+            )
+        files_by_category["plots"].extend(managed)
         if plots_dir.is_dir():
             for file_path in plots_dir.iterdir():
                 if file_path.is_file():
@@ -2668,6 +2990,7 @@ class DataManagerV2:
                             "path": str(file_path),
                             "size": stat.st_size,
                             "modified": stat.st_mtime,
+                            "legacy": True,
                         }
                     )
 
@@ -3596,7 +3919,12 @@ class DataManagerV2:
         Args:
             output_dir: Directory to save the package (defaults to exports_dir)
             progress_callback: Optional callback function to report progress (receives message string)
-            include_png: Whether to generate PNG versions of plots (default: True)
+            include_png: Kept for compatibility; ``False`` (``--no-png``) disables PNG
+                generation only. No new PNG is rendered locally anyway (no Chrome/Kaleido);
+                the index records ``png: not_rendered_locally``. PNG renditions already
+                recorded for a revision are ALWAYS included with their exact, sha-verified
+                bytes; anything not copied is listed in the README and in
+                ``self.last_package_report``.
             compression: H5AD compression method ('gzip', 'lzf', None) (default: 'gzip')
             include_provenance: Whether to include provenance information (default: True)
             reuse_autosave: Whether to copy existing autosave files instead of re-serializing (default: True)
@@ -3604,7 +3932,19 @@ class DataManagerV2:
         Returns:
             str: Path to the created zip file
         """
-        if not self.has_data() and not self.latest_plots:
+        legacy_names = self._legacy_plot_names()
+        if not self.has_data() and not self._saved_figure_records():
+            if legacy_names:
+                raise ValueError(
+                    "No data or saved figures to export; "
+                    f"{len(legacy_names)} legacy plot file(s) in plots/ are not "
+                    "supported by export (left unchanged)"
+                )
+            if legacy_names is None:
+                raise ValueError(
+                    "No data or saved figures to export; legacy plot files in plots/ "
+                    "could not be listed"
+                )
             raise ValueError("No data or plots to export")
 
         if progress_callback:
@@ -3736,100 +4076,101 @@ class DataManagerV2:
                         if progress_callback:
                             progress_callback(f"Error saving {name}: {str(e)[:50]}...")
 
-            # Save plots
-            if self.latest_plots:
+            # Save plots: every saved revision with its EXACT committed bytes (sha-verified on
+            # read) plus an HTML view written once on this explicit export path. A failed view
+            # never drops the revision; it is reported separately. No new PNG is rendered
+            # locally; PNG renditions already recorded are kept (exact, sha-verified bytes).
+            self.last_package_report = None  # set once this package is fully described
+            png_included = 0
+            plots_index: List[Dict[str, Any]] = []
+            revisions = self._saved_figure_records()
+            if revisions:
+                from lobster.core.figures.errors import safe_reason
+                from lobster.core.figures.renditions import ensure_html_rendition
+
                 if progress_callback:
                     progress_callback(
-                        f"Exporting {len(self.latest_plots)} visualizations..."
+                        f"Exporting {len(revisions)} saved figure revision(s)..."
                     )
-
                 plots_dir = temp_path / "plots"
                 plots_dir.mkdir()
-
-                # Create an index of all plots
-                plots_index = []
-
-                for i, plot_entry in enumerate(self.latest_plots):
-                    if progress_callback:
-                        plot_title = plot_entry.get("title", f"Plot {i + 1}")
-                        progress_callback(
-                            f"Saving plot {i + 1}/{len(self.latest_plots)}: {plot_title}"
-                        )
+                store = self.figure_store
+                for rec in revisions:
+                    fid, rid = rec["figure_id"], rec["revision_id"]
+                    ref = f"{fid}@{rid}"
+                    entry = {
+                        "figure_ref": ref,
+                        "label": rec.get("label"),
+                        "kind": (rec.get("change") or {}).get("kind"),
+                        "parents": rec.get("parents", []),
+                        "created_at": rec.get("created_at"),
+                        "files": {},
+                        "html": None,
+                        "png": "not_rendered_locally" if include_png else None,
+                        "availability": rec.get("availability"),
+                    }
                     try:
-                        plot = plot_entry["figure"]
-                        plot_id = plot_entry["id"]
-                        plot_title = plot_entry.get(
-                            "original_title", plot_entry["title"]
+                        rev_bytes, fig_bytes, cfg_bytes = store.read(ref)
+                        dest = plots_dir / fid / rid
+                        dest.mkdir(parents=True)
+                        for name, data in (
+                            ("revision.json", rev_bytes),
+                            ("figure.json", fig_bytes),
+                            ("config.json", cfg_bytes),
+                        ):
+                            (dest / name).write_bytes(data)
+                            entry["files"][name] = f"{fid}/{rid}/{name}"
+                        view = ensure_html_rendition(store, ref)
+                        if view.status == "available":
+                            (dest / "figure.html").write_bytes(
+                                store.read_rendition(ref, view.rendition_id)
+                            )
+                            entry["html"] = f"{fid}/{rid}/figure.html"
+                        else:
+                            entry["html_error"] = view.reason
+                        png_included += self._package_recorded_pngs(
+                            store, ref, dest, f"{fid}/{rid}", entry
                         )
-
-                        # Create sanitized filename
-                        safe_title = "".join(
-                            c for c in plot_title if c.isalnum() or c in [" ", "_", "-"]
-                        ).rstrip()
-                        safe_title = safe_title.replace(" ", "_")
-                        filename_base = (
-                            f"{plot_id}_{safe_title}" if safe_title else plot_id
-                        )
-
-                        # Save as HTML (fast and reliable - primary format)
-                        _, pio_module = _ensure_plotly()
-                        pio_module.write_html(plot, plots_dir / f"{filename_base}.html")
-
-                        # Save as PNG (configurable, non-blocking)
-                        if include_png:
-                            try:
-                                # Use kaleido engine for better reliability
-                                with SuppressKaleidoLogging():
-                                    _, pio_module = _ensure_plotly()
-                                    pio_module.write_image(
-                                        plot,
-                                        plots_dir / f"{filename_base}.png",
-                                        engine="kaleido",
-                                        width=1200,
-                                        height=800,
-                                    )
-                            except Exception as e:
-                                # PNG generation failed - continue without it (don't block export)
-                                logger.debug(
-                                    f"Skipped PNG for {plot_id}: {type(e).__name__}: {e}"
-                                )
-                                # Note: HTML version is still available and fully interactive
-
-                        # Save plot metadata
-                        with open(plots_dir / f"{filename_base}_info.txt", "w") as f:
-                            f.write(f"ID: {plot_id}\n")
-                            f.write(f"Title: {plot_title}\n")
-                            f.write(f"Created: {plot_entry.get('timestamp', 'N/A')}\n")
-                            f.write(f"Source: {plot_entry.get('source', 'N/A')}\n")
-
-                        # Add to index
-                        plots_index.append(
-                            {
-                                "id": plot_id,
-                                "title": plot_title,
-                                "filename": filename_base,
-                                "timestamp": plot_entry.get("timestamp", "N/A"),
-                                "source": plot_entry.get("source", "N/A"),
-                            }
+                        entry["not_included"] = _lifecycle_refs_not_included(
+                            store, json.loads(rev_bytes)
                         )
                     except Exception as e:
-                        logger.error(f"Failed to save plot {plot_id}: {e}")
+                        entry["error"] = safe_reason(e)
+                        logger.warning(
+                            "Figure %s not exported: %s", ref, entry["error"]
+                        )
+                    plots_index.append(entry)
 
-                # Save plots index
                 with open(plots_dir / "index.json", "w") as f:
                     json.dump(plots_index, f, indent=2)
-
-                # Create human-readable plot index
                 with open(plots_dir / "README.md", "w") as f:
-                    f.write("# Generated Plots\n\n")
-                    for idx, plot_info in enumerate(plots_index, 1):
-                        f.write(f"## {idx}. {plot_info['title']}\n\n")
-                        f.write(f"- ID: {plot_info['id']}\n")
-                        f.write(f"- Created: {plot_info['timestamp']}\n")
-                        f.write(f"- Source: {plot_info['source']}\n")
-                        f.write(
-                            f"- Files: [{plot_info['filename']}.html]({plot_info['filename']}.html), [{plot_info['filename']}.png]({plot_info['filename']}.png)\n\n"
-                        )
+                    f.write("# Saved figures\n\n")
+                    f.write(_VIEW_PACKAGE_SCOPE + "\n\n")
+                    for idx, info in enumerate(plots_index, 1):
+                        f.write(f"## {idx}. {info['label'] or info['figure_ref']}\n\n")
+                        f.write(f"- Ref: {info['figure_ref']} ({info['kind']})\n")
+                        f.write(f"- Created: {info['created_at']}\n")
+                        if info.get("html"):
+                            f.write(f"- View: [{info['html']}]({info['html']})\n")
+                        elif info.get("html_error"):
+                            f.write(f"- View: not written ({info['html_error']})\n")
+                        for png in info.get("png_renditions", []):
+                            f.write(
+                                f"- PNG (recorded): [{png['file']}]({png['file']})\n"
+                            )
+                        for png in info.get("png_errors", []):
+                            f.write(
+                                f"- PNG (recorded) NOT copied: {png['rendition_id']} "
+                                f"({png['reason']})\n"
+                            )
+                        if info.get("not_included"):
+                            f.write(
+                                "- Not included (referenced, not copied): "
+                                f"{_describe_refs(info['not_included'])}\n"
+                            )
+                        if info.get("error"):
+                            f.write(f"- Not exported: {info['error']}\n")
+                        f.write("\n")
 
             if progress_callback:
                 progress_callback("Saving workspace metadata...")
@@ -3842,6 +4183,28 @@ class DataManagerV2:
             if include_provenance and self.provenance:
                 with open(temp_path / "provenance.json", "w") as f:
                     json.dump(self.provenance.to_dict(), f, indent=2, default=str)
+
+            png_not_copied = sum(len(i.get("png_errors", [])) for i in plots_index)
+            not_copied = _not_copied_section(
+                plots_index, legacy_names
+            ) + _not_included_section(plots_index)
+            self.last_package_report = {
+                "view_only": True,
+                "lifecycle_refs_not_included": sum(
+                    len(i.get("not_included") or []) for i in plots_index
+                ),
+                "figure_revisions": len(plots_index),
+                "figures_not_exported": sum(1 for i in plots_index if i.get("error")),
+                "html_views_not_written": sum(
+                    1 for i in plots_index if i.get("html_error")
+                ),
+                "recorded_png_included": png_included,
+                "recorded_png_not_copied": png_not_copied,
+                # None = the legacy files could not be listed (never reported as 0)
+                "legacy_plot_files_not_copied": (
+                    None if legacy_names is None else len(legacy_names)
+                ),
+            }
 
             # Create professional README for the export package
             readme_content = f"""# Lobster Analysis Export Package
@@ -3856,13 +4219,15 @@ Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 - **Recommendation**: Open with scanpy, cellxgene, or other single-cell analysis tools
 
 ### Visualizations
-- **HTML Files**: Interactive Plotly visualizations (recommended)
-- **PNG Files**: Static images for publications {"(included)" if include_png else "(not generated)"}
+- **Saved figures**: `plots/<figure>/<revision>/` holds each saved revision's exact `revision.json`, `figure.json` and `config.json`; `plots/index.json` lists them
+- **HTML Files**: an interactive Plotly view per revision (`figure.html`), written during this export; a revision whose view could not be written is listed with `html_error`
+- **PNG Files**: {_png_readme_line(include_png, png_included, png_not_copied)}
 
+{not_copied}
 ### Metadata
 - **technical_summary.md**: Analysis overview and methods
 - **workspace_status.json**: System configuration and data provenance
-{"- **provenance.json**: Detailed analysis history (W3C-PROV compliant)" if include_provenance else ""}
+{"- **provenance.json**: Analysis history recorded by Lobster" if include_provenance else ""}
 
 ## Usage
 

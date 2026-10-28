@@ -6,9 +6,10 @@ providing ML-specific tools and workflows for transcriptomics and proteomics dat
 using the modular DataManagerV2 system.
 """
 
+from lobster.agents.machine_learning.config import ML_EXPERT_CONFIG
+
 # Agent configuration for entry point discovery (must be at top, before heavy imports)
 from lobster.core.utils.dtype_guards import is_text_dtype
-from lobster.agents.machine_learning.config import ML_EXPERT_CONFIG
 
 AGENT_CONFIG = ML_EXPERT_CONFIG
 
@@ -1173,6 +1174,16 @@ The scVI embeddings are now available in modality.obsm['X_scvi'] and can be used
     # SYSTEM PROMPT
     # -------------------------
     system_prompt = create_ml_expert_prompt()
+
+    from lobster.tools.code_tool_switch import attach_code_tool
+
+    tools = attach_code_tool(
+        tools,
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name=agent_name,
+    )
 
     return create_react_agent(
         model=llm,

@@ -775,6 +775,14 @@ class TestAgentClientFileOperations:
         assert (temp_workspace / filename).exists()
         assert (temp_workspace / filename).read_text() == content
 
+    def test_write_file_refuses_the_managed_figure_folder(
+        self, temp_workspace, mock_create_bioinformatics_graph
+    ):
+        client = AgentClient(workspace_path=temp_workspace)
+        (temp_workspace / "plots" / "f_x" / "r_y").mkdir(parents=True)
+        assert client.write_file("plots/f_x/r_y/revision.json", "{}") is False
+        assert not (temp_workspace / "plots" / "f_x" / "r_y" / "revision.json").exists()
+
 
 @pytest.mark.unit
 class TestAgentClientStateManagement:

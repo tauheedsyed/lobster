@@ -36,7 +36,7 @@ pip install lobster-research
 
 ### Data Expert Agent (Offline Operations)
 - Execute downloads from pre-validated queue entries
-- Zero online access boundary for security and reproducibility
+- No online searches: works from queue entries prepared by the research agent
 - Multi-format file loading (CSV, TSV, H5AD, Excel)
 - Modality listing, inspection, and validation
 - Download strategy selection (AUTO, H5_FIRST, MATRIX_FIRST)

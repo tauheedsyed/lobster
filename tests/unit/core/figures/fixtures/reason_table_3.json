@@ -1,0 +1,185 @@
+{
+ "baseline": {
+  "classes_added": [
+   "FigureDeletedError"
+  ],
+  "classes_removed": [],
+  "codes_added": [
+   "figure_deleted"
+  ],
+  "codes_removed": [],
+  "details_added": [],
+  "details_removed": [],
+  "schema": "engine-reason-table/2",
+  "source_commit": "bf59b3b0011c1ee7eb82f73eb75b64ea28b58cb5",
+  "source_sha256": "7ce0341f0aad9627a3a77766e4c2d65f50548acac0c280ad7823ef21affa0642",
+  "table_sha256": "ebb14aab17e907a682df3a4246ea2997874bd8b0b70ae38915dcc62ca81c114c"
+ },
+ "codes": [
+  {
+   "base": "FigureError",
+   "class": "AttemptConflictError",
+   "code": "attempt_conflict"
+  },
+  {
+   "base": "FigureError",
+   "class": "AttemptContextError",
+   "code": "attempt_context_missing"
+  },
+  {
+   "base": "StorageError",
+   "class": "DurabilityError",
+   "code": "durability_failed"
+  },
+  {
+   "base": "FigureNotFoundError",
+   "class": "FigureDeletedError",
+   "code": "figure_deleted"
+  },
+  {
+   "base": null,
+   "class": "FigureError",
+   "code": "figure_error"
+  },
+  {
+   "base": "FigureError",
+   "class": "FigureInvalidError",
+   "code": "figure_invalid"
+  },
+  {
+   "base": "FigureError",
+   "class": "FigureNotFoundError",
+   "code": "figure_not_found"
+  },
+  {
+   "base": "FigureError",
+   "class": "GenerationFencedError",
+   "code": "generation_fenced"
+  },
+  {
+   "base": "FigureError",
+   "class": "IntegrityError",
+   "code": "fingerprint_mismatch"
+  },
+  {
+   "base": "FigureError",
+   "class": "ManagedPathError",
+   "code": "managed_path"
+  },
+  {
+   "base": "FigureError",
+   "class": "ParentDeletedError",
+   "code": "parent_deleted"
+  },
+  {
+   "base": "FigureError",
+   "class": "StorageError",
+   "code": "storage_failed"
+  },
+  {
+   "base": "StorageError",
+   "class": "StoreUnsupportedError",
+   "code": "storage_unsupported"
+  }
+ ],
+ "counts": {
+  "codes": 13,
+  "details": 58,
+  "prefixes": 4,
+  "standalone": 2
+ },
+ "details": [
+  "activity_blob_changed",
+  "activity_blob_mismatch",
+  "activity_blob_required",
+  "activity_fields_inconsistent",
+  "activity_too_large",
+  "attempt_digest_changed",
+  "attempt_key_mismatch",
+  "candidate_not_in_plan",
+  "claimed_revision_mismatch",
+  "code_blob_changed",
+  "code_blob_mismatch",
+  "code_blob_required",
+  "code_blob_unexpected",
+  "code_too_large",
+  "concurrent_writer_differs",
+  "config_changed",
+  "config_too_large",
+  "digest_mismatch",
+  "dir_fsync_failed",
+  "dir_fsync_unsupported",
+  "dir_open_failed",
+  "execution_attempt_base",
+  "execution_not_found",
+  "execution_plan_changed",
+  "execution_record_mismatch",
+  "execution_request_not_json",
+  "execution_request_schema",
+  "execution_request_too_large",
+  "existing_file_differs",
+  "figure_changed",
+  "figure_submission_invalid",
+  "figure_too_large",
+  "file_fsync_failed",
+  "inputs_not_normalized",
+  "invalid_json",
+  "no_figure_available",
+  "non_strict_json",
+  "not_requested",
+  "not_utf8",
+  "parent_unavailable",
+  "planned_candidates",
+  "platform_not_posix",
+  "plotly_schema",
+  "rendition_changed",
+  "rendition_format",
+  "rendition_inputs_mismatch",
+  "rendition_not_found",
+  "revision_not_found",
+  "shape",
+  "source_changed",
+  "source_not_found",
+  "source_shape",
+  "source_too_large",
+  "staged_figure_unknown",
+  "template_args_too_large",
+  "template_meta",
+  "total_cap",
+  "type"
+ ],
+ "prefixes": [
+  "execution_record",
+  "html_rendition",
+  "prepare",
+  "storage"
+ ],
+ "resolution": {
+  "classes": {
+   "AttemptConflictError": "attempt_conflict",
+   "AttemptContextError": "attempt_context_missing",
+   "DurabilityError": "durability_failed",
+   "FigureDeletedError": "figure_deleted",
+   "FigureError": "figure_error",
+   "FigureInvalidError": "figure_invalid",
+   "FigureNotFoundError": "figure_not_found",
+   "GenerationFencedError": "generation_fenced",
+   "IntegrityError": "fingerprint_mismatch",
+   "ManagedPathError": "managed_path",
+   "ParentDeletedError": "parent_deleted",
+   "StorageError": "storage_failed",
+   "StoreUnsupportedError": "storage_unsupported"
+  },
+  "unknown_exception": "unexpected_error"
+ },
+ "schema": "engine-reason-table/3",
+ "source": {
+  "commit": "8f7d7cb75d234cec6b4c24712fc14e628423fb36",
+  "path": "lobster/core/figures/errors.py",
+  "sha256": "0d9a49c604b53559f83a8cc730967c370256e8bf79016e5e0d96eca4dc0aac5f"
+ },
+ "standalone": [
+  "attempt_failed",
+  "unexpected_error"
+ ]
+}

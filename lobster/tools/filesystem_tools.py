@@ -286,6 +286,21 @@ def create_filesystem_tools(workspace_path: Path) -> List:
         except ValueError as e:
             return f"Error: {e}"
 
+        from lobster.core.figures.errors import ManagedPathError
+        from lobster.core.figures.paths import assert_not_managed
+
+        try:  # figures are saved only through the trusted save step (contract §1)
+            # Guard the ORIGINAL (expanded) spelling, not the resolved path: the classifier
+            # checks it lexically AND resolved, so a symlink at a managed location or a
+            # 'symlink/..' is seen. The boundary check above and the write below
+            # still use the resolved path.
+            assert_not_managed(workspace_path, workspace_path / Path(path).expanduser())
+        except ManagedPathError:
+            return (
+                f"Error: '{path}' is inside the managed figure folder (plots/<figure>/...). "
+                "Save figures with submit_figure(...) in execute_custom_code instead."
+            )
+
         try:
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)

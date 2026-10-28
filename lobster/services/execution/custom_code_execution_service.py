@@ -2,19 +2,23 @@
 Custom Code Execution Service for ad-hoc Python code execution.
 
 This service provides a fallback mechanism for agents to execute arbitrary
-Python code when existing specialized tools don't cover edge cases. It maintains
-W3C-PROV compliance and integrates with Lobster's notebook export system.
+Python code when existing specialized tools don't cover edge cases. It records
+analysis steps for notebook export; this does not establish standards compliance.
 
-SECURITY MODEL:
-- Subprocess-based execution for process isolation
-- Timeout enforcement (300s default)
-- Workspace-only file access
-- No network access (AST import blocking + socket.connect patch)
-- Crash isolation (user code crashes don't kill Lobster)
+EXECUTION LIMITS:
+- Runs a generated Python script with a timeout (300s default).
+- Child and parent run as the same OS user: this is not a sandbox.
+- AST screening and a socket.connect patch are cooperative restrictions, not
+  filesystem or network confinement.
+- Child failures are reported to the caller; no host-isolation guarantee is made.
+- Completion files are cooperative signals, not authentication. Managed-figure
+  saves through the parent path still require validation, records and fences.
 """
 
 import ast
 import json
+import os
+import stat as _stat
 import subprocess  # nosec B404 # Only runs the generated script with the current interpreter; never a shell.
 import sys
 import time
@@ -25,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.execution.execution_context_builder import ExecutionContextBuilder
+from lobster.utils.ipc_read import RefusedRead, read_regular, regular_identity
 from lobster.utils.logger import get_logger
 from lobster.utils.subprocess_env import minimal_child_env
 
@@ -35,6 +40,104 @@ MAX_OUTPUT_LENGTH = 10000
 
 # Default execution timeout (5 minutes)
 DEFAULT_TIMEOUT = 300
+
+
+# Completion states of a run that exited 0. Closed set.
+COMPLETION_COMPLETE = "complete"
+COMPLETION_UNCONFIRMED = (
+    "completion_unconfirmed"  # child never reached its last statement
+)
+COMPLETION_RESULT_MISSING = "result_missing"  # marker present, result envelope absent
+COMPLETION_RESULT_UNREADABLE = "result_unreadable"  # envelope not JSON / wrong shape
+COMPLETION_STATES = frozenset(
+    {
+        COMPLETION_COMPLETE,
+        COMPLETION_UNCONFIRMED,
+        COMPLETION_RESULT_MISSING,
+        COMPLETION_RESULT_UNREADABLE,
+    }
+)
+RESULT_SCHEMA = "lobster.execution_result/1"
+
+# Post-child reads (the child has exited; it controls what is at these paths). Each is a
+# bounded read of a regular file only (lobster.utils.ipc_read): a FIFO, device or symlink
+# left by the child is refused instead of blocking the parent after the child's timeout.
+MAX_RESULT_BYTES = 16 * 1024 * 1024  # result envelope; larger = result_unreadable
+MAX_MARKER_BYTES = 64  # completion marker (the nonce is 32 hex characters)
+MODIFIED_DATA_NOT_REGULAR = "the modified data file is not a regular file"
+MODIFIED_DATA_UNREADABLE = "the modified data file could not be read"
+
+# Names that only the attempt's runtime setup defines: the figure helpers (child_api.install,
+# including the publish_plot alias and the template helpers) and the attempt cache path. The
+# exported setup defines none of them, so code that uses one cannot run as recorded in an
+# exported or replayed notebook: its IR keeps the code but is neither exportable nor
+# replayable. Detection bound: a static scan for these names as loaded variables; a helper
+# reached only dynamically (through globals(), getattr or a string) is not detected.
+FIGURE_HELPER_NAMES = frozenset(
+    {
+        "submit_figure",
+        "publish_plot",
+        "list_figures",
+        "load_figure",
+        "load_figure_config",
+        "load_source",
+        "FigureUnavailable",
+        "list_templates",
+        "get_template",
+        "show_template_source",
+        "apply_house_style",
+        "initialize_house_style",
+        "EXEC_CACHE",
+    }
+)
+REPLAY_EXCLUDED_FIGURE_HELPERS = "uses_attempt_figure_helpers"
+
+
+def _uses_figure_helpers(code: str) -> bool:
+    """True if ``code`` loads one of :data:`FIGURE_HELPER_NAMES` (unparseable: True)."""
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return True
+    return any(
+        isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in FIGURE_HELPER_NAMES
+        for node in ast.walk(tree)
+    )
+
+
+def _read_result_envelope(path: Path) -> "tuple[Any, str]":
+    """Return (result, completion state) from the child's result envelope. Never raises."""
+    try:
+        raw = read_regular(path, MAX_RESULT_BYTES)
+    except RefusedRead:
+        return None, COMPLETION_RESULT_UNREADABLE
+    if raw is None:
+        return None, COMPLETION_RESULT_MISSING
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None, COMPLETION_RESULT_UNREADABLE
+    if not (
+        isinstance(data, dict)
+        and data.get("schema") == RESULT_SCHEMA
+        and isinstance(data.get("has_result"), bool)
+        and "result" in data
+        and "type" in data
+        and (
+            (isinstance(data["type"], str) and data["type"])
+            if data["has_result"]
+            else (data["result"] is None and data["type"] is None)
+        )
+    ):
+        return None, COMPLETION_RESULT_UNREADABLE
+    return data["result"], COMPLETION_COMPLETE
+
+
+def _child_api_path() -> Path:
+    """File path of the child-side figure helpers (loaded by path; no lobster import)."""
+    return Path(__file__).resolve().parents[2] / "core" / "figures" / "child_api.py"
 
 
 class CodeExecutionError(Exception):
@@ -263,6 +366,7 @@ class CustomCodeExecutionService:
         persist: bool = False,
         description: str = "Custom code execution",
         timeout: int = DEFAULT_TIMEOUT,
+        figure_sink: Optional[List[Any]] = None,
     ) -> Tuple[Any, Dict[str, Any], AnalysisStep]:
         """
         Execute arbitrary Python code with workspace context injection.
@@ -277,6 +381,10 @@ class CustomCodeExecutionService:
             persist: If True, save this execution to provenance/notebook export
             description: Human-readable description of what this code does
             timeout: Maximum execution time in seconds (default: 300s)
+            figure_sink: Optional caller-owned list. On a SUCCESSFUL attempt only, the figures
+                the code submitted (``submit_figure``) are appended as
+                :class:`~lobster.core.figures.records.SubmittedFigure`; the caller commits them
+                through the trusted saver after logging provenance. Nothing is saved here.
 
         Returns:
             Tuple containing:
@@ -314,30 +422,74 @@ class CustomCodeExecutionService:
         validation_warnings = self._validate_code_safety(code)
 
         # Step 2: Materialize modalities to local disk for subprocess IPC.
-        # Session-scoped materialized/ dir persists across executions (cache hits).
-        # Per-execution UUID dir holds IPC artifacts (cleaned up after).
+        # Inputs are materialized FRESH for every attempt into <exec_cache>/inputs and reused
+        # only within this attempt (freshness): an in-place change or a
+        # rewritten local file keeps its lineage id, so nothing is reused across attempts.
+        # The per-execution UUID dir is removed after the run (inputs included).
+        from lobster.core.interfaces.locality import _safe_filename
+
+        # Preflight BEFORE the attempt directory exists, so a refusal leaves nothing behind:
+        # detect all modalities referenced in code (fails fast on unknown paths), and refuse
+        # names that share one file name (they would alias one file).
+        required_modalities = self._detect_required_modalities(code, modality_name)
+        by_file: Dict[str, List[str]] = {}
+        for name in required_modalities:
+            by_file.setdefault(_safe_filename(name), []).append(name)
+        shared = sorted(sorted(v) for v in by_file.values() if len(v) > 1)
+        if shared:
+            raise CodeValidationError(
+                "These inputs map to the same file name, so they cannot be told apart: "
+                + "; ".join(", ".join(repr(n) for n in group) for group in shared)
+                + ". Rename one of the modalities, then run again."
+            )
+
         exec_id = uuid.uuid4().hex[:12]
         exec_cache = self.data_manager.workspace_path / "cache" / "execution" / exec_id
         exec_cache.mkdir(parents=True, exist_ok=True)
-        materialized_dir = (
-            self.data_manager.workspace_path / "cache" / "execution" / "materialized"
-        )
+        materialized_dir = exec_cache / "inputs"
         materialized_dir.mkdir(parents=True, exist_ok=True)
 
-        # Preflight: detect all modalities referenced in code (fails fast on unknown paths)
-        required_modalities = self._detect_required_modalities(code, modality_name)
         alias_map = {}
-        from lobster.core.interfaces.locality import _safe_filename
+        materialized_inputs: List[Dict[str, Any]] = []  # delivery cost only
+        # Input edges captured HERE, before the child and before any plan/digest, from the
+        # object (or provider file) actually materialized. Never a later
+        # lookup by name, so a store or eviction after this point cannot rebind an edge.
+        input_edges: List[Dict[str, Any]] = []
+        identity_unknown: List[str] = []
 
         for name in required_modalities:
+            t0 = time.time()
+            identity: Dict[str, Any] = {}
             try:
-                local_path = self._materialize_modality(name, materialized_dir)
-            except FileNotFoundError as e:
-                raise CodeValidationError(str(e)) from e
+                local_path = self._materialize_modality(
+                    name, materialized_dir, identity
+                )
+                size = local_path.stat().st_size  # inside the cleanup boundary
             except Exception as e:
+                import shutil
+
+                shutil.rmtree(exec_cache, ignore_errors=True)  # no copy left behind
+                if isinstance(e, FileNotFoundError):
+                    raise CodeValidationError(str(e)) from e
                 raise CodeExecutionError(
                     f"Failed to materialize modality '{name}': {e}"
                 ) from e
+            materialized_inputs.append(
+                {
+                    "name": name,
+                    "bytes": size,
+                    "seconds": round(time.time() - t0, 3),
+                }
+            )
+            edge = identity.get("edge")
+            if (
+                edge is None
+            ):  # known required name, identity unresolved: kept, unverified
+                from lobster.core.figures.records import InputEdge
+
+                identity_unknown.append(name)
+                edge = InputEdge(name, None, "declared", False)
+            input_edges.append(edge.to_dict())
             safe = _safe_filename(name)
             real = str(local_path)
             ws = str(self.data_manager.workspace_path)
@@ -375,6 +527,27 @@ class CustomCodeExecutionService:
             "timeout": timeout,
         }
 
+        # Attempt-start figure snapshot, read-only for the child.
+        snapshot_info: Dict[str, Any] = {}
+        try:
+            from lobster.core.figures.snapshot import build_snapshot
+
+            index = build_snapshot(
+                self.data_manager.figure_store, code, exec_cache / "figures"
+            )
+            snapshot_info = {
+                "catalog_generation": index["catalog_generation"],
+                "revisions": len(index["revisions"]),
+                "snapshot_truncated": index["snapshot_truncated"],
+            }
+        except (
+            Exception
+        ) as e:  # the attempt still runs; the child sees an empty snapshot
+            from lobster.core.figures.errors import safe_reason
+
+            snapshot_info = {"error": safe_reason(e)}
+            logger.warning("Figure snapshot unavailable: %s", snapshot_info["error"])
+
         # Step 4: Execute code in subprocess
         result, stdout_output, stderr_output, exec_error = self._execute_in_namespace(
             code, exec_context
@@ -385,12 +558,27 @@ class CustomCodeExecutionService:
         write_back_error = None
         if modality_name and exec_error is None:
             modified_path = exec_cache / ".modified_adata.h5ad"
-            if modified_path.exists():
+            # Only a regular file is read: a FIFO, device or link left by the code is
+            # refused. The file is then opened again by path. Custom code runs as your own
+            # user and is not sandboxed: another process of that user can still disrupt
+            # the session.
+            try:
+                modified_present = regular_identity(modified_path) is not None
+            except RefusedRead:
+                modified_present = False
+                write_back_error = MODIFIED_DATA_NOT_REGULAR
+                logger.warning("Adata write-back refused: %s", write_back_error)
+            modified_adata = None
+            if modified_present:
                 try:
                     import anndata
 
                     modified_adata = anndata.read_h5ad(modified_path)
-
+                except Exception:  # a closed code: library/OS messages can carry paths
+                    write_back_error = MODIFIED_DATA_UNREADABLE
+                    logger.warning("Adata write-back refused: %s", write_back_error)
+            if modified_adata is not None:
+                try:
                     # Deduplicate: _custom, _custom_2, _custom_3...
                     new_modality_name = f"{modality_name}_custom"
                     counter = 2
@@ -428,58 +616,19 @@ class CustomCodeExecutionService:
                     ):  # nosec B110 # Best-effort removal of the temporary write-back file; failure must not mask the result.
                         pass
 
-        # Step 4b: Read plot manifest and register captured Plotly figures
-        captured_plot_count = 0
-        manifest_path = exec_cache / ".plot_manifest.json"
-        if manifest_path.exists():
-            try:
-                with open(manifest_path) as mf:
-                    plot_manifest = json.load(mf)
-                for entry in plot_manifest:
-                    json_path = Path(entry.get("json_path", ""))
-                    if not json_path.exists():
-                        continue
-                    # Validate path is inside exec_cache (prevent path traversal from manifest)
-                    try:
-                        json_resolved = json_path.resolve()
-                        cache_resolved = exec_cache.resolve()
-                        if (
-                            cache_resolved not in json_resolved.parents
-                            and json_resolved != cache_resolved
-                        ):
-                            logger.warning(
-                                f"Plot JSON path outside exec_cache, skipping: {json_path}"
-                            )
-                            continue
-                    except (OSError, ValueError):
-                        continue
-                    try:
-                        import plotly.io as pio
+        # Step 4b: read explicitly submitted figures (successful attempts only; the caller
+        # commits them via the trusted saver after logging provenance).
+        from lobster.core.figures.records import read_submitted_figures
 
-                        fig = pio.from_json(json_path.read_text())
-                        self.data_manager.plot_manager.add_plot(
-                            plot=fig,
-                            title=entry.get("title", "Custom Code Plot"),
-                            source="execute_custom_code",
-                            dataset_info={
-                                "plot_type": "custom",
-                                "var_name": entry.get("var_name", ""),
-                            },
-                        )
-                        captured_plot_count += 1
-                        json_path.unlink(missing_ok=True)
-                    except Exception as pe:
-                        logger.warning(f"Could not register captured plot: {pe}")
-                if captured_plot_count > 0:
-                    # Save all captured plots to workspace as HTML + PNG
-                    self.data_manager.plot_manager.save_plots_to_workspace()
-                    logger.info(
-                        f"Auto-captured {captured_plot_count} Plotly figure(s) from custom code"
-                    )
-            except Exception as me:
-                logger.warning(f"Could not read plot manifest: {me}")
-            finally:
-                manifest_path.unlink(missing_ok=True)
+        submitted, unsubmitted, submission_error = read_submitted_figures(exec_cache)
+        completion = exec_context.get("completion", COMPLETION_UNCONFIRMED)
+        if (
+            exec_error is None
+            and completion == COMPLETION_COMPLETE
+            and figure_sink is not None
+            and submission_error is None
+        ):
+            figure_sink.extend(submitted)
 
         # Strip sentinel lines from stdout (LLM shouldn't see internal signals)
         if stdout_output:
@@ -488,7 +637,6 @@ class CustomCodeExecutionService:
                 for line in stdout_output.splitlines()
                 if "__LOBSTER_ADATA_MODIFIED__" not in line
                 and "__LOBSTER_CHANGES__:" not in line
-                and "__LOBSTER_PLOT_CAPTURED__:" not in line
             )
 
         # Clean up UUID-scoped exec_cache now that all IPC reads are done
@@ -558,7 +706,15 @@ class CustomCodeExecutionService:
             "error": str(exec_error) if exec_error else None,
             "new_modality_name": new_modality_name,
             "write_back_error": write_back_error,
-            "captured_plots": captured_plot_count,
+            "figures_submitted": len(submitted),
+            "completion": completion if exec_error is None else None,
+            "unsubmitted_figures": unsubmitted,
+            "figure_submission_error": submission_error,
+            "figure_snapshot": snapshot_info,
+            "materialized_inputs": materialized_inputs,
+            # one edge per required name, sorted by name (deterministic on retry)
+            "input_edges": sorted(input_edges, key=lambda e: e["name"]),
+            "input_identity_unknown": sorted(identity_unknown),
         }
 
         # Step 5: Generate IR (always, but mark as non-exportable if persist=False)
@@ -575,6 +731,10 @@ class CustomCodeExecutionService:
         # Update IR output_entities if a new modality was created
         if new_modality_name:
             ir.output_entities = [new_modality_name]
+        stats["replay_excluded"] = ir.execution_context.get("replay_excluded")
+        stats["replay_incomplete"] = bool(new_modality_name) and not ir.replayable
+        if stats["replay_incomplete"]:  # the data changed, but no replay can redo it
+            ir.execution_context["replay_incomplete"] = True
 
         logger.debug(
             f"Code execution {'succeeded' if stats['success'] else 'failed'} "
@@ -583,10 +743,12 @@ class CustomCodeExecutionService:
 
         if exec_error:
             logger.error(f"Execution error: {exec_error}")
-            raise CodeExecutionError(
+            err = CodeExecutionError(
                 f"Code execution failed: {exec_error}\n\n"
                 f"Stderr output:\n{stderr_output}"
             )
+            err.figures_submitted = len(submitted)  # fence: none of them is saved
+            raise err
 
         return result, stats, ir
 
@@ -727,12 +889,39 @@ class CustomCodeExecutionService:
 
         return required
 
-    def _materialize_modality(self, name: str, materialized_dir: Path) -> Path:
-        """Materialize a single modality to local disk via 3-step resolution.
+    def _capture_identity(self, name: str, adata: Any):
+        """InputEdge of the materialized object (or provider file when ``adata`` is None)."""
+        from lobster.core.figures.records import InputEdge
 
-        Step 0: Cache hit (already materialized in this session)
-        Step 1: In-memory non-backed AnnData → serialize via H5ADBackend
-        Step 2: Delegate to locality provider (S3 download, disk lookup, etc.)
+        resolver = getattr(self.data_manager, "input_identity_of", None)
+        if resolver is None:
+            return None
+        try:
+            edge = resolver(name, adata)
+        except Exception:  # an identity failure must never invent an identity
+            return None
+        return edge if isinstance(edge, InputEdge) else None
+
+    def _materialize_modality(
+        self,
+        name: str,
+        materialized_dir: Path,
+        identity_out: Optional[Dict[str, Any]] = None,
+    ) -> Path:
+        """Materialize a single modality for ONE attempt (fresh per attempt).
+
+        ``materialized_dir`` is per attempt (``<exec_cache>/inputs``). When ``identity_out``
+        is given, ``identity_out["edge"]`` is set to the identity of the SAME object (or
+        provider file) written for the child, or None when unknown. A file already there was
+        written earlier in THIS attempt and is reused; nothing is reused across attempts, so
+        every attempt reads the current data.
+
+        Step 1: A DM-held modality → serialize the object the DM returns via H5ADBackend
+                (a backed one is converted first with ``materialize_modality``: RAM cost as
+                on the resident path, and the memory budget may spill another modality).
+                A failure is an error, never a fallback to a possibly older provider file.
+        Step 2: A name the DM does not hold → delegate to the locality provider (S3 download, disk lookup, etc.); a file that
+                lives elsewhere (e.g. data_dir) is copied, never moved
         """
         import os
         import shutil
@@ -742,29 +931,50 @@ class CustomCodeExecutionService:
         safe_name = _safe_filename(name)
         target = materialized_dir / f"{safe_name}.h5ad"
 
-        # Step 0: cache hit
+        # within-attempt reuse only (the directory is per attempt)
         if target.exists() and target.stat().st_size > 0:
-            logger.debug(f"Materialization cache hit for '{name}'")
             return target
 
-        # Step 1: in-memory AND not backed → serialize locally (atomic write)
+        # Step 1: a modality the data manager holds (resident, spilled or backend) is
+        # serialized from the object it returns. A backed object (e.g. a spilled modality
+        # reloaded backed) is first converted with the EXISTING materialize_modality, so a
+        # DM-held input never falls to a provider file that may be older.
         if name in self.data_manager.list_modalities():
             adata = self.data_manager.get_modality(name)
-            if not getattr(adata, "isbacked", False):
-                tmp_dir = materialized_dir / f".tmp_{uuid.uuid4().hex[:8]}"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
+            if getattr(adata, "isbacked", False):
                 try:
-                    from lobster.core.backends.h5ad_backend import H5ADBackend
-
-                    local_backend = H5ADBackend(base_path=tmp_dir)
-                    local_backend.save(adata, f"{safe_name}.h5ad")
-                    tmp_file = tmp_dir / f"{safe_name}.h5ad"
-                    os.replace(str(tmp_file), str(target))
-                    return target
+                    adata = self.data_manager.materialize_modality(name)
                 except Exception as e:
-                    logger.warning(f"H5ADBackend serialize failed for '{name}': {e}")
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    raise RuntimeError(
+                        f"could not load the backed modality '{name}' into memory "
+                        f"({type(e).__name__})"
+                    ) from e
+                if getattr(adata, "isbacked", False):
+                    raise RuntimeError(
+                        f"could not load the backed modality '{name}' into memory"
+                    )
+            # always serialize the DM-held object; never the provider for this name
+            tmp_dir = materialized_dir / f".tmp_{uuid.uuid4().hex[:8]}"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                from lobster.core.backends.h5ad_backend import H5ADBackend
+
+                local_backend = H5ADBackend(base_path=tmp_dir)
+                local_backend.save(adata, f"{safe_name}.h5ad")
+                tmp_file = tmp_dir / f"{safe_name}.h5ad"
+                os.replace(str(tmp_file), str(target))
+                if identity_out is not None:
+                    identity_out["edge"] = self._capture_identity(name, adata)
+                return target
+            except Exception as e:
+                # Never fall back to a provider file: it may be older than this
+                # in-memory object.
+                raise RuntimeError(
+                    f"could not serialize the in-memory modality '{name}' "
+                    f"({type(e).__name__})"
+                ) from e
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # Step 2: delegate to locality provider (S3 download, disk check, etc.)
         provider = self.data_manager.locality_provider
@@ -784,6 +994,10 @@ class CustomCodeExecutionService:
                 os.replace(str(provider_path), str(target))
             except ValueError:
                 shutil.copy2(str(provider_path), str(target))
+            if (
+                identity_out is not None
+            ):  # provider identity only; never the DM's lineage
+                identity_out["edge"] = self._capture_identity(name, None)
             return target
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -938,7 +1152,7 @@ modalities = []
 
             safe_mod_name = _safe_filename(modality_name)
             materialized_dir_str = (
-                str(Path(exec_cache_str).parent / "materialized")
+                str(Path(exec_cache_str) / "inputs")  # per attempt (freshness)
                 if exec_cache_path
                 else str(workspace_path / "cache" / "execution" / "materialized")
             )
@@ -1136,28 +1350,32 @@ Path = Path
 """
 
         setup_code += """
-# === PUBLISH_PLOT API ===
-# Explicit way to register Plotly figures for canvas display.
-# Usage in custom code: publish_plot(fig, "My Title")
-_published = []
-
-def publish_plot(fig, title="Plot"):
-    \"\"\"Register a Plotly figure for interactive canvas display.\"\"\"
-    _published.append((fig, title))
-# === END PUBLISH_PLOT API ===
+# === FIGURE SUBMISSION API (explicit submit only) ===
+# submit_figure(fig, source=..., intent=..., parent=..., label=..., config=...) saves a figure
+# AFTER this code finishes successfully. publish_plot(fig, title) is an alias. Nothing is
+# captured automatically. list_figures()/load_figure(ref)/load_figure_config(ref)/
+# load_source(id) read this attempt's snapshot.
+import importlib.util as _lobster_ilu
+_lobster_spec = _lobster_ilu.spec_from_file_location("_lobster_fig_child", __LOBSTER_CHILD_API_PATH__)
+_lobster_child = _lobster_ilu.module_from_spec(_lobster_spec)
+_lobster_spec.loader.exec_module(_lobster_child)
+_lobster_child.install(globals(), EXEC_CACHE)
+del _lobster_ilu, _lobster_spec, _lobster_child
+# === END FIGURE SUBMISSION API ===
 
 # User code starts here
-"""
+""".replace("__LOBSTER_CHILD_API_PATH__", repr(str(_child_api_path())))
         return setup_code
 
     def _execute_in_namespace(
         self, code: str, context: Dict[str, Any]
     ) -> Tuple[Any, str, str, Optional[Exception]]:
         """
-        Execute code in isolated subprocess with timeout.
+        Run a generated Python script in a subprocess with a timeout.
 
-        SECURITY: Uses subprocess.run() for process isolation, timeout enforcement,
-        and crash isolation. User code cannot affect Lobster's main process.
+        Child and parent run as the same OS user; this is not a sandbox or a
+        host-isolation boundary. Timeout and exit status are reported to the
+        caller; screening and child-written completion files are cooperative.
 
         Args:
             code: Python code to execute
@@ -1229,81 +1447,32 @@ if _lobster_fp is not None and adata is not None:
 
 """
 
-        # Add Plotly figure auto-capture epilogue
-        # Priority: explicit publish_plot() calls > auto-scan of locals()
-        # Parent process reads the manifest to register with plot_manager
+        # Figure epilogue: NO automatic capture and no writes to plots/.
+        # It only names unsubmitted Figure variables so the reply can say what was not saved.
         full_script += """
-# === PLOTLY AUTO-CAPTURE ===
-# publish_plot(fig, title) is the explicit API for custom code to register plots.
-# Auto-scan of locals() is the fallback when publish_plot() was not called.
+# === FIGURE EPILOGUE (warning only) ===
 try:
-    import plotly.graph_objects as _go
-    import plotly.io as _pio
-    _plot_manifest = []
-    _plots_dir = WORKSPACE / 'plots'
-    _plots_dir.mkdir(exist_ok=True)
+    _lobster_figure_epilogue(dict(locals()))
+except Exception as _fig_err:
+    print(f"Warning: figure epilogue failed: {type(_fig_err).__name__}")
+# === END FIGURE EPILOGUE ===
 
-    # Collect figures: prefer _published (explicit) over locals scan (implicit)
-    _figures_to_capture = []
-    _valid_published = [(_fig, _ttl) for _fig, _ttl in _published if isinstance(_fig, _go.Figure)]
-    if _valid_published:
-        for _idx, (_fig, _ttl) in enumerate(_valid_published):
-            _figures_to_capture.append((_fig, _ttl, f"published_{_idx}"))
-    else:
-        # Fallback: scan locals for Figure objects (dedupe by id)
-        _seen_ids = set()
-        for _var_name, _var_value in list(locals().items()):
-            if _var_name.startswith('_') or _var_name in ('WORKSPACE', 'OUTPUT_DIR', 'EXEC_CACHE'):
-                continue
-            if isinstance(_var_value, _go.Figure) and id(_var_value) not in _seen_ids:
-                _seen_ids.add(id(_var_value))
-                _title = ''
-                if hasattr(_var_value, 'layout') and hasattr(_var_value.layout, 'title'):
-                    _t = _var_value.layout.title
-                    if hasattr(_t, 'text') and _t.text:
-                        _title = _t.text
-                _figures_to_capture.append((_var_value, _title or _var_name, _var_name))
-
-    for _fig, _title, _safe_name in _figures_to_capture:
-        _safe_name = ''.join(c for c in str(_safe_name) if c.isalnum() or c in '_-').rstrip()
-        _html_path = _plots_dir / f'auto_{_safe_name}.html'
-        _json_path = EXEC_CACHE / f'.plot_{_safe_name}.json'
-        try:
-            _pio.write_html(_fig, str(_html_path))
-            with open(_json_path, 'w') as _f:
-                _f.write(_pio.to_json(_fig))
-            _plot_manifest.append({
-                'var_name': _safe_name,
-                'title': _title,
-                'html_path': str(_html_path),
-                'json_path': str(_json_path),
-            })
-            print(f"__LOBSTER_PLOT_CAPTURED__:{_safe_name}")
-        except Exception as _pe:
-            print(f"Warning: could not capture plot '{_safe_name}': {_pe}")
-    if _plot_manifest:
-        _manifest_path = EXEC_CACHE / '.plot_manifest.json'
-        with open(_manifest_path, 'w') as _mf:
-            import json as _json_mod
-            _json_mod.dump(_plot_manifest, _mf)
-except ImportError:
-    pass  # plotly not installed — no figures to capture
-except Exception as _auto_err:
-    print(f"Warning: plot auto-capture failed: {_auto_err}")
-# === END PLOTLY AUTO-CAPTURE ===
-
-# Extract result and write to temp file for parent process
+# Extract result and write the result envelope for the parent process. It is ALWAYS
+# written (has_result=false for runs without a result), so a missing file is detectable.
 import json
+_lobster_env = {'schema': __LOBSTER_RESULT_SCHEMA__, 'has_result': False, 'result': None, 'type': None}
 if 'result' in dir() and result is not None:
-    result_path = EXEC_CACHE / '.execution_result.json'
     try:
-        # Try to serialize result
-        with open(result_path, 'w') as f:
-            json.dump({'result': result, 'type': type(result).__name__}, f)
+        json.dumps(result)
+        _lobster_payload = result
     except (TypeError, ValueError):
-        # Result not JSON-serializable, save as string
-        with open(result_path, 'w') as f:
-            json.dump({'result': str(result), 'type': type(result).__name__}, f)
+        _lobster_payload = str(result)  # Result not JSON-serializable, save as string
+    _lobster_env.update(has_result=True, result=_lobster_payload, type=type(result).__name__)
+with open(EXEC_CACHE / '.execution_result.json', 'w') as _lobster_rf:
+    json.dump(_lobster_env, _lobster_rf)
+
+# === COMPLETION MARKER (figure fence; must stay the LAST statement) ===
+(EXEC_CACHE / '.execution_complete').write_text(__LOBSTER_RUN_NONCE__)
 """
 
         # IPC dir must match EXEC_CACHE in the subprocess template.
@@ -1316,6 +1485,22 @@ if 'result' in dir() and result is not None:
         ipc_dir.mkdir(parents=True, exist_ok=True)
         script_path = ipc_dir / f".script_{uuid.uuid4().hex}.py"
         result_path = ipc_dir / ".execution_result.json"
+        # Completion signal for cooperative early-exit detection,
+        # not authentication: child and parent use the same OS user, and the child
+        # can read/copy this nonce. Missing/mismatched markers or unreadable results
+        # prevent figure ingestion, but matching files do not prove the normal
+        # epilogue ran. A forged signal with a valid figure may save through the
+        # parent path; validation, record-first ordering, digests and lifecycle/
+        # attempt fences still apply there. This is not a tamper-resistance boundary.
+        complete_path = ipc_dir / ".execution_complete"
+        run_nonce = uuid.uuid4().hex
+        head, _, tail = full_script.rpartition("__LOBSTER_RUN_NONCE__")  # marker only
+        full_script = head + repr(run_nonce) + tail
+        head, _, tail = full_script.rpartition("__LOBSTER_RESULT_SCHEMA__")
+        full_script = head + repr(RESULT_SCHEMA) + tail
+        context["completion"] = COMPLETION_UNCONFIRMED
+        for stale in (result_path, complete_path):
+            stale.unlink(missing_ok=True)
 
         try:
             script_path.write_text(full_script)
@@ -1367,14 +1552,16 @@ if 'result' in dir() and result is not None:
                     f"Code execution failed with return code {return_code}"
                 )
             else:
-                # Try to load result
-                if result_path.exists():
-                    try:
-                        with open(result_path) as f:
-                            result_data = json.load(f)
-                            result = result_data.get("result")
-                    except Exception as e:
-                        logger.debug(f"Could not load result file: {e}")
+                # Load the result envelope (always written by a normally completed run).
+                result, completion = _read_result_envelope(result_path)
+                try:
+                    marker = read_regular(complete_path, MAX_MARKER_BYTES)
+                except RefusedRead:
+                    marker = None
+                marker_ok = marker == run_nonce.encode("ascii")
+                if not marker_ok:
+                    completion = COMPLETION_UNCONFIRMED  # early exit takes precedence
+                context["completion"] = completion
 
             return result, stdout_output, stderr_output, error
 
@@ -1388,21 +1575,30 @@ if 'result' in dir() and result is not None:
             return None, "", f"Subprocess error: {e}", error
 
         finally:
-            # Clean up temporary files
-            if result_path.exists():
-                result_path.unlink()
-            if script_path.exists():
-                if error is not None:
-                    # Archive failed script for debugging
-                    import shutil
-
-                    archive_dir = workspace_path / ".failed_scripts"
+            # Clean up temporary files. Best effort: whatever the code left at these paths,
+            # cleanup never replaces the outcome decided above.
+            for leftover in (result_path, complete_path):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if error is not None and os.path.lexists(script_path):
+                # Archive the failed script for debugging: a rename into a real directory
+                # only, never a copy of a file the code could have changed.
+                archive_dir = workspace_path / ".failed_scripts"
+                archive_path = archive_dir / script_path.name
+                try:
                     archive_dir.mkdir(exist_ok=True)
-                    archive_path = archive_dir / script_path.name
-                    shutil.move(str(script_path), str(archive_path))
+                    if not _stat.S_ISDIR(os.lstat(archive_dir).st_mode):
+                        raise NotADirectoryError(archive_dir.name)
+                    os.rename(script_path, archive_path)
                     logger.debug(f"Archived failed script to {archive_path}")
-                else:
-                    script_path.unlink()
+                except OSError:
+                    logger.debug("Failed script not archived")
+            try:
+                script_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _create_ir(
         self,
@@ -1446,6 +1642,7 @@ if 'result' in dir() and result is not None:
         """
         # Extract imports from code
         imports = self._extract_imports(code)
+        uses_helpers = _uses_figure_helpers(code)
 
         # Build workspace setup code for notebook export
         # This ensures WORKSPACE and OUTPUT_DIR are defined when notebook runs
@@ -1529,10 +1726,18 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 "warnings": stats["warnings"],
                 "selective_loading": workspace_keys is not None,
                 "workspace_keys_count": len(workspace_keys) if workspace_keys else 0,
+                **(
+                    {"replay_excluded": REPLAY_EXCLUDED_FIGURE_HELPERS}
+                    if uses_helpers
+                    else {}
+                ),
             },
             validates_on_export=True,
             requires_validation=True,
-            exportable=persist,  # Only include in notebook if persist=True
+            # Only include in notebook if persist=True, and never a cell that needs the
+            # attempt-only figure helpers (see FIGURE_HELPER_NAMES).
+            exportable=persist and not uses_helpers,
+            replayable=not uses_helpers,
         )
 
     def _extract_imports(self, code: str) -> List[str]:

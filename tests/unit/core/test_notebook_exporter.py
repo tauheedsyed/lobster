@@ -1158,7 +1158,8 @@ class TestNotebookExportCharacterization:
         assert "⚠ No IR" not in footers[0].source
         assert "IR-enabled steps are fully reproducible." not in footers[0].source
         assert (
-            "IR coverage alone does not establish reproducibility." in footers[0].source
+            "IR coverage alone does not show that running it gives the same results."
+            in footers[0].source
         )
 
     def test_footer_scopes_complete_export_to_ir_coverage(self, ledger_exporter):
@@ -1203,7 +1204,7 @@ class TestNotebookExportCharacterization:
             "n_activities": 4,
             "coverage_percent": 25.0,
         }
-        for marker in ("## Results Export", "## Provenance & Reproducibility"):
+        for marker in ("## Results Export", "## Provenance\n"):
             cells = [
                 cell
                 for cell in notebook.cells
@@ -1213,7 +1214,7 @@ class TestNotebookExportCharacterization:
             assert cells[0].source.count("`second_step`") == 1
             assert cells[0].source.count("`first_step`") == 1
             assert "`second_step`, `first_step`" in cells[0].source
-            if marker == "## Provenance & Reproducibility":
+            if marker == "## Provenance\n":
                 assert "| **Provenance-Only Activities** | 3 |" in cells[0].source
 
     def test_summary_names_excluded_activities_without_attributing_a_cause(
@@ -1222,8 +1223,7 @@ class TestNotebookExportCharacterization:
         summaries = [
             cell
             for cell in notebook_with_only_save_ir.cells
-            if cell.cell_type == "markdown"
-            and "## Provenance & Reproducibility" in cell.source
+            if cell.cell_type == "markdown" and "## Provenance\n" in cell.source
         ]
 
         assert len(summaries) == 1

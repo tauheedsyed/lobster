@@ -2,7 +2,7 @@
 Jupyter Notebook Exporter for Pipeline Replay.
 
 This module converts Lobster provenance records into executable Jupyter notebooks,
-enabling reproducible analysis workflows using industry-standard tools.
+so an analysis workflow can be read and re-run with standard tools.
 
 The exporter uses Service-Emitted Intermediate Representation (IR) to automatically
 generate code without manual mapping registries, achieving 95%+ executable notebooks.
@@ -76,7 +76,7 @@ class NotebookExporter:
     Convert Lobster provenance to executable Jupyter notebook using IR.
 
     This class transforms provenance tracking data with embedded Intermediate
-    Representation (IR) into reproducible analysis pipelines using standard
+    Representation (IR) into analysis pipelines using standard
     Jupyter notebook format compatible with Papermill for parameterized execution.
 
     The key innovation is that services emit AnalysisStep IR objects that contain
@@ -120,11 +120,13 @@ class NotebookExporter:
                 The first three curate — they select IR marked ``exportable``,
                 which services commonly derive from a ``persist`` flag, so the
                 result is a notebook a user could publish. ``"replay"`` instead
-                selects IR marked ``replayable``: every step required to
-                reproduce the result, including ad-hoc computations and state
-                mutations that curation drops. Use it when the notebook is
-                meant as a reproducibility artefact rather than a publishable
-                one. The default is unchanged.
+                selects IR marked ``replayable``: the recorded steps marked
+                replayable, including ad-hoc computations and state mutations
+                that curation drops; steps that cannot be replayed are listed,
+                and a step that changed data but cannot be replayed makes it
+                refuse. Use it when the notebook is meant to re-run the
+                session's steps rather than to be published. The default is
+                unchanged.
             validate_syntax: Whether to validate generated Python syntax
 
         Returns:
@@ -142,10 +144,10 @@ class NotebookExporter:
 
         logger.info(f"Exporting notebook with IR: {name}")
 
-        # A failed step may have changed data before it failed. A reproduction
+        # A failed step may have changed data before it failed. A replay
         # cannot assume it did not, so "replay" refuses instead of dropping it.
         failed_types = [
-            str(a.get("type") or "unknown")
+            self._omitted_label(a)
             for a in self.provenance.activities
             if self._is_failed(a)
         ]
@@ -157,6 +159,22 @@ class NotebookExporter:
                 "with the default mode."
             )
 
+        # A step that changed data but cannot be replayed says so in its IR
+        # (``replay_incomplete``). A replay would silently miss that change, so
+        # "replay" refuses instead of dropping it.
+        # The message is literal: step metadata never reaches it.
+        incomplete = any(
+            not self._ir_field(a, "replayable", True)
+            and self._ir_context(a).get("replay_incomplete") is True
+            for a in self.provenance.activities
+        )
+        if filter_strategy == "replay" and incomplete:
+            raise ValueError(
+                "Cannot export a replay notebook: some steps changed data but cannot "
+                "be replayed. Export with the default mode, or re-run the analysis "
+                "without them."
+            )
+
         # Filter activities by success status
         activities = self._filter_activities(filter_strategy)
         logger.debug(f"Filtered {len(activities)} activities for export")
@@ -165,7 +183,7 @@ class NotebookExporter:
         # Under the default strategies this selects on `exportable`, filtering out
         # orchestration activities (publication processing, etc.) that belong in
         # provenance but not in a curated notebook. Under "replay" it selects on
-        # `replayable` instead, keeping every step needed to reproduce the result.
+        # `replayable` instead, keeping the steps marked replayable.
         select_on = "replayable" if filter_strategy == "replay" else "exportable"
         exportable_pairs = self._get_exportable_activity_ir_pairs(
             activities, select_on=select_on
@@ -174,7 +192,7 @@ class NotebookExporter:
         filtered_count = len(activities) - exportable_count
         exportable_activity_ids = {id(activity) for activity, _ in exportable_pairs}
         excluded_activity_types = [
-            str(activity.get("type") or "unknown")
+            self._omitted_label(activity)
             for activity in activities
             if id(activity) not in exportable_activity_ids
         ]
@@ -333,6 +351,46 @@ class NotebookExporter:
             return self._filter_activities("successful")
 
     @staticmethod
+    def _ir_field(activity: Dict[str, Any], name: str, default: Any = None) -> Any:
+        """One field of an activity's IR (a dict or an AnalysisStep); ``default`` if none."""
+        ir = activity.get("ir")
+        if isinstance(ir, dict):
+            return ir.get(name, default)
+        return getattr(ir, name, default) if ir is not None else default
+
+    @classmethod
+    def _ir_context(cls, activity: Dict[str, Any]) -> Dict[str, Any]:
+        """The IR's execution context ({} if absent or not a mapping)."""
+        context = cls._ir_field(activity, "execution_context")
+        return context if isinstance(context, dict) else {}
+
+    # Fixed labels for an excluded step (never the raw metadata strings).
+    _EXCLUDED_STEP_TYPES = frozenset({"execute_custom_code", "custom_code_execution"})
+    _EXCLUSION_REASONS = {"uses_attempt_figure_helpers": "uses_attempt_figure_helpers"}
+
+    @classmethod
+    def _step_label(cls, activity: Dict[str, Any]) -> str:
+        """An activity's type; for a step whose IR gives an exclusion reason, a known
+        type or ``custom step``."""
+        label = str(activity.get("type") or "unknown")
+        if "replay_excluded" not in cls._ir_context(activity):
+            return label
+        return label if label in cls._EXCLUDED_STEP_TYPES else "custom step"
+
+    @classmethod
+    def _omitted_label(cls, activity: Dict[str, Any]) -> str:
+        """An activity's type; for a step whose IR gives an exclusion reason, a fixed
+        label: a known type (else ``custom step``) and a known reason (else
+        ``excluded``)."""
+        label = cls._step_label(activity)
+        context = cls._ir_context(activity)
+        if "replay_excluded" not in context:
+            return label
+        reason = context.get("replay_excluded")
+        known = reason if isinstance(reason, str) else None
+        return f"{label} ({cls._EXCLUSION_REASONS.get(known, 'excluded')})"
+
+    @staticmethod
     def _is_failed(activity: Dict[str, Any]) -> bool:
         """Whether a provenance activity records a failed step."""
         return bool(activity.get("error")) or activity.get("type") == "failed_operation"
@@ -401,16 +459,16 @@ class NotebookExporter:
         Extract (activity, IR) pairs where IR exists and is selected for output.
 
         Two independent selections are available, because "should this appear in
-        a notebook a user might publish?" and "is this step required to reproduce
-        the result?" are unrelated questions:
+        a notebook a user might publish?" and "is this step needed to re-run the
+        session?" are unrelated questions:
 
         - ``select_on="exportable"`` (default, unchanged) — curation. Filters out
           orchestration activities (e.g. publication processing, metadata
           extraction) that log provenance but don't need notebook
           representation, keeping a curated notebook publishable while the
           complete audit trail stays in provenance.
-        - ``select_on="replayable"`` — reproducibility. Keeps every step needed to
-          re-execute the session faithfully, including ad-hoc computations and
+        - ``select_on="replayable"`` — replay. Keeps the steps marked as needed to
+          re-run the session, including ad-hoc computations and
           state mutations that curation deliberately drops. Selecting on
           ``exportable`` here would silently omit the step that produced the
           reported result and any mutation that deleted a modality mid-session,
@@ -525,11 +583,14 @@ class NotebookExporter:
         )
 
         if mode == "replay":
-            mode_text = "`replay`: every recorded step needed to reproduce the result"
+            mode_text = (
+                "`replay`: the recorded steps marked replayable; "
+                "steps that cannot be replayed are listed below"
+            )
         else:
             mode_text = (
-                f"`{mode}`: curated steps for a readable workflow; "
-                "not a full reproduction (use `/pipeline export --replay` for that)"
+                f"`{mode}`: a curated subset of steps "
+                "(see `/pipeline export --replay` for the replayable steps)"
             )
         omitted = list(dict.fromkeys(omitted_types or []))
         omitted_text = ", ".join(f"`{t}`" for t in omitted) if omitted else "none"
@@ -538,7 +599,7 @@ class NotebookExporter:
 
 **Generated from Lobster AI Session**
 
-{description if description else "Reproducible bioinformatics analysis workflow"}
+{description if description else "Bioinformatics analysis workflow"}
 
 **Created:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 **Lobster Version:** {self._get_lobster_version()}
@@ -553,8 +614,8 @@ class NotebookExporter:
 ## Workflow Summary
 
 This notebook was automatically generated from a Lobster analysis session using
-Service-Emitted Intermediate Representation (IR). Each analysis step contains
-complete code generation instructions for reproducibility.
+Service-Emitted Intermediate Representation (IR). Each included step carries the
+code recorded for it.
 
 **Session Statistics:**
 - Activities: {len(self.provenance.activities)}
@@ -947,7 +1008,11 @@ print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
         Returns:
             Markdown cell documenting the analysis step
         """
-        activity_type = activity.get("type", "unknown")
+        activity_type = (
+            self._step_label(activity)
+            if "replay_excluded" in self._ir_context(activity)
+            else activity.get("type", "unknown")
+        )
         params = activity.get("parameters", {})
         timestamp = activity.get("timestamp", "unknown")
 
@@ -1065,7 +1130,7 @@ print(f"Loaded data: {adata.n_obs} cells × {adata.n_vars} genes")
 
 1. **Review Results**: Check output files and visualizations
 2. **Version Control**: Commit this notebook to Git
-3. **Share**: Distribute notebook for reproducibility
+3. **Share**: Share the notebook with collaborators
 4. **Re-run**: Use Papermill to execute on new data
 
 ### Usage Example
@@ -1084,7 +1149,7 @@ settings, edit that step's code cell.
 
 This notebook was generated using Service-Emitted IR. Review the IR coverage and
 provenance summary for activity counts and excluded activity types.
-IR coverage alone does not establish reproducibility.
+IR coverage alone does not show that running it gives the same results.
 
 ---
 
@@ -1124,7 +1189,7 @@ IR coverage alone does not establish reproducibility.
 
         content = f"""---
 
-## Provenance & Reproducibility
+## Provenance
 
 | Metric | Count |
 |--------|-------|

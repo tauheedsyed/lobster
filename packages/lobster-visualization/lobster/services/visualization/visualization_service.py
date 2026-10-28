@@ -1052,84 +1052,23 @@ class SingleCellVisualizationService:
             go.Figure: Professional multi-panel QC figure
         """
         try:
-            # Calculate all QC metrics upfront
-            logger.debug("Computing comprehensive QC metrics for single-cell data")
-
-            # Basic metrics
-            if "n_genes" not in adata.obs.columns:
-                adata.obs["n_genes"] = (adata.X > 0).sum(axis=1)
-            if "n_counts" not in adata.obs.columns:
-                if issparse(adata.X):
-                    adata.obs["n_counts"] = adata.X.sum(axis=1).A1
-                else:
-                    adata.obs["n_counts"] = adata.X.sum(axis=1)
-
-            # Calculate gene detection rate (complexity)
-            adata.obs["gene_detection_rate"] = adata.obs["n_genes"] / adata.n_vars * 100
-
-            # Calculate log10 counts for better visualization
-            adata.obs["log10_counts"] = np.log10(adata.obs["n_counts"] + 1)
-            adata.obs["log10_genes"] = np.log10(adata.obs["n_genes"] + 1)
-
-            # Mitochondrial percentage
-            if "percent_mito" not in adata.obs.columns:
-                mito_genes = adata.var_names.str.startswith(
-                    "MT-"
-                ) | adata.var_names.str.startswith("mt-")
-                if mito_genes.sum() > 0:
-                    if issparse(adata.X):
-                        adata.obs["percent_mito"] = (
-                            np.sum(adata[:, mito_genes].X, axis=1).A1
-                            / adata.obs["n_counts"]
-                            * 100
-                        )
-                    else:
-                        adata.obs["percent_mito"] = (
-                            np.sum(adata[:, mito_genes].X, axis=1)
-                            / adata.obs["n_counts"]
-                            * 100
-                        )
-                else:
-                    adata.obs["percent_mito"] = 0
-
-            # Ribosomal percentage
-            if "percent_ribo" not in adata.obs.columns:
-                ribo_genes = adata.var_names.str.startswith(
-                    ("RPS", "RPL", "rps", "rpl")
+            # QC is computed by assess_data_quality, not by drawing a figure.
+            required = {
+                "n_genes",
+                "n_counts",
+                "gene_detection_rate",
+                "log10_counts",
+                "log10_genes",
+                "percent_mito",
+                "percent_ribo",
+                "percent_hb",
+            }
+            missing = sorted(required.difference(adata.obs.columns))
+            if missing:
+                raise VisualizationError(
+                    "Run assess_data_quality before drawing QC; missing metrics: "
+                    + ", ".join(missing)
                 )
-                if ribo_genes.sum() > 0:
-                    if issparse(adata.X):
-                        adata.obs["percent_ribo"] = (
-                            np.sum(adata[:, ribo_genes].X, axis=1).A1
-                            / adata.obs["n_counts"]
-                            * 100
-                        )
-                    else:
-                        adata.obs["percent_ribo"] = (
-                            np.sum(adata[:, ribo_genes].X, axis=1)
-                            / adata.obs["n_counts"]
-                            * 100
-                        )
-                else:
-                    adata.obs["percent_ribo"] = 0
-
-            # Hemoglobin percentage (important for blood samples)
-            hb_genes = adata.var_names.str.startswith(("HBA", "HBB", "hba", "hbb"))
-            if hb_genes.sum() > 0:
-                if issparse(adata.X):
-                    adata.obs["percent_hb"] = (
-                        np.sum(adata[:, hb_genes].X, axis=1).A1
-                        / adata.obs["n_counts"]
-                        * 100
-                    )
-                else:
-                    adata.obs["percent_hb"] = (
-                        np.sum(adata[:, hb_genes].X, axis=1)
-                        / adata.obs["n_counts"]
-                        * 100
-                    )
-            else:
-                adata.obs["percent_hb"] = 0
 
             # Calculate doublet scores if available
             has_doublet = "doublet_score" in adata.obs.columns

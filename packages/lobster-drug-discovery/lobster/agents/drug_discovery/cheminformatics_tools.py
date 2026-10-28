@@ -13,7 +13,7 @@ All tools follow the Lobster AI tool pattern:
 
 Cloud visualization integration:
 - prepare_molecule_3d writes .sdf files to workspace/data/ for Mol* rendering
-- fingerprint_similarity creates Plotly heatmaps via plot_manager
+- fingerprint_similarity computes results only; figures are drawn on request
 """
 
 import hashlib
@@ -26,6 +26,66 @@ from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _persist_similarity_result(
+    data_manager, stats, smiles, fingerprint, radius, agent_name
+):
+    """Keep analysis output in the existing workspace metadata cache, not figures.
+
+    The returned path is a declared pointer, not immutable identity. A later
+    submit_figure must freeze its source payload through the trusted saver.
+    """
+    import json
+    import uuid
+    from datetime import datetime, timezone
+
+    from lobster.services.data_access.workspace_content_service import (
+        ContentType,
+        MetadataContent,
+        WorkspaceContentService,
+    )
+
+    matrix = stats["similarity_matrix"]
+    identifiers = stats["compound_ids"]
+    n = len(identifiers)
+    if n != len(smiles) or len(matrix) != n or any(len(row) != n for row in matrix):
+        raise ValueError(
+            "Similarity result must contain the complete labelled NxN matrix"
+        )
+    payload = {
+        "schema": "lobster.fingerprint_similarity_result/1",
+        "analysis": dict(stats),
+        "parameters": {
+            "fingerprint": fingerprint,
+            "radius": radius,
+            "n_bits": stats.get("n_bits"),
+        },
+        "compound_mapping": [
+            {"id": str(identifier), "smiles": smi}
+            for identifier, smi in zip(identifiers, smiles)
+        ],
+        "coverage": f"all {n}x{n}, unsampled",
+    }
+    if len(json.dumps(payload, allow_nan=False).encode("utf-8")) > 64 * 1024 * 1024:
+        raise ValueError(
+            "Similarity result exceeds the 64 MiB source limit; it was not sampled"
+        )
+    key = f"fingerprint_similarity_{uuid.uuid4().hex}"
+    content = MetadataContent(
+        identifier=key,
+        content_type="fingerprint_similarity",
+        data=payload,
+        description="Complete precomputed Tanimoto similarity result",
+        source=agent_name,
+        cached_at=datetime.now(timezone.utc).isoformat(),
+    )
+    path = Path(
+        WorkspaceContentService(data_manager).write_content(
+            content, ContentType.METADATA
+        )
+    )
+    return key, path.relative_to(Path(data_manager.workspace_path)).as_posix()
 
 
 def create_cheminformatics_tools(
@@ -144,54 +204,21 @@ def create_cheminformatics_tools(
             if "error" in stats:
                 return f"Error: {stats['error']}"
 
+            result_key, result_ref = _persist_similarity_result(
+                data_manager, stats, parsed, fingerprint, radius, agent_name
+            )
             data_manager.log_tool_usage(
                 "fingerprint_similarity",
                 {
                     "smiles_list": parsed,
                     "fingerprint": fingerprint,
                     "radius": radius,
+                    "result_ref": result_ref,
                 },
                 stats,
                 ir=ir,
                 agent=agent_name,
             )
-
-            # Create Plotly heatmap for cloud UI canvas visualization
-            matrix = stats.get("similarity_matrix")
-            plot_manager = getattr(data_manager, "plot_manager", None)
-            if matrix and plot_manager:
-                try:
-                    import plotly.graph_objects as go
-
-                    labels = stats.get(
-                        "compound_ids",
-                        [f"Mol {i + 1}" for i in range(len(matrix))],
-                    )
-                    fig = go.Figure(
-                        data=go.Heatmap(
-                            z=matrix,
-                            x=labels,
-                            y=labels,
-                            colorscale="Viridis",
-                            text=[[f"{v:.3f}" for v in row] for row in matrix],
-                            texttemplate="%{text}",
-                            hovertemplate=(
-                                "Similarity(%{x}, %{y}) = %{z:.3f}<extra></extra>"
-                            ),
-                        )
-                    )
-                    fig.update_layout(
-                        title=f"Tanimoto Similarity ({fingerprint.title()} Fingerprints)",
-                        width=600,
-                        height=500,
-                    )
-                    plot_manager.add_plot(
-                        fig,
-                        title=f"Fingerprint Similarity ({len(parsed)} compounds)",
-                        source="cheminformatics_expert",
-                    )
-                except Exception as plot_err:
-                    logger.warning(f"Failed to create similarity heatmap: {plot_err}")
 
             n = stats.get("n_compounds", 0)
             mean_sim = stats.get("mean_similarity", 0)
@@ -204,12 +231,18 @@ def create_cheminformatics_tools(
                 f"  Mean similarity: {mean_sim:.4f}\n"
                 f"  Max similarity: {max_sim:.4f}\n"
                 f"  Min similarity: {min_sim:.4f}\n"
-                f"  Matrix computed ({n}x{n} Tanimoto distances)"
+                f"  Matrix computed ({n}x{n} Tanimoto similarities)\n"
+                f"  Result: {result_ref} (workspace_key={result_key})\n"
+                "  Standard figure (on request): `chem.similarity_heatmap`"
             )
         except Exception as e:
             return f"Error computing fingerprint similarity: {e}"
 
-    fingerprint_similarity.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    fingerprint_similarity.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+        "suggests_templates": ["chem.similarity_heatmap"],
+    }
     fingerprint_similarity.tags = ["ANALYZE"]
 
     @tool

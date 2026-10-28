@@ -610,14 +610,16 @@ class AnalysisScreen(Screen):
             self.notify("Cleared", timeout=1)
 
         elif cmd == "/save":
-            saved, _, _ = (
-                self.client.data_manager.plot_manager.save_plots_to_workspace()
+            # Figures are saved when produced (trusted save); /save writes missing HTML views.
+            from lobster.core.figures.renditions import (
+                describe_renditions,
+                ensure_html_renditions,
             )
-            if saved:
-                results.append_system_message(f"Saved {len(saved)} plots to workspace.")
+
+            views = ensure_html_renditions(self.client.data_manager.figure_store)
+            results.append_system_message(describe_renditions(views))
+            if views:
                 self.query_one(PlotPreview).refresh_plots()
-            else:
-                results.append_system_message("No plots to save.")
 
         elif cmd in ("/exit", "/quit", "/q"):
             self.app.exit()

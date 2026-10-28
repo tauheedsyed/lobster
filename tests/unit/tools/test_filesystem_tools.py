@@ -172,6 +172,64 @@ class TestWriteFile:
         )
         assert "Error" in result or "outside" in result.lower()
 
+    def test_write_into_the_managed_figure_folder_is_refused(self, workspace):
+        from lobster.tools.filesystem_tools import create_filesystem_tools
+
+        tools = {t.name: t for t in create_filesystem_tools(workspace_path=workspace)}
+        for path in ("plots/f_x/r_y/revision.json", "plots/f_x/new.json"):
+            result = tools["write_file"].invoke({"path": path, "content": "{}"})
+            assert result.startswith("Error:") and "submit_figure" in result
+            assert not (workspace / path).exists()
+        # a symlink into the managed folder is resolved and refused too
+        (workspace / "plots" / "f_x").mkdir(parents=True, exist_ok=True)
+        (workspace / "alias").symlink_to(workspace / "plots" / "f_x")
+        result = tools["write_file"].invoke({"path": "alias/r.json", "content": "{}"})
+        assert result.startswith("Error:")
+        assert not (workspace / "plots" / "f_x" / "r.json").exists()
+        # a flat file directly in plots/ (legacy layout) is not managed
+        result = tools["write_file"].invoke({"path": "plots/notes.txt", "content": "x"})
+        assert "Wrote" in result
+
+    def test_write_guards_the_original_spelling(self, workspace):
+        """Symlinks at managed locations and 'symlink/..' are refused; ordinary
+        inside paths are written; the outside boundary is unchanged."""
+        from lobster.tools.filesystem_tools import create_filesystem_tools
+
+        tools = {t.name: t for t in create_filesystem_tools(workspace_path=workspace)}
+        write = tools["write_file"]
+        rev = workspace / "plots" / "f_1" / "r_1"
+        rev.mkdir(parents=True)
+        # a managed-location final symlink pointing INSIDE the workspace
+        (workspace / "plots" / "legacy.html").symlink_to(workspace / "data" / "x.html")
+        result = write.invoke({"path": "plots/legacy.html", "content": "x"})
+        assert result.startswith("Error:")
+        assert not (workspace / "data" / "x.html").exists()
+        # symlink/.. resolves into plots/f_1/figure.json (managed)
+        (workspace / "alias2").symlink_to(rev, target_is_directory=True)
+        result = write.invoke({"path": "alias2/../figure.json", "content": "{}"})
+        assert result.startswith("Error:")
+        assert not (workspace / "plots" / "f_1" / "figure.json").exists()
+        # an ordinary inside path with '..' is written
+        result = write.invoke({"path": "data/../data/ok.txt", "content": "ok"})
+        assert "Wrote" in result and (workspace / "data" / "ok.txt").read_text() == "ok"
+        # the outside boundary is unchanged
+        result = write.invoke({"path": "../outside_write_guard.txt", "content": "x"})
+        assert (
+            "Error" in result
+            and not (workspace.parent / "outside_write_guard.txt").exists()
+        )
+
+    def test_write_refuses_a_symlinked_plots_root(self, workspace):
+        from lobster.tools.filesystem_tools import create_filesystem_tools
+
+        tools = {t.name: t for t in create_filesystem_tools(workspace_path=workspace)}
+        inner = workspace / "inner"
+        inner.mkdir()
+        (workspace / "plots").symlink_to(inner, target_is_directory=True)
+        result = tools["write_file"].invoke({"path": "plots/notes.txt", "content": "x"})
+        assert result.startswith("Error:")
+        assert not (inner / "notes.txt").exists()
+
 
 class TestGlobFiles:
     """Test glob_files tool."""
@@ -249,7 +307,9 @@ class TestShellExecute:
         from lobster.tools.filesystem_tools import create_filesystem_tools
 
         tools = {t.name: t for t in create_filesystem_tools(workspace_path=workspace)}
-        result = await tools["shell_execute"].ainvoke({"command": "sleep 120", "timeout": 2})
+        result = await tools["shell_execute"].ainvoke(
+            {"command": "sleep 120", "timeout": 2}
+        )
         assert "timeout" in result.lower() or "timed out" in result.lower()
 
     @pytest.mark.asyncio
@@ -257,7 +317,9 @@ class TestShellExecute:
         from lobster.tools.filesystem_tools import create_filesystem_tools
 
         tools = {t.name: t for t in create_filesystem_tools(workspace_path=workspace)}
-        result = await tools["shell_execute"].ainvoke({"command": "ls nonexistent_dir_xyz"})
+        result = await tools["shell_execute"].ainvoke(
+            {"command": "ls nonexistent_dir_xyz"}
+        )
         assert (
             "exit_code" in result.lower()
             or "error" in result.lower()

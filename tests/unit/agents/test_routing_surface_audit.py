@@ -269,12 +269,19 @@ class TestBaselineGate:
         counts = audit.per_agent_counts(records)
         total = sum(c["unreachable"] for c in counts.values())
         agents = sorted(counts)
+        # A zero-count agent cannot supply the decrement. Coverage improvements
+        # must not make this regression fixture silently stop shifting anything.
+        decrement_agent = next(
+            (a for a in agents if counts[a]["unreachable"] >= 1), None
+        )
+        assert decrement_agent is not None, "fixture needs an unreachable capability"
+        increment_agent = next((a for a in agents if a != decrement_agent), None)
+        assert increment_agent is not None, "fixture needs two distinct agents"
         shifted = {k: dict(v) for k, v in counts.items()}
         # Same total, redistributed: one agent better, another worse.
-        shifted[agents[0]]["unreachable"] += 1
-        shifted[agents[-1]]["unreachable"] = max(
-            0, shifted[agents[-1]]["unreachable"] - 1
-        )
+        shifted[increment_agent]["unreachable"] += 1
+        shifted[decrement_agent]["unreachable"] -= 1
+        assert sum(c["unreachable"] for c in shifted.values()) == total
 
         baseline = tmp_path / "b.json"
         baseline.write_text(

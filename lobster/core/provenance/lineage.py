@@ -21,6 +21,7 @@ Schema (adata.uns['lineage']):
     }
 """
 
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -116,10 +117,16 @@ class LineageMetadata:
     parent_modality: Optional[str]
     step_summary: Optional[str]
     created_at: str
+    #: Identity of this store event (figure contract §5.2). Fresh per ``create_lineage_metadata``;
+    #: persisted with the h5ad so a reload keeps it; ``None`` for legacy records (never invented).
+    instance_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage in adata.uns."""
-        return asdict(self)
+        data = asdict(self)
+        if data.get("instance_id") is None:
+            data.pop("instance_id", None)  # h5ad uns cannot hold None; absence = legacy
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LineageMetadata":
@@ -132,6 +139,7 @@ class LineageMetadata:
             "parent_modality",
             "step_summary",
             "created_at",
+            "instance_id",
         }
         filtered_data = {k: v for k, v in data.items() if k in valid_keys}
         return cls(**filtered_data)
@@ -243,6 +251,7 @@ def create_lineage_metadata(
         parent_modality=parent_modality,
         step_summary=step_summary,
         created_at=datetime.now().isoformat(),
+        instance_id=uuid.uuid4().hex,
     )
 
 

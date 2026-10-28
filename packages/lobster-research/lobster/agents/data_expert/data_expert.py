@@ -33,6 +33,7 @@ AGENT_CONFIG = AgentRegistryConfig(
         "proteomics_expert, metabolomics_expert). Data expert loads data; domain experts analyze it."
     ),
     child_agents=["metadata_assistant"],
+    code_tool_default=True,
 )
 
 # === Heavy imports below ===
@@ -67,16 +68,14 @@ from lobster.services.data_access.geo.import_requirements import (
     ImportRequirementNotMet,
 )
 from lobster.services.execution.registry import (
-    CustomCodeExecutionService,
     SDKDelegationError,
     SDKDelegationService,
 )
 
 # Tool imports
-from lobster.tools.custom_code_tool import create_execute_custom_code_tool
+from lobster.tools.code_tool_switch import attach_code_tool
 from lobster.tools.download_orchestrator import DownloadOrchestrator
 from lobster.tools.filesystem_tools import create_filesystem_tools
-from lobster.tools.plot_tools import create_plot_tools
 from lobster.tools.workspace_tool import create_list_modalities_tool
 from lobster.utils.logger import get_logger
 
@@ -208,18 +207,15 @@ def data_expert(
 
     modality_service = ModalityManagementService(data_manager)
 
-    # Initialize execution services
-    custom_code_service = CustomCodeExecutionService(data_manager)
-
-    # Create shared execute_custom_code tool via factory (v2.7+: unified tool)
-    execute_custom_code = create_execute_custom_code_tool(
-        data_manager=data_manager,
-        custom_code_service=custom_code_service,
-        agent_name="data_expert",
-        post_processor=None,  # data_expert has no special post-processing
+    # Shared execute_custom_code tool, switchable per agent (lobster.tools.code_tool_switch).
+    # Its code activities keep recording the agent as "data_expert".
+    code_tools = attach_code_tool(
+        [],
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name="data_expert",
     )
-    execute_custom_code.metadata = {"categories": ["CODE_EXEC"], "provenance": False}
-    execute_custom_code.tags = ["CODE_EXEC"]
 
     # Try to initialize SDK delegation service (may fail if SDK not available)
     # SDKDelegationService may be None in open-core distribution
@@ -1294,16 +1290,6 @@ To save, run again with save_to_file=True"""
         create_filesystem_tools(workspace_path=fs_workspace) if fs_workspace else []
     )
 
-    # Create interactive plot tools for general-purpose visualization
-    plot_workspace = fs_workspace or (
-        Path(data_manager.workspace_path)
-        if getattr(data_manager, "workspace_path", None)
-        else None
-    )
-    plot_tools = (
-        create_plot_tools(data_manager, plot_workspace) if plot_workspace else []
-    )
-
     base_tools = [
         # CORE (3 tools)
         execute_download_from_queue,
@@ -1318,12 +1304,10 @@ To save, run again with save_to_file=True"""
         # HELPER
         get_adapter_info,
         # ADVANCED (Execution & Reasoning)
-        execute_custom_code,
+        *code_tools,
         # delegate_complex_reasoning, #TODO needs further security validation
         # FILESYSTEM (DeepAgent-inspired file-level tools)
         *filesystem_tools,
-        # VISUALIZATION (general-purpose interactive plots)
-        *plot_tools,
     ]
     # create_mudata_from_modalities: Combine modalities into MuData for integrated analysis
 

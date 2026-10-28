@@ -245,6 +245,17 @@ class WorkspaceItem(TypedDict, total=False):
     details: Optional[str]
 
 
+def _saved_figures_section(data_manager) -> str:
+    """Saved figures for the overview (contract §8), via the one native reader.
+
+    Restart-safe and producer-independent. Absence -> ""; any read fault -> an explicit
+    "Not listed: <reason>" line, never a silently missing section.
+    """
+    from lobster.core.figures.listing import describe_workspace_figures
+
+    return describe_workspace_figures(data_manager)
+
+
 def create_get_content_from_workspace_tool(
     data_manager: DataManagerV2,
     # Executing agent recorded in provenance. Defaults to None, NOT to a plausible
@@ -818,7 +829,10 @@ def create_get_content_from_workspace_tool(
                     status_msg = (
                         f" with status '{status_filter}'" if status_filter else ""
                     )
-                    return f"No items found{filter_msg}{status_msg}. Use write_to_workspace() to cache content first."
+                    empty = f"No items found{filter_msg}{status_msg}. Use write_to_workspace() to cache content first."
+                    if workspace is None:  # the overview still lists saved figures
+                        empty += _saved_figures_section(data_manager)
+                    return empty
 
                 # Format based on level
                 if level == "metadata":
@@ -896,34 +910,8 @@ def create_get_content_from_workspace_tool(
                     except Exception as e:
                         logger.debug(f"Raw data file listing skipped: {e}")
 
-                # --- Plot Manager summary (appended to overview) ---
-                # Surfaces generated plots so the supervisor knows child
-                # agents already created visualizations and doesn't retry.
-                try:
-                    if hasattr(data_manager, "plot_manager"):
-                        pm = data_manager.plot_manager
-                        if pm.latest_plots:
-                            response += f"\n## Plots ({len(pm.latest_plots)})\n\n"
-                            for p in pm.latest_plots[-10:]:  # last 10
-                                src = p.get("source", "unknown")
-                                title = p.get(
-                                    "original_title", p.get("title", "Untitled")
-                                )
-                                plot_type = p.get("dataset_info", {}).get(
-                                    "plot_type", ""
-                                )
-                                response += (
-                                    f"- 📊 **{title}** (id={p['id']}, source={src})"
-                                )
-                                if plot_type:
-                                    response += f" [{plot_type}]"
-                                response += "\n"
-                            response += (
-                                "\n*Plots are auto-delivered to the frontend. "
-                                "Do NOT recreate plots that already appear above.*\n"
-                            )
-                except Exception as e:
-                    logger.debug(f"Plot summary skipped: {e}")
+                # --- Saved figures (appended to overview; contract §8) ---
+                response += _saved_figures_section(data_manager)
 
                 return response
 

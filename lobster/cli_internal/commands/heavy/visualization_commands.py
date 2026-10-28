@@ -19,6 +19,57 @@ from lobster.utils import open_path
 logger = logging.getLogger(__name__)
 
 
+def _legacy_plot_names(data_manager) -> Optional[list]:
+    """Display-safe names of the flat (legacy) files in plots/; ``None`` if unreadable."""
+    from lobster.core.figures.listing import legacy_plot_files, safe_label
+
+    try:
+        names = legacy_plot_files(data_manager.workspace_path)
+    except Exception:
+        return None
+    return sorted(safe_label(n) or "unnamed" for n in names)
+
+
+def _print_legacy_not_supported(names, output, where: str) -> None:
+    """Say plainly that legacy plot files exist and are not supported here (read-only)."""
+    if names is None:
+        output.print(
+            "[yellow]⚠ Legacy plot files in plots/ could not be listed.[/yellow]",
+            style="warning",
+        )
+    elif names:
+        output.print(
+            f"[yellow]⚠ {len(names)} legacy plot file(s) in plots/ are not supported by "
+            f"{where} here; they are not included and stay unchanged.[/yellow]",
+            style="warning",
+        )
+
+
+def _print_not_copied(data_manager, output) -> None:
+    """Make anything the package could not copy visible here, not only in index.json."""
+    report = getattr(data_manager, "last_package_report", None)
+    if not isinstance(report, dict):
+        return
+    legacy = report.get("legacy_plot_files_not_copied")  # None = could not be listed
+    missing = (
+        int(report.get("figures_not_exported") or 0),
+        int(report.get("html_views_not_written") or 0),
+        int(report.get("recorded_png_not_copied") or 0),
+    )
+    legacy_text = (
+        "legacy plot files could not be listed"
+        if legacy is None
+        else f"{int(legacy)} legacy plot file(s)"
+    )
+    if any(missing) or legacy is None or legacy:
+        output.print(
+            f"[yellow]⚠ Not copied: {missing[0]} figure revision(s), {missing[1]} HTML "
+            f"view(s), {missing[2]} recorded PNG(s), {legacy_text}. "
+            "See README.md 'Not copied'.[/yellow]",
+            style="warning",
+        )
+
+
 def export_data(
     client: "AgentClient",
     output: OutputAdapter,
@@ -36,7 +87,10 @@ def export_data(
     Args:
         client: AgentClient instance
         output: OutputAdapter for rendering
-        include_png: Whether to generate PNG versions of plots (default: True)
+        include_png: ``False`` (``--no-png``) disables PNG generation only; no new PNG is
+            rendered locally anyway. The package holds each saved revision's exact bytes,
+            an HTML view and every already recorded PNG rendition; the index records
+            ``png: not_rendered_locally`` (``None`` when False).
         force_resave: Force re-serialization of all modalities (default: False)
         console: Optional Rich console for progress display
 
@@ -51,11 +105,12 @@ def export_data(
             # For local client, check what we're exporting
             data_manager = client.data_manager
             has_data = data_manager.has_data()
-            has_plots = bool(data_manager.latest_plots)
+            saved_figures = len(data_manager._saved_figure_records())
+            has_plots = bool(saved_figures)
 
             if has_data:
                 modality_count = len(data_manager.modalities)
-                plot_count = len(data_manager.latest_plots)
+                plot_count = saved_figures
 
                 # Build progress message
                 items = []
@@ -93,6 +148,7 @@ def export_data(
 
                     # Show summary
                     output.print("[green]✓ Export complete:[/green]", style="success")
+                    _print_not_copied(data_manager, output)
                     output.print(f"  [green]•[/green] {export_path.name}", style="info")
                     if export_stats["reused"] > 0:
                         output.print(
@@ -120,10 +176,11 @@ def export_data(
                         f"[green]✓ Session exported to:[/green] [grey74]{export_path}[/grey74]",
                         style="success",
                     )
+                    _print_not_copied(data_manager, output)
             else:
                 # Fallback to regular export_session for non-data exports
                 if has_plots:
-                    plot_count = len(data_manager.latest_plots)
+                    plot_count = saved_figures
                     output.print(
                         f"[yellow]Exporting {plot_count} plot(s)...[/yellow]",
                         style="info",
@@ -132,6 +189,9 @@ def export_data(
                 output.print(
                     f"[green]✓ Session exported to:[/green] [grey74]{export_path}[/grey74]",
                     style="success",
+                )
+                _print_legacy_not_supported(
+                    _legacy_plot_names(data_manager), output, "export"
                 )
         else:
             # For cloud client or other clients
@@ -200,11 +260,38 @@ def plots_list(client: "AgentClient", output: OutputAdapter) -> Optional[str]:
                 "\n[grey50]Tip: Use /plot <ID> to open a specific plot[/grey50]",
                 style="info",
             )
+            _print_legacy_not_supported(
+                _legacy_plot_names(client.data_manager), output, "/plot or /export"
+            )
 
             return f"Displayed {len(history)} plot(s)"
         else:
-            output.print("[grey50]No plots generated yet[/grey50]", style="info")
-            return "No plots available"
+            # This session made none; the workspace may still hold saved or legacy plots.
+            data_manager = client.data_manager
+            legacy = _legacy_plot_names(data_manager)
+            try:
+                saved = len(data_manager._saved_figure_records())
+            except Exception as e:
+                from lobster.core.figures.errors import safe_reason
+
+                output.print(
+                    f"[yellow]⚠ Saved figures could not be read ({safe_reason(e)}).[/yellow]",
+                    style="warning",
+                )
+                _print_legacy_not_supported(legacy, output, "/plot or /export")
+                return "Saved figures could not be read"
+            if not saved and not legacy and legacy is not None:
+                output.print("[grey50]No plots generated yet[/grey50]", style="info")
+                return "No plots available"
+            if saved:
+                output.print(
+                    f"[grey50]No plots generated in this session; {saved} saved "
+                    "figure(s) in this workspace. Use /plot <figure ref or title> to "
+                    "open one.[/grey50]",
+                    style="info",
+                )
+            _print_legacy_not_supported(legacy, output, "/plot or /export")
+            return f"No session plots; {saved} saved figure(s) in the workspace"
 
     except Exception as e:
         output.print(f"[red]Failed to retrieve plot history: {e}[/red]", style="error")
@@ -232,25 +319,28 @@ def plot_show(
         Summary string for conversation history, or None
     """
     try:
-        plots_dir = client.data_manager.workspace_path / "plots"
+        from lobster.core.figures.renditions import (
+            describe_renditions,
+            ensure_html_rendition,
+            ensure_html_renditions,
+        )
 
-        # Case 1: No identifier - open plots directory
+        data_manager = client.data_manager
+        plots_dir = data_manager.workspace_path / "plots"
+        store = data_manager.figure_store
+
+        # Case 1: No identifier - write missing HTML views (explicit view path), open the dir
         if not plot_identifier:
-            # Ensure plots directory exists
-            if not plots_dir.exists():
-                plots_dir.mkdir(parents=True, exist_ok=True)
-                # Save any existing plots to the directory
-                if client.data_manager.latest_plots:
-                    saved_files, _, _ = (
-                        client.data_manager.plot_manager.save_plots_to_workspace()
-                    )
-                    if saved_files:
-                        output.print(
-                            f"[green]✓ Saved {len(saved_files)} plot file(s) to workspace[/green]",
-                            style="success",
-                        )
+            plots_dir.mkdir(parents=True, exist_ok=True)
+            results = ensure_html_renditions(store)
+            if results:
+                failed = any(r.status != "available" for r in results)
+                output.print(
+                    f"[{'yellow' if failed else 'green'}]{describe_renditions(results)}"
+                    f"[/{'yellow' if failed else 'green'}]",
+                    style="warning" if failed else "success",
+                )
 
-            # Open the directory in file manager
             success, message = open_path(plots_dir)
 
             if success:
@@ -266,78 +356,28 @@ def plot_show(
                 )
                 return f"Failed to open plots directory: {message}"
 
-        # Case 2: Identifier provided - find and open specific plot
-        found_plot = None
-        plot_info = None
-
-        for plot_entry in client.data_manager.latest_plots:
-            # Check ID match
-            if plot_entry["id"] == plot_identifier:
-                found_plot = plot_entry
-                plot_info = plot_entry
-                break
-            # Check title match (case-insensitive partial match)
-            elif (
-                plot_identifier.lower() in plot_entry["title"].lower()
-                or plot_identifier.lower() in plot_entry["original_title"].lower()
-            ):
-                found_plot = plot_entry
-                plot_info = plot_entry
-                break
-
-        if found_plot:
-            # Ensure plots are saved to workspace
-            if not plots_dir.exists():
-                plots_dir.mkdir(parents=True, exist_ok=True)
-
-            # Save plots and get actual file paths
-            if client.data_manager.latest_plots:
-                saved_files, _, _ = (
-                    client.data_manager.plot_manager.save_plots_to_workspace()
-                )
-            else:
-                saved_files = []
-
-            # Find the saved file for this plot using actual paths from save operation
-            plot_id = plot_info["id"]
-            matching_file = None
-
-            for file_path in saved_files:
-                file_path_obj = Path(file_path)
-                # Check if filename starts with plot_id (handles both HTML and PNG)
-                if file_path_obj.parent == plots_dir and file_path_obj.stem.startswith(
-                    plot_id
-                ):
-                    matching_file = file_path_obj
-                    # Prefer HTML over PNG
-                    if file_path_obj.suffix == ".html":
-                        break
-
-            if matching_file and matching_file.exists():
-                # Open plot using centralized system utility
-                success, message = open_path(matching_file)
-
-                if success:
-                    output.print(
-                        f"[green]✓ Opened plot:[/green] [grey74]{plot_info['original_title']}[/grey74]",
-                        style="success",
-                    )
-                    return f"Opened plot: {plot_info['original_title']}"
-                else:
-                    output.print(
-                        f"[red]Failed to open plot: {message}[/red]", style="error"
-                    )
-                    output.print(
-                        f"[grey50]Plot file: {matching_file}[/grey50]", style="info"
-                    )
-                    return f"Failed to open plot: {message}"
-            else:
+        # Case 2: Identifier provided - session plot ID/title, or a saved figure ref/id
+        ref, title = _resolve_figure(data_manager, plot_identifier)
+        if ref is None:
+            legacy = _legacy_match(data_manager, plot_identifier)
+            if legacy is _LEGACY_UNLISTED:
                 output.print(
-                    "[red]Plot file not found. Try running /save first.[/red]",
-                    style="error",
+                    f"[yellow]{plot_identifier} is not among saved figures; legacy plot "
+                    "files could not be listed.[/yellow]",
+                    style="warning",
                 )
-                return "Plot file not found"
-        else:
+                return (
+                    f"Plot not among saved figures: {plot_identifier}; legacy plot "
+                    "files could not be listed"
+                )
+            if legacy:
+                output.print(
+                    f"[yellow]{legacy} is a legacy plot file in plots/ (read-only). "
+                    "Opening legacy plot files is not supported here; it is "
+                    "unchanged.[/yellow]",
+                    style="warning",
+                )
+                return f"Legacy plot file not supported here: {legacy}"
             output.print(f"[red]Plot not found: {plot_identifier}[/red]", style="error")
             output.print(
                 "[grey50]Use /plots to see available plot IDs and titles[/grey50]",
@@ -345,7 +385,84 @@ def plot_show(
             )
             return f"Plot not found: {plot_identifier}"
 
+        view = ensure_html_rendition(store, ref)
+        if view.status == "pending":
+            output.print(
+                f"[yellow]Figure {ref}: save confirmation pending ({view.reason}).[/yellow]",
+                style="warning",
+            )
+            return f"Figure {ref}: save confirmation pending: {view.reason}"
+        if view.status != "available":
+            output.print(
+                f"[yellow]Figure {ref} is saved; its HTML view failed ({view.reason}).[/yellow]",
+                style="warning",
+            )
+            return f"Figure {ref} saved; HTML view failed: {view.reason}"
+
+        html_path = data_manager.workspace_path / view.path
+        success, message = open_path(html_path)
+        if success:
+            output.print(
+                f"[green]✓ Opened plot:[/green] [grey74]{title}[/grey74] [grey50]({ref})[/grey50]",
+                style="success",
+            )
+            return f"Opened plot: {title} ({ref})"
+        output.print(f"[red]Failed to open plot: {message}[/red]", style="error")
+        output.print(f"[grey50]Plot file: {html_path}[/grey50]", style="info")
+        return f"Failed to open plot: {message}"
+
     except Exception as e:
         output.print(f"[red]Failed to show plot: {e}[/red]", style="error")
         logger.exception("Plot show error")
         return None
+
+
+_LEGACY_UNLISTED = object()  # the legacy files could not be listed (never "not found")
+
+
+def _legacy_match(data_manager, identifier: str):
+    """The display-safe name of the legacy plot file ``identifier`` names (file or stem);
+    ``None`` if none does; ``_LEGACY_UNLISTED`` if the legacy files cannot be listed."""
+    from lobster.core.figures.listing import legacy_plot_files, safe_label
+
+    needle = identifier.strip()
+    try:
+        names = legacy_plot_files(data_manager.workspace_path)
+    except Exception:
+        return _LEGACY_UNLISTED
+    for name in sorted(names):
+        if needle in (name, Path(name).stem):
+            return safe_label(name) or "unnamed"
+    return None
+
+
+def _resolve_figure(data_manager, identifier: str):
+    """Map a session plot ID / title / figure ref / figure ID to ``(ref, title)`` (restart-safe)."""
+    needle = identifier.strip()
+    for entry in reversed(data_manager.latest_plots):
+        if entry.get("id") == needle or (
+            needle.lower() in str(entry.get("title", "")).lower()
+            or needle.lower() in str(entry.get("original_title", "")).lower()
+        ):
+            if entry.get("figure_ref"):
+                return entry["figure_ref"], entry.get("original_title") or entry.get(
+                    "title"
+                )
+    store = data_manager.figure_store
+    cursor, newest = None, None
+    while True:
+        page = store.list(cursor=cursor, limit=500)
+        for rec in page.items:
+            ref = f"{rec['figure_id']}@{rec['revision_id']}"
+            label = rec.get("label") or ""
+            if needle in (ref, rec["figure_id"]) or (
+                label and needle.lower() in label.lower()
+            ):
+                newest = (
+                    ref,
+                    label or ref,
+                )  # list is oldest→newest: keep the newest match
+        cursor = page.next_cursor
+        if not cursor:
+            break
+    return newest if newest else (None, None)

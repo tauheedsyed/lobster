@@ -329,98 +329,7 @@ def de_analysis_expert(
                 "\n**Detailed results stored in**: adata.uns['differential_expression']"
             )
 
-            # Auto-generate volcano plot as side-effect
-            _volcano_fig = None
-            try:
-                from lobster.services.visualization.proteomics_visualization_service import (
-                    ProteomicsVisualizationService,
-                )
-
-                viz_service = ProteomicsVisualizationService()
-
-                # Build DataFrame from upstream DE results (bypass service schema guessing)
-                de_uns = adata_de.uns.get("differential_expression", {})
-                de_list = (
-                    de_uns.get("all_results")
-                    or de_uns.get("significant_results")
-                    or de_uns.get("results", [])
-                )
-                if de_list:
-                    import pandas as _pd
-
-                    de_df = _pd.DataFrame(de_list)
-
-                    # Build global AnnData var index lookup for customdata
-                    var_name_to_idx = {
-                        name: i for i, name in enumerate(adata_de.var_names)
-                    }
-                    protein_col = (
-                        "protein" if "protein" in de_df.columns else de_df.columns[0]
-                    )
-                    global_indices = [
-                        var_name_to_idx.get(str(name), -1)
-                        for name in de_df[protein_col]
-                    ]
-
-                    _volcano_fig, plot_stats = viz_service.create_volcano_plot(
-                        adata_de,
-                        comparison_results=de_list,
-                        fc_threshold=(
-                            fold_change_threshold if fold_change_threshold else 1.0
-                        ),
-                        pvalue_threshold=fdr_threshold,
-                    )
-
-                    # Patch customdata with global indices on main trace
-                    if (
-                        _volcano_fig.data
-                        and hasattr(_volcano_fig.data[0], "customdata")
-                        and _volcano_fig.data[0].customdata is not None
-                    ):
-                        protein_names = [
-                            str(entry[1]) for entry in _volcano_fig.data[0].customdata
-                        ]
-                        _volcano_fig.data[0].customdata = list(
-                            zip(
-                                [
-                                    var_name_to_idx.get(name, idx)
-                                    for name, idx in zip(
-                                        protein_names, range(len(protein_names))
-                                    )
-                                ],
-                                protein_names,
-                            )
-                        )
-            except Exception as viz_err:
-                logger.warning(f"Volcano figure creation failed: {viz_err}")
-                response += "\n**Volcano plot**: figure creation failed, use visualization tools manually"
-
-            # Register + save plot (separate try/except so registration errors are visible)
-            if _volcano_fig is not None:
-                try:
-                    import uuid as _uuid
-
-                    plot_id = str(_uuid.uuid4())[:8]
-                    data_manager.plot_manager.add_plot(
-                        plot=_volcano_fig,
-                        title=f"Volcano Plot — {de_stats.get('n_significant_proteins', 0)} significant proteins",
-                        source="proteomics_de_analysis_expert",
-                        dataset_info={
-                            "plot_id": plot_id,
-                            "modality_name": de_modality_name,
-                            "plot_type": "volcano",
-                            "n_significant": de_stats.get("n_significant_proteins", 0),
-                        },
-                    )
-                    # Save HTML + PNG to workspace (same pattern as visualization_expert)
-                    data_manager.plot_manager.save_plots_to_workspace()
-                    response += f"\n**Volcano plot generated**: plot_id={plot_id}"
-                except Exception as reg_err:
-                    logger.error(
-                        f"PLOT REGISTRATION FAILED for volcano: {reg_err}",
-                        exc_info=True,
-                    )
-                    response += f"\n**Volcano plot**: registration failed ({reg_err})"
+            response += "\n**Standard figure (on request)**: `proteomics.volcano`"
 
             # Sample size warning
             if min_group is not None and min_group < 6:
@@ -498,6 +407,7 @@ def de_analysis_expert(
     find_differential_proteins.metadata = {
         "categories": ["ANALYZE"],
         "provenance": True,
+        "suggests_templates": ["proteomics.volcano"],
     }
     find_differential_proteins.tags = ["ANALYZE"]
 
@@ -955,97 +865,9 @@ def de_analysis_expert(
                 "\n**Detailed results stored in**: adata.uns['pathway_enrichment']"
             )
 
-            # Auto-generate pathway enrichment plot as side-effect
-            _pathway_fig = None
-            try:
-                from lobster.services.visualization.proteomics_visualization_service import (
-                    ProteomicsVisualizationService,
-                )
-
-                viz_service = ProteomicsVisualizationService()
-
-                # Normalize gseapy schema to what the viz service expects
-                pathway_uns = adata_enriched.uns.get("pathway_enrichment", {})
-                pathway_list = pathway_uns.get("results", [])
-                if pathway_list:
-                    import pandas as _pd
-
-                    pw_df = _pd.DataFrame(pathway_list)
-
-                    # gseapy Enrichr → canonical column names
-                    rename_map = {}
-                    if "Term" in pw_df.columns:
-                        rename_map["Term"] = "pathway_name"
-                    if "Adjusted P-value" in pw_df.columns:
-                        rename_map["Adjusted P-value"] = "p_value"
-                    elif "P-value" in pw_df.columns:
-                        rename_map["P-value"] = "p_value"
-                    if rename_map:
-                        pw_df.rename(columns=rename_map, inplace=True)
-
-                    # Parse "5/200" overlap string → int
-                    if (
-                        "Overlap" in pw_df.columns
-                        and "overlap_count" not in pw_df.columns
-                    ):
-                        pw_df["overlap_count"] = (
-                            pw_df["Overlap"].str.split("/").str[0].astype(int)
-                        )
-
-                    # Compute enrichment_ratio if missing
-                    if (
-                        "enrichment_ratio" not in pw_df.columns
-                        and "Overlap" in pw_df.columns
-                    ):
-                        parts = pw_df["Overlap"].str.split("/")
-                        pw_df["enrichment_ratio"] = parts.str[0].astype(
-                            float
-                        ) / parts.str[1].astype(float).replace(0, 1)
-
-                    if "pathway_name" in pw_df.columns and "p_value" in pw_df.columns:
-                        # Store normalized results back for the viz service
-                        normalized_results = pw_df.to_dict("records")
-
-                        _pathway_fig, plot_stats = (
-                            viz_service.create_pathway_enrichment_plot(
-                                adata_enriched,
-                                enrichment_results=normalized_results,
-                                plot_type="bubble",
-                                top_n=20,
-                            )
-                        )
-            except Exception as viz_err:
-                logger.warning(f"Pathway figure creation failed: {viz_err}")
-                response += "\n**Pathway plot**: figure creation failed, use visualization tools manually"
-
-            # Register + save plot (separate try/except so registration errors are visible)
-            if _pathway_fig is not None:
-                try:
-                    import uuid as _uuid
-
-                    plot_id = str(_uuid.uuid4())[:8]
-                    data_manager.plot_manager.add_plot(
-                        plot=_pathway_fig,
-                        title=f"Pathway Enrichment — {enrich_stats.get('n_significant_terms', 0)} significant terms",
-                        source="proteomics_de_analysis_expert",
-                        dataset_info={
-                            "plot_id": plot_id,
-                            "modality_name": enriched_name,
-                            "plot_type": "pathway_enrichment",
-                            "n_significant": enrich_stats.get("n_significant_terms", 0),
-                        },
-                    )
-                    # Save HTML + PNG to workspace (same pattern as visualization_expert)
-                    data_manager.plot_manager.save_plots_to_workspace()
-                    response += (
-                        f"\n**Pathway enrichment plot generated**: plot_id={plot_id}"
-                    )
-                except Exception as reg_err:
-                    logger.error(
-                        f"PLOT REGISTRATION FAILED for pathway: {reg_err}",
-                        exc_info=True,
-                    )
-                    response += f"\n**Pathway plot**: registration failed ({reg_err})"
+            response += (
+                "\n**Standard figure (on request)**: `proteomics.pathway_bubble`"
+            )
 
             return response
 
@@ -1053,7 +875,11 @@ def de_analysis_expert(
             logger.error(f"Error in pathway enrichment: {e}")
             return f"Error in pathway enrichment: {str(e)}"
 
-    run_pathway_enrichment.metadata = {"categories": ["ANALYZE"], "provenance": True}
+    run_pathway_enrichment.metadata = {
+        "categories": ["ANALYZE"],
+        "provenance": True,
+        "suggests_templates": ["proteomics.pathway_bubble"],
+    }
     run_pathway_enrichment.tags = ["ANALYZE"]
 
     # =========================================================================
@@ -1555,6 +1381,17 @@ def de_analysis_expert(
     # =========================================================================
 
     system_prompt = create_de_analysis_expert_prompt()
+
+    # Shared execution boundary; figure guidance belongs to this tool, not prompts.
+    from lobster.tools.code_tool_switch import attach_code_tool
+
+    tools = attach_code_tool(
+        tools,
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name=agent_name,
+    )
 
     return create_react_agent(
         model=llm,

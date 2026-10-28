@@ -1,0 +1,145 @@
+{
+ "baseline": {
+  "commit": "b550992b29950b599833d3b6aa4afb9b76b1c925",
+  "details_added": [
+   "figure_submission_invalid",
+   "not_requested",
+   "total_cap"
+  ],
+  "details_count": 55,
+  "details_removed": [],
+  "source_sha256": "25f730e1a63235d0433883fac02e8bc5607daab2a1de8c49c6e3db79dfa94f7b"
+ },
+ "codes": [
+  {
+   "class": "AttemptConflictError",
+   "code": "attempt_conflict"
+  },
+  {
+   "class": "AttemptContextError",
+   "code": "attempt_context_missing"
+  },
+  {
+   "class": "DurabilityError",
+   "code": "durability_failed"
+  },
+  {
+   "class": "FigureError",
+   "code": "figure_error"
+  },
+  {
+   "class": "FigureInvalidError",
+   "code": "figure_invalid"
+  },
+  {
+   "class": "FigureNotFoundError",
+   "code": "figure_not_found"
+  },
+  {
+   "class": "GenerationFencedError",
+   "code": "generation_fenced"
+  },
+  {
+   "class": "IntegrityError",
+   "code": "fingerprint_mismatch"
+  },
+  {
+   "class": "ManagedPathError",
+   "code": "managed_path"
+  },
+  {
+   "class": "ParentDeletedError",
+   "code": "parent_deleted"
+  },
+  {
+   "class": "StorageError",
+   "code": "storage_failed"
+  },
+  {
+   "class": "StoreUnsupportedError",
+   "code": "storage_unsupported"
+  }
+ ],
+ "counts": {
+  "codes": 12,
+  "details": 58,
+  "prefixes": 4,
+  "standalone": 2
+ },
+ "details": [
+  "activity_blob_changed",
+  "activity_blob_mismatch",
+  "activity_blob_required",
+  "activity_fields_inconsistent",
+  "activity_too_large",
+  "attempt_digest_changed",
+  "attempt_key_mismatch",
+  "candidate_not_in_plan",
+  "claimed_revision_mismatch",
+  "code_blob_changed",
+  "code_blob_mismatch",
+  "code_blob_required",
+  "code_blob_unexpected",
+  "code_too_large",
+  "concurrent_writer_differs",
+  "config_changed",
+  "config_too_large",
+  "digest_mismatch",
+  "dir_fsync_failed",
+  "dir_fsync_unsupported",
+  "dir_open_failed",
+  "execution_attempt_base",
+  "execution_not_found",
+  "execution_plan_changed",
+  "execution_record_mismatch",
+  "execution_request_not_json",
+  "execution_request_schema",
+  "execution_request_too_large",
+  "existing_file_differs",
+  "figure_changed",
+  "figure_submission_invalid",
+  "figure_too_large",
+  "file_fsync_failed",
+  "inputs_not_normalized",
+  "invalid_json",
+  "no_figure_available",
+  "non_strict_json",
+  "not_requested",
+  "not_utf8",
+  "parent_unavailable",
+  "planned_candidates",
+  "platform_not_posix",
+  "plotly_schema",
+  "rendition_changed",
+  "rendition_format",
+  "rendition_inputs_mismatch",
+  "rendition_not_found",
+  "revision_not_found",
+  "shape",
+  "source_changed",
+  "source_not_found",
+  "source_shape",
+  "source_too_large",
+  "staged_figure_unknown",
+  "template_args_too_large",
+  "template_meta",
+  "total_cap",
+  "type"
+ ],
+ "prefixes": [
+  "execution_record",
+  "html_rendition",
+  "prepare",
+  "storage"
+ ],
+ "schema": "engine-reason-table/2",
+ "source": {
+  "commit": "bf59b3b0011c1ee7eb82f73eb75b64ea28b58cb5",
+  "path": "lobster/core/figures/errors.py",
+  "sha256": "7ce0341f0aad9627a3a77766e4c2d65f50548acac0c280ad7823ef21affa0642"
+ },
+ "standalone": [
+  "attempt_failed",
+  "unexpected_error"
+ ]
+}

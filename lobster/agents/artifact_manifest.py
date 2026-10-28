@@ -42,6 +42,7 @@ MANIFEST_CLOSE = "</artifact_manifest>"
 #: Caps. A manifest that blows the context budget would trade one failure for another.
 MAX_MODALITIES_LISTED = 12
 MAX_FILES_LISTED = 10
+MAX_FIGURES_LISTED = 10
 MAX_MANIFEST_CHARS = 2000
 
 
@@ -84,6 +85,8 @@ class WorkspaceSnapshot:
 
     modalities: dict[str, _ModalityState] = field(default_factory=dict)
     files: dict[str, int] = field(default_factory=dict)
+    #: saved figure revisions: ref -> (one-line label + ref, availability)
+    figures: dict[str, tuple[str, str]] = field(default_factory=dict)
     failed: bool = False
 
     @classmethod
@@ -172,6 +175,7 @@ def take_snapshot(data_manager: Any) -> WorkspaceSnapshot:
 
     modalities: dict[str, _ModalityState] = {}
     files: dict[str, int] = {}
+    figures: dict[str, tuple[str, str]] = {}
     failed = False
 
     # list_modality_records() returns name/shape/dirty under the manager's own lock,
@@ -196,6 +200,9 @@ def take_snapshot(data_manager: Any) -> WorkspaceSnapshot:
     try:
         for category, entries in (data_manager.list_workspace_files() or {}).items():
             for entry in entries or []:
+                if category == "plots" and entry.get("figure_ref"):
+                    continue  # a saved revision: reported by ref from the native reader
+
                 path = entry.get("path") or entry.get("name")
                 if not path:
                     continue
@@ -206,7 +213,26 @@ def take_snapshot(data_manager: Any) -> WorkspaceSnapshot:
         logger.debug(f"Artifact manifest: file snapshot failed: {exc}")
         failed = True
 
-    return WorkspaceSnapshot(modalities=modalities, files=files, failed=failed)
+    # Saved figures come from the ONE native reader, not from list_workspace_files (which
+    # keeps legacy files visible when the catalog fails). An unreadable inventory marks the
+    # snapshot failed, so no manifest can claim "no new artifacts".
+    try:
+        from lobster.core.figures.listing import figure_ref, safe_label
+
+        for item in data_manager._saved_figure_records() or []:
+            ref = figure_ref(item)
+            label = safe_label(item.get("label")) or "untitled"
+            figures[ref] = (
+                f"{label} ({ref})",
+                str(item.get("availability") or "available"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"Artifact manifest: figure snapshot failed: {exc}")
+        failed = True
+
+    return WorkspaceSnapshot(
+        modalities=modalities, files=files, figures=figures, failed=failed
+    )
 
 
 @dataclass
@@ -216,10 +242,18 @@ class ArtifactDiff:
     created: list[str] = field(default_factory=list)
     modified: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
+    figures_saved: list[str] = field(default_factory=list)
+    figures_pending: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not (self.created or self.modified or self.files_written)
+        return not (
+            self.created
+            or self.modified
+            or self.files_written
+            or self.figures_saved
+            or self.figures_pending
+        )
 
 
 def diff_snapshots(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> ArtifactDiff:
@@ -269,6 +303,16 @@ def diff_snapshots(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> Artif
     for path in sorted(set(after.files) & set(before.files)):
         if after.files[path] != before.files[path]:
             diff.files_written.append(f"{path} (updated)")
+
+    # Saved figure revisions are immutable: new refs only (an edit is a new ref). A revision
+    # whose save confirmation was pending before and is available now counts as saved.
+    for ref, (line, availability) in after.figures.items():
+        prior = before.figures.get(ref)
+        if availability == "pending":
+            if prior is None:
+                diff.figures_pending.append(line)
+        elif prior is None or prior[1] == "pending":
+            diff.figures_saved.append(line)
 
     return diff
 
@@ -344,6 +388,15 @@ def render_manifest(diff: ArtifactDiff) -> str:
         if diff.modified:
             lines.append(
                 f"Modalities modified: {_bounded(diff.modified, MAX_MODALITIES_LISTED)}"
+            )
+        if diff.figures_saved:
+            lines.append(
+                f"Figures saved: {_bounded(diff.figures_saved, MAX_FIGURES_LISTED)}"
+            )
+        if diff.figures_pending:
+            lines.append(
+                "Figures with save confirmation pending: "
+                f"{_bounded(diff.figures_pending, MAX_FIGURES_LISTED)}"
             )
         if diff.files_written:
             lines.append(

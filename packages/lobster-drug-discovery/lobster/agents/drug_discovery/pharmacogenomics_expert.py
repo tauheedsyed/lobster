@@ -143,6 +143,16 @@ def pharmacogenomics_expert(
     # Build prompt and create agent
     system_prompt = create_pharmacogenomics_expert_prompt()
 
+    from lobster.tools.code_tool_switch import attach_code_tool
+
+    tools = attach_code_tool(
+        tools,
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name=agent_name,
+    )
+
     return create_react_agent(
         model=llm,
         tools=tools,

@@ -1,0 +1,24 @@
+{
+  "fixture_version": "draft-v0.8.1",
+  "descriptor": {
+    "schema": "lobster.figure_attempt/1",
+    "change_kind": "edited",
+    "actor": "viewer",
+    "tool": "save_revision",
+    "parents": [{"ref": {"figure_id": "alpha", "revision_id": "old"}, "figure_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}],
+    "figure": {"sha256": "e91535669d83955c2ae02c97a6a77fa0edc036eaf7fa89aed5582f7fb5cc9ffd", "bytes": 132},
+    "config": {"sha256": "19a5809b30f8270c5abfe16a6cf2e8702631d761e9a8b10081f269fdebfeab47", "bytes": 75},
+    "source": {"payload": {"sha256": "5021a18642f0f17c1bfce9b758550e34b4cc89b286b179e6dd71a5a4d6194c95", "bytes": 24}, "declared": {"comparison": "C1", "coverage": "partial"}},
+    "code": {"sha256": "5c66af778e3055b6d3261ce6de5fa29e0ef170ea04bb900dcb6d570bd69086e2", "bytes": 19},
+    "inputs": [{"name": "same_name", "alias": "input_a", "instance_id": "instance_old", "origin": "store_event", "verified": true}],
+    "label": "Volcano",
+    "request": "change label",
+    "resolved_intent": [{"operation": "label"}],
+    "template": {"name": "proteomics.volcano", "version": "1", "args": {"alpha": 0.05}},
+    "persist": false,
+    "engine_version": "draft",
+    "plotly_version": "draft",
+    "regeneration": ["relabel"]
+  },
+  "expected_digest": "d5f55af5be83ccbafc44f3e0128f877dfe20090d4847ea89a366c3381e319fad"
+}

@@ -59,7 +59,7 @@ Then describe your analysis in plain language:
 ```text
 > Search PubMed for single-cell CRISPR screens in T cells from 2023–2024,
   download the most cited dataset, run QC, integrate batches with Harmony,
-  cluster the cells, annotate cell types, and export a reproducible notebook.
+  cluster the cells, annotate cell types, and export a notebook of the recorded steps.
 ```
 
 <details>
@@ -90,7 +90,7 @@ lobster query --session-id latest "Download the first result"  # resume last ses
 
 **In-session slash commands** (inside `lobster chat`):
 ```text
-> /pipeline export                  # Export analysis as a reproducible Jupyter notebook
+> /pipeline export                  # Export the recorded analysis steps as a Jupyter notebook
 > /pipeline run analysis.ipynb      # Re-run an exported notebook
 > /data                             # List loaded datasets and modalities
 > /files                            # Browse workspace files
@@ -153,11 +153,11 @@ End-to-end walkthroughs across omics domains:
 
 # 🧠 Architecture
 
-Lobster AI is a multi-agent system: **22 specialist agents across 10 installable packages**, orchestrated by a LangGraph supervisor. Each agent owns a specific omics domain and calls validated scientific libraries directly — no code generation, no hallucinated results.
+Lobster AI is a multi-agent system: specialist agents for each omics domain, orchestrated by a LangGraph supervisor.
 
-* **Local execution:** All analysis runs on your machine. Patient data never leaves your hardware.
-* **Scientific libraries:** Agents call Scanpy, PyDESeq2, Harmony, and others via tool functions — not by generating scripts.
-* **W3C-PROV provenance:** Every analysis step is tracked and exportable as a reproducible Jupyter notebook.
+* **Local execution:** Analysis runs on your machine. Your data files stay on your machine; messages and tool results are sent to the LLM provider you configure (with a local model such as Ollama, they stay on your machine too).
+* **Scientific libraries:** Agents call Scanpy, PyDESeq2, Harmony and others through tool functions. Some agents also have a code tool for custom analysis, which you can switch off per agent.
+* **Provenance:** Analysis steps are recorded and can be exported as a Jupyter notebook.
 
 <div align="center">
   <img alt="Ecosystem Topology" src="https://raw.githubusercontent.com/the-omics-os/lobster/main/docs/assets/architecture-topology.svg" width="88%">
@@ -215,7 +215,7 @@ Configure via `lobster init` or environment variables. All providers use the sam
 | Provider | Type | Setup | Notes |
 |----------|------|-------|-------|
 | **Anthropic** | Cloud | API key | Claude models — recommended default |
-| **Ollama** | Local | `ollama pull <model>` | Fully offline, no data leaves the machine |
+| **Ollama** | Local | `ollama pull <model>` | Local model: no messages go to an LLM provider (online database searches still use the internet) |
 | **OpenAI** | Cloud | API key | GPT and o-series models |
 | **OpenRouter** | Cloud | API key | Access 200+ models via a single endpoint |
 | **Nebius AI Studio** | Cloud | API key | Open-weight models (Qwen, DeepSeek, GLM, Kimi) |
@@ -229,7 +229,7 @@ Configure via `lobster init` or environment variables. All providers use the sam
 
 ```text
 lobster chat
-> /pipeline export         # Export reproducible Jupyter notebook
+> /pipeline export         # Export a Jupyter notebook of the recorded steps
 > /pipeline list           # List exported pipelines
 > /pipeline run analysis.ipynb geo_gse109564
 > /data                    # Show loaded datasets

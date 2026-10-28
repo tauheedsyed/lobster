@@ -1488,7 +1488,7 @@ def command_cmd(
       metadata                 Smart metadata overview
       queue                    Show queue status
       plots                    List all generated plots
-      pipeline export          Export reproducible notebook
+      pipeline export          Export a notebook of the recorded steps
       pipeline list            List available pipelines
       save                     Save current state
       export                   Export workspace to ZIP

@@ -15,9 +15,9 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Callable, List
+from typing import Annotated, Callable, List
 
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolCallId, tool
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +48,7 @@ def _resolve_safe_path(workspace_path: Path, relative_path: str) -> Path:
 
     workspace_resolved = workspace_path.resolve()
     if resolved != workspace_resolved and workspace_resolved not in resolved.parents:
-        raise ValueError(
-            f"Path '{relative_path}' resolves outside workspace boundary."
-        )
+        raise ValueError(f"Path '{relative_path}' resolves outside workspace boundary.")
     return resolved
 
 
@@ -102,7 +100,9 @@ def _load_data(data_json: str, data_file: str, workspace_path: Path):
         return f"ERROR: Could not read {data_file}: {e}"
 
 
-def _create_figure(plot_type: str, df, x: str, y: str, z: str, color: str, size: str, title: str):
+def _create_figure(
+    plot_type: str, df, x: str, y: str, z: str, color: str, size: str, title: str
+):
     """Dispatch to Plotly Express. Returns Figure or error string."""
     import plotly.express as px
     import plotly.graph_objects as go
@@ -144,7 +144,11 @@ def _create_figure(plot_type: str, df, x: str, y: str, z: str, color: str, size:
                 if x not in df.columns or y not in df.columns:
                     return f"ERROR: x='{x}' or y='{y}' not found in columns."
                 pivot = df.pivot_table(index=y, columns=x, values=z)
-                fig = go.Figure(data=go.Heatmap(z=pivot.values, x=list(pivot.columns), y=list(pivot.index)))
+                fig = go.Figure(
+                    data=go.Heatmap(
+                        z=pivot.values, x=list(pivot.columns), y=list(pivot.index)
+                    )
+                )
                 fig.update_layout(title=title)
             else:
                 numeric_cols = df.select_dtypes(include="number").columns.tolist()
@@ -159,42 +163,87 @@ def _create_figure(plot_type: str, df, x: str, y: str, z: str, color: str, size:
     return fig
 
 
-def _relative_plot_path(plot_manager, file_path: str) -> str:
-    """Workspace-relative path of a saved plot file (e.g. plots/plot_1_x.html)."""
-    path = Path(file_path)
-    try:
-        return path.relative_to(Path(plot_manager.workspace_path)).as_posix()
-    except (TypeError, ValueError, AttributeError):
-        return f"plots/{path.name}"
+def _describe_commit(results) -> str:
+    """State exactly what the trusted save step published. Never names an unwritten file.
 
-
-def _describe_save(plot_manager, plot_id: str, save_result) -> str:
-    """State what save_plots_to_workspace actually wrote for this plot.
-
-    The model relays this to the user, so it must never name a file that was
-    not written, and a skipped or failed save says why.
+    Uses the central outcome vocabulary: a pending publication is "confirmation pending"
+    (another caller may already have it confirmed), never a definitive absence.
     """
-    try:
-        _saved, stats, _ = save_result
-    except (TypeError, ValueError):
-        return "file save: result unknown"
-    stats = stats if isinstance(stats, dict) else {}
+    from lobster.core.figures.errors import safe_result_reason
+    from lobster.core.figures.records import STATUS_AVAILABLE, STATUS_PENDING
+    from lobster.core.figures.saver import (
+        HEADER_NONE,
+        HEADER_PENDING,
+        WITHHELD,
+        outcome_state,
+    )
 
-    if stats.get("skipped"):
-        return f"file not saved: {stats.get('reason', 'skipped')}"
-
-    outcome = (stats.get("per_plot") or {}).get(str(plot_id))
-    if not outcome:
-        return "file save: result unknown"
-    if not outcome.get("html"):
-        return f"file not saved: {outcome.get('error') or 'unknown error'}"
-
-    parts = [f"saved: {_relative_plot_path(plot_manager, outcome['html'])}"]
-    if outcome.get("png"):
-        parts.append(f"png: {_relative_plot_path(plot_manager, outcome['png'])}")
-    elif outcome.get("png_skipped"):
-        parts.append(f"png: not saved ({outcome['png_skipped']})")
+    parts = []
+    for res in results:
+        reason = safe_result_reason(res.reason) or WITHHELD
+        if res.status == STATUS_AVAILABLE:
+            parts.append(f"saved: {res.ref} → {res.path}")
+        elif res.status == STATUS_PENDING:
+            parts.append(f"confirmation pending: {reason}")
+        else:
+            parts.append(f"not saved ({_safe_status(res.status)}): {reason}")
+    state = outcome_state(results)
+    if state == "pending":
+        parts.insert(0, HEADER_PENDING)
+    elif state == "none":
+        parts.insert(0, HEADER_NONE)
     return " | ".join(parts)
+
+
+def _safe_status(status) -> str:
+    from lobster.core.figures.records import STATUS_FAILED, STATUSES
+
+    return status if status in STATUSES else STATUS_FAILED
+
+
+def _raised_pending(exc: BaseException) -> bool:
+    """True if a raised figure fault carries a pending publication (status only: raised
+    details never authenticate a ref, a path or an available save)."""
+    from lobster.core.figures.errors import FigureError
+    from lobster.core.figures.records import STATUS_PENDING
+
+    details = getattr(exc, "details", None)
+    results = details.get("results") if isinstance(details, dict) else None
+    return (
+        isinstance(exc, FigureError)
+        and isinstance(results, list)
+        and any(
+            isinstance(r, dict) and r.get("status") == STATUS_PENDING for r in results
+        )
+    )
+
+
+def _raised_summary(exc: BaseException) -> str:
+    """The central ``failure_summary`` of a raised fault, with raised ``available`` statuses
+    shown as ``unconfirmed: reason_withheld``: raised details never confirm a save."""
+    from lobster.core.figures.errors import FigureError
+    from lobster.core.figures.records import STATUS_AVAILABLE
+    from lobster.core.figures.saver import WITHHELD, failure_summary
+
+    details = getattr(exc, "details", None)
+    results = details.get("results") if isinstance(details, dict) else None
+    if not (
+        isinstance(exc, FigureError)
+        and isinstance(results, list)
+        and results
+        and all(isinstance(r, dict) for r in results)
+    ):
+        return failure_summary(exc)
+    parts = []
+    for r in results:
+        if r.get("status") == STATUS_AVAILABLE:
+            parts.append(f"unconfirmed: {WITHHELD}")
+        else:  # status + reason only, through the central formatter
+            single = {"status": r.get("status"), "reason": r.get("reason")}
+            parts.append(
+                failure_summary(FigureError("", details={"results": [single]}))
+            )
+    return "; ".join(parts)
 
 
 def create_plot_tools(data_manager, workspace_path: Path) -> List[Callable]:
@@ -221,6 +270,7 @@ def create_plot_tools(data_manager, workspace_path: Path) -> List[Callable]:
         title: str = "Plot",
         x_label: str = "",
         y_label: str = "",
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> str:
         """Create interactive Plotly plot from tabular data. Registers with canvas.
 
@@ -282,14 +332,26 @@ def create_plot_tools(data_manager, workspace_path: Path) -> List[Callable]:
         if not plot_id:
             return f"ERROR: plot registration failed: {stats.get('error', 'unknown')}"
 
-        save_result = plot_manager.save_plots_to_workspace()
-
         suffix = f" (sampled to {SAMPLE_THRESHOLD} rows)" if sampled else ""
-        return (
-            f"Plot registered: {plot_id} | {title} | {len(df)} rows{suffix}"
-            " | registered for display | "
-            + _describe_save(plot_manager, plot_id, save_result)
-        )
+        try:
+            # UTILITY tool without provenance: the execution record says so honestly.
+            results = plot_manager.commit_staged(
+                None,
+                tool_call_id=tool_call_id,
+                staged_ids=[plot_id],
+                tool_name="create_interactive_plot",
+            )
+        except Exception as exc:
+            from lobster.core.figures.saver import HEADER_PENDING
+
+            plot_manager.discard_staged([plot_id])
+            # fixed-vocabulary codes only, never exception text, raised refs or a raised
+            # "available"
+            summary = _raised_summary(exc)
+            if _raised_pending(exc):
+                return f"Plot: {title} | {HEADER_PENDING} | {summary}"
+            return f"Plot not saved: {title} | {summary}"
+        return f"Plot: {title} | {len(df)} rows{suffix} | " + _describe_commit(results)
 
     create_interactive_plot.metadata = {"categories": ["UTILITY"], "provenance": False}
     create_interactive_plot.tags = ["UTILITY"]

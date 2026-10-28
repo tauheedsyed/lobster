@@ -2857,9 +2857,12 @@ class AgentClient(BaseClient):
         return f"File not found in workspace: {filename}"
 
     def write_file(self, filename: str, content: str) -> bool:
-        """Write a file to the workspace."""
+        """Write a file to the workspace (never into the managed figure folder)."""
         try:
+            from lobster.core.figures.paths import assert_not_managed
+
             file_path = self.workspace_path / filename
+            assert_not_managed(self.workspace_path, file_path)  # raises -> False
             file_path.write_text(content)
             return True
         except Exception:

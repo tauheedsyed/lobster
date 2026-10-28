@@ -18,8 +18,21 @@ import ast
 import importlib
 import inspect
 import textwrap
-from typing import Any, ClassVar, Optional, Set
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Callable, ClassVar, Dict, List, Mapping, Optional, Set, Tuple
 from unittest.mock import MagicMock
+
+
+def _extract_tools(graph) -> list:
+    """Tool objects of a compiled agent graph (LangGraph wraps ToolNode in PregelNode)."""
+    if hasattr(graph, "nodes") and "tools" in graph.nodes:
+        tools_node = graph.nodes["tools"]
+        if hasattr(tools_node, "tools_by_name"):
+            return list(tools_node.tools_by_name.values())
+        if hasattr(tools_node, "bound") and hasattr(tools_node.bound, "tools_by_name"):
+            return list(tools_node.bound.tools_by_name.values())
+    return []
 
 
 class AgentContractTestMixin:
@@ -170,17 +183,7 @@ class AgentContractTestMixin:
                     workspace_path=None,
                 )
 
-            # Extract tools from the graph's tool node
-            # LangGraph wraps ToolNode in PregelNode — check both levels
-            tools = []
-            if hasattr(graph, "nodes") and "tools" in graph.nodes:
-                tools_node = graph.nodes["tools"]
-                if hasattr(tools_node, "tools_by_name"):
-                    tools = list(tools_node.tools_by_name.values())
-                elif hasattr(tools_node, "bound") and hasattr(
-                    tools_node.bound, "tools_by_name"
-                ):
-                    tools = list(tools_node.bound.tools_by_name.values())
+            tools = _extract_tools(graph)
 
             self.__class__._tools_cache[cache_key] = tools
             return tools
@@ -929,3 +932,834 @@ class AgentContractTestMixin:
 
         # Phase 3: Schema compatibility tests
         self.test_tool_params_no_bare_collections()
+
+
+# ===========================================================================
+# Executed figure contract: tool-case coverage
+# ===========================================================================
+# Analysis tools never create figures; the eight transitional producers save only through
+# stage -> log_tool_usage -> commit_staged. What is asserted is OBSERVED behaviour of real
+# invocations on the cases a package supplies (calls and their arguments, files, catalog,
+# legacy readers, named dataset fields), not static source. It says nothing about inputs,
+# configurations or code paths the cases do not exercise, and it confines nothing: it is a
+# test-time check, not a runtime guard.
+#
+# Detection boundary: figure files are ``.html``/``.png`` outside the managed
+# store, any change to the managed store (``plots/``) outside a producer's commit, and
+# figure-shaped JSON accepted by the central payload validator. Other image formats (svg,
+# jpg, webp, pdf, ...) are NOT detected.
+
+#: File types treated as rendered figures when written outside the managed store.
+FIGURE_FILE_SUFFIXES = (".html", ".png")
+
+#: AnnData fields compared for producer cases. ``raw`` means raw.X, raw.var and raw.varm.
+PRODUCER_DATASET_FIELDS = (
+    "X",
+    "obs",
+    "var",
+    "uns",
+    "obsm",
+    "varm",
+    "obsp",
+    "varp",
+    "layers",
+    "raw",
+)
+
+_STORE_KINDS = ("store_commit", "store_execution", "store_rendition")
+
+
+@dataclass(frozen=True)
+class FigureToolCase:
+    """One representative VALID invocation of an agent tool.
+
+    ``setup(dm, monkeypatch)`` runs on a fresh real ``DataManagerV2`` BEFORE the real
+    factory is built (after the harness's default LLM guard, so a case's own patches win);
+    its patches stay live through factory, invocation and ``assert_success``, and are undone
+    afterwards. ``assert_success(reply, dm)`` must prove the expected science output (a
+    returned error string is a failure even inside a success ToolMessage). For a producer,
+    ``args["save_plot"] is False`` makes the case a preview, which never counts as the
+    producer's saving case.
+    """
+
+    tool_name: str
+    args: Mapping[str, Any]
+    setup: Callable[[Any, Any], None]
+    assert_success: Callable[[Any, Any], None]
+    label: str = ""
+
+    @property
+    def is_preview(self) -> bool:
+        return self.args.get("save_plot") is False
+
+
+class FigureContractReport(UserWarning):
+    """Coverage report of the contract harness (also recorded as the ``d8_coverage`` property)."""
+
+
+def _file_tree(root) -> Dict[str, str]:
+    """``posix relpath -> sha256`` of every regular file (symlinks recorded by target)."""
+    import hashlib
+    import os
+
+    out: Dict[str, str] = {}
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if os.path.islink(path):
+                out[rel] = "symlink:" + os.readlink(path)
+                continue
+            with open(path, "rb") as fh:
+                out[rel] = hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
+def _tree_delta(before: Dict[str, str], after: Dict[str, str]):
+    added = sorted(k for k in after if k not in before)
+    changed = sorted(k for k in after if k in before and before[k] != after[k])
+    removed = sorted(k for k in before if k not in after)
+    return added, changed, removed
+
+
+def _figure_shaped(obj: Any) -> bool:
+    if not isinstance(obj, dict) or not isinstance(obj.get("data"), list):
+        return False
+    traces = obj["data"]
+    return isinstance(obj.get("layout"), dict) or (
+        bool(traces) and all(isinstance(t, dict) for t in traces)
+    )
+
+
+def _plotly_json_problem(data: bytes) -> Optional[str]:
+    """Central strict semantics for figure-shaped JSON (bounded detection, disclosed).
+
+    A candidate is a JSON object with a ``data`` list and either a ``layout`` object or
+    non-empty all-object traces (also nested under ``figure``). Candidates are judged by
+    ``lobster.core.figures.payload.validate_figure_bytes`` (layout optional). Valid ->
+    figure. A candidate the strict parser refuses (NaN/Infinity) or that is too large
+    cannot be cleared and is reported. Anything else is not called a figure.
+    """
+    import json
+
+    from lobster.core.figures.errors import FigureInvalidError, safe_reason
+    from lobster.core.figures.payload import validate_figure_bytes
+
+    try:
+        obj = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    candidates = [(obj, data)]
+    if isinstance(obj, dict) and isinstance(obj.get("figure"), dict):
+        candidates.append((obj["figure"], None))
+    for candidate, raw in candidates:
+        if not _figure_shaped(candidate):
+            continue
+        if raw is None:
+            raw = json.dumps(candidate, allow_nan=True).encode("utf-8")
+        try:
+            validate_figure_bytes(raw)
+        except FigureInvalidError as exc:
+            reason = safe_reason(exc)
+            if reason.endswith(("non_strict_json", "figure_too_large")):
+                return f"figure-shaped JSON that cannot be cleared ({reason})"
+            continue
+        return "a Plotly figure JSON"
+    return None
+
+
+def _feed(h, obj: Any) -> None:
+    """Deterministic digest of AnnData field values (one small helper per value kind)."""
+    import numpy as np
+    import pandas as pd
+    import scipy.sparse as sp
+
+    if obj is None:
+        h.update(b"N")
+    elif isinstance(obj, pd.DataFrame):
+        h.update(b"F" + repr((obj.shape, [str(c) for c in obj.columns])).encode())
+        h.update(
+            repr((obj.columns.name, obj.index.name, str(obj.index.dtype))).encode()
+        )
+        h.update(repr([str(t) for t in obj.dtypes]).encode())
+        h.update(repr([str(i) for i in obj.index]).encode())
+        for col in obj.columns:
+            series = obj[col]
+            if isinstance(series.dtype, pd.CategoricalDtype):
+                h.update(
+                    repr((list(series.cat.categories), series.cat.ordered)).encode()
+                )
+            try:
+                hashed = pd.util.hash_pandas_object(series, index=False).to_numpy()
+                h.update(hashed.tobytes())
+            except TypeError:  # unhashable cells (lists, dicts)
+                h.update(repr(series.tolist()).encode())
+    elif isinstance(obj, pd.Series):
+        _feed(h, obj.to_frame())
+    elif sp.issparse(obj):
+        m = obj.tocsr()
+        h.update(b"S" + repr((m.shape, str(m.dtype))).encode())
+        for part in (m.data, m.indices, m.indptr):
+            h.update(np.ascontiguousarray(part).tobytes())
+    elif isinstance(obj, np.ndarray):
+        if obj.dtype == object:
+            h.update(b"O" + repr(obj.shape).encode())
+            for item in obj.ravel():
+                _feed(h, item)
+        else:
+            h.update(b"A" + repr((obj.shape, str(obj.dtype))).encode())
+            h.update(np.ascontiguousarray(obj).tobytes())
+    elif isinstance(obj, Mapping):
+        h.update(b"M" + str(len(obj)).encode())
+        for key in sorted(obj, key=str):
+            h.update(repr(key).encode())
+            _feed(h, obj[key])
+    elif isinstance(obj, (list, tuple)):
+        h.update(b"L" + str(len(obj)).encode())
+        for item in obj:
+            _feed(h, item)
+    elif hasattr(obj, "shape") and hasattr(obj, "__getitem__"):  # array-like (backed)
+        _feed(h, np.asarray(obj[()]))
+    else:
+        h.update(b"V" + type(obj).__name__.encode() + repr(obj).encode())
+
+
+def _dataset_digests(dm) -> Dict[str, Dict[str, str]]:
+    """``modality -> {field -> digest}`` for :data:`PRODUCER_DATASET_FIELDS`."""
+    import hashlib
+
+    out: Dict[str, Dict[str, str]] = {}
+    for name in sorted(dm.list_modalities()):
+        adata = dm.get_modality(name)
+        fields: Dict[str, str] = {}
+        for field_name in PRODUCER_DATASET_FIELDS:
+            h = hashlib.sha256()
+            if field_name == "raw":
+                raw = adata.raw
+                _feed(
+                    h,
+                    None if raw is None else (raw.X, raw.var, dict(raw.varm.items())),
+                )
+            elif field_name in ("obsm", "varm", "obsp", "varp", "layers"):
+                _feed(h, dict(getattr(adata, field_name).items()))
+            else:
+                _feed(h, getattr(adata, field_name))
+            fields[field_name] = h.hexdigest()
+        out[name] = fields
+    return out
+
+
+def _catalog(dm) -> Dict[str, str]:
+    """``ref -> availability`` from the native reader (a fault raises: never 'empty')."""
+    from lobster.core.figures.listing import figure_ref
+
+    return {
+        figure_ref(item): str(item.get("availability") or "available")
+        for item in dm._saved_figure_records()
+    }
+
+
+def _readers(dm) -> Dict[str, Any]:
+    """What the real legacy reader APIs return (ids/refs only)."""
+    pm = dm.plot_manager
+    latest, _, _ = pm.get_latest_plots()
+    history, _, _ = pm.get_plot_history()
+    return {
+        "latest": [(p.get("id"), p.get("figure_ref")) for p in latest],
+        "history": [p.get("id") for p in history],
+    }
+
+
+def _found_by_id(dm, plot_id) -> bool:
+    _, stats, _ = dm.plot_manager.get_plot_by_id(plot_id)
+    return bool(stats.get("found"))
+
+
+def _install_figure_spies(monkeypatch, events: list, dm, workspace) -> None:
+    """Wrap (never replace) every figure-writing seam and ``log_tool_usage``.
+
+    Events are ``(kind, phase, data)``. ``stage``/``end`` carries the staged id;
+    ``commit_staged``/``start`` carries ``tool_call_id``, ``staged_ids``, ``activity``, the
+    catalog and the file tree at that moment; ``commit_staged``/``end`` carries the
+    results and the file tree; ``log``/``start`` carries the catalog; ``log``/``end`` the
+    returned activity.
+    """
+    import functools
+
+    from lobster.core.figures.store import LocalFigureStore
+    from lobster.core.plot_manager import PlotManager
+    from lobster.core.runtime.data_manager import DataManagerV2
+
+    def spy(cls, attr, kind, on_start=None, on_end=None):
+        original = getattr(cls, attr)
+
+        @functools.wraps(original)
+        def wrapper(self, *args, **kwargs):
+            events.append((kind, "start", on_start(args, kwargs) if on_start else None))
+            try:
+                result = original(self, *args, **kwargs)
+            except BaseException:
+                events.append((kind, "raise", None))
+                raise
+            events.append((kind, "end", on_end(result) if on_end else result))
+            return result
+
+        monkeypatch.setattr(cls, attr, wrapper)
+
+    def commit_start(args, kwargs):
+        activity = args[0] if args else kwargs.get("activity")
+        return {
+            "tool_call_id": kwargs.get("tool_call_id"),
+            "staged_ids": list(kwargs.get("staged_ids") or []),
+            "activity": activity,
+            "catalog": _catalog(dm),
+            "tree": _file_tree(workspace),
+        }
+
+    def commit_end(result):
+        return {"results": list(result or []), "tree": _file_tree(workspace)}
+
+    spy(PlotManager, "add_plot", "stage", on_end=lambda r: r[0])
+    spy(PlotManager, "commit_staged", "commit_staged", commit_start, commit_end)
+    spy(DataManagerV2, "log_tool_usage", "log", on_start=lambda a, k: _catalog(dm))
+    spy(LocalFigureStore, "commit", "store_commit")
+    spy(LocalFigureStore, "commit_execution", "store_execution")
+    spy(LocalFigureStore, "add_rendition", "store_rendition")
+
+
+def _default_llm_guard(monkeypatch, factory_module_path: str) -> None:
+    """Replace LLM creation for factory builds; applied BEFORE ``case.setup`` so a case's
+    own ``create_llm`` patch (at either site) wins."""
+    import importlib
+
+    from lobster.config import llm_factory
+
+    monkeypatch.setattr(llm_factory, "create_llm", lambda *a, **k: MagicMock())
+    module = importlib.import_module(factory_module_path)
+    if hasattr(module, "create_llm"):
+        monkeypatch.setattr(module, "create_llm", lambda *a, **k: MagicMock())
+
+
+def _build_tools(factory, dm) -> list:
+    """Real factory with the real data manager (fresh per case; no metadata cache)."""
+    graph = factory(
+        data_manager=dm,
+        callback_handler=MagicMock(),
+        agent_name="test",
+        delegation_tools=[],
+        workspace_path=dm.workspace_path,
+    )
+    return _extract_tools(graph)
+
+
+def _invoke(tool, args: Mapping[str, Any], tool_call_id: str) -> Tuple[Any, str]:
+    """Invoke as a graph tool call; returns ``(content, status)``.
+
+    Executes exactly the implementation :func:`figure_tool_key` identifies: the coroutine
+    whenever one exists, else ``func``. The other interface of a dual tool is not exercised.
+    """
+    import asyncio
+
+    call = {
+        "type": "tool_call",
+        "id": tool_call_id,
+        "name": tool.name,
+        "args": dict(args),
+    }
+    if getattr(tool, "coroutine", None) is not None:
+        out = asyncio.run(tool.ainvoke(call))
+    else:
+        out = tool.invoke(call)
+    return getattr(out, "content", out), getattr(out, "status", "success")
+
+
+def _is_store_path(rel: str, refs) -> bool:
+    """Managed path a trusted commit may create: a returned ref's revision folder or a
+    store bookkeeping folder (``lobster.core.figures.paths.RESERVED_DIRS``)."""
+    from lobster.core.figures import paths as P
+
+    parts = rel.split("/")
+    if len(parts) < 3 or parts[0] != P.PLOTS_DIR:
+        return False
+    if parts[1] in P.RESERVED_DIRS:
+        return True
+    return f"{parts[1]}@{parts[2]}" in refs and len(parts) >= 4
+
+
+def _file_violations(
+    workspace, before, after, managed_ok=lambda rel: False
+) -> List[str]:
+    """Figures written outside the trusted path (bounded detection, see module note)."""
+    import os
+
+    problems: List[str] = []
+    added, changed, removed = _tree_delta(before, after)
+    for rel in added + changed + removed:
+        if rel.split("/")[0] == "plots":
+            if not (rel in added and managed_ok(rel)):
+                problems.append(f"changed the managed figure folder: {rel}")
+            continue
+        if rel in removed:
+            continue
+        lower = rel.lower()
+        if lower.endswith(FIGURE_FILE_SUFFIXES):
+            problems.append(f"wrote a figure file: {rel}")
+        elif lower.endswith(".json"):
+            with open(os.path.join(workspace, *rel.split("/")), "rb") as fh:
+                verdict = _plotly_json_problem(fh.read())
+            if verdict:
+                problems.append(f"wrote {verdict}: {rel}")
+    return problems
+
+
+def _indices(events, kind, phase) -> List[int]:
+    return [i for i, (k, ph, _) in enumerate(events) if k == kind and ph == phase]
+
+
+def _no_figure_violations(
+    events, dm, catalog_before, readers_before, producer
+) -> List[str]:
+    problems = []
+    staged = _indices(events, "stage", "end")
+    if staged and not producer:
+        problems.append(f"staged {len(staged)} figure(s) (add_plot)")
+    for kind in ("commit_staged",) + _STORE_KINDS:
+        n = len(_indices(events, kind, "start"))
+        if n:
+            problems.append(f"{kind} called {n} time(s)")
+    if _catalog(dm) != catalog_before:
+        problems.append("the figure catalog changed")
+    if _readers(dm) != readers_before:
+        problems.append("legacy figure readers changed")
+    for i in _indices(events, "stage", "end"):
+        if _found_by_id(dm, events[i][2]):
+            problems.append(f"get_plot_by_id shows staged figure {events[i][2]}")
+    return problems
+
+
+def _producer_violations(events, dm, workspace, tool_call_id, before) -> List[str]:
+    """Saving producer: stage -> log -> exactly one commit_staged bound to THIS call."""
+    problems: List[str] = []
+    staged = [events[i][2] for i in _indices(events, "stage", "end")]
+    stage_idx = _indices(events, "stage", "end")
+    logs = _indices(events, "log", "end")
+    commits = _indices(events, "commit_staged", "start")
+    if not staged:
+        problems.append("no figure was staged")
+    if len(commits) != 1:
+        problems.append(f"commit_staged called {len(commits)} time(s), expected 1")
+        return problems
+    c_start = commits[0]
+    call = events[c_start][2]
+    if call["tool_call_id"] != tool_call_id:
+        problems.append("commit_staged did not carry the injected tool_call_id")
+    ids = list(call["staged_ids"])
+    if not ids or len(ids) != len(set(ids)) or sorted(ids) != sorted(staged):
+        problems.append(
+            "commit_staged staged_ids are not the figures staged in this call, each once"
+        )
+    last_stage = max(stage_idx) if stage_idx else -1
+    if last_stage > c_start:
+        problems.append("staged after commit_staged")
+    logs_between = [i for i in logs if last_stage < i < c_start]
+    if not logs_between:
+        problems.append("log_tool_usage did not run between staging and commit_staged")
+    elif events[logs_between[-1]][2] is None:
+        problems.append("log_tool_usage returned no activity (no recorded provenance)")
+    elif call["activity"] is not events[logs_between[-1]][2]:
+        problems.append(
+            "commit_staged activity is not the activity logged in this call"
+        )
+    for i in _indices(events, "log", "start"):
+        if events[i][2] != before["catalog"]:
+            problems.append("the catalog changed before log_tool_usage")
+            break
+    if call["catalog"] != before["catalog"]:
+        problems.append("the catalog changed before commit_staged")
+    ends = _indices(events, "commit_staged", "end")
+    if not ends:
+        problems.append("commit_staged raised")
+        return problems
+    c_end = ends[0]
+    for kind in _STORE_KINDS:
+        if any(not (c_start < i < c_end) for i in _indices(events, kind, "start")):
+            problems.append(f"{kind} ran outside commit_staged")
+    results = events[c_end][2]["results"]
+    if not results:
+        problems.append("commit_staged returned no result")
+    # Declared contract: one CommitResult per staged id, in order (candidate_index 0..n-1).
+    complete = len(results) == len(ids)
+    if not complete:
+        problems.append(
+            f"commit_staged returned {len(results)} result(s) for {len(ids)} id(s)"
+        )
+    elif [getattr(r, "candidate_index", None) for r in results] != list(
+        range(len(ids))
+    ):
+        problems.append("commit results are not one per staged id in order")
+    statuses = {getattr(r, "status", None) for r in results}
+    if not statuses <= {"available", "pending"}:
+        problems.append(
+            f"commit results not available/pending: {sorted(map(str, statuses))}"
+        )
+    available = {r.ref for r in results if getattr(r, "status", None) == "available"}
+    returned = {r.ref for r in results if getattr(r, "ref", None)}
+    # Managed-store changes: none before or after the commit; inside it, only new files of
+    # the returned refs or store bookkeeping; nothing pre-existing modified or removed.
+    tree_start, tree_end = call["tree"], events[c_end][2]["tree"]
+    problems.extend(
+        _file_violations(workspace, before["tree"], tree_start)
+        + _file_violations(
+            workspace, tree_start, tree_end, lambda rel: _is_store_path(rel, returned)
+        )
+        + _file_violations(workspace, tree_end, _file_tree(workspace))
+    )
+    catalog_after = _catalog(dm)
+    if any(catalog_after.get(r) != a for r, a in before["catalog"].items()):
+        problems.append("existing catalog entries changed")
+    new = {r: a for r, a in catalog_after.items() if r not in before["catalog"]}
+    if {r for r, a in new.items() if a == "available"} != available:
+        problems.append(
+            "available catalog entries differ from the returned available refs"
+        )
+    pending = {r.ref for r in results if getattr(r, "status", None) == "pending"}
+    if not {r for r, a in new.items() if a != "available"} <= pending:
+        problems.append("catalog has unavailable entries not returned as pending")
+    rb, ra = before["readers"], _readers(dm)
+    n_latest, n_hist = len(rb["latest"]), len(rb["history"])
+    if (
+        ra["latest"][:n_latest] != rb["latest"]
+        or ra["history"][:n_hist] != rb["history"]
+    ):
+        problems.append("legacy figure readers were rewritten")
+    else:
+        new_latest = ra["latest"][n_latest:]
+        if not {ref for _, ref in new_latest} <= available:
+            problems.append(
+                "legacy readers show a figure that is not an available returned ref"
+            )
+        if [pid for pid, _ in new_latest] != ra["history"][n_hist:]:
+            problems.append("get_plot_history differs from get_latest_plots")
+        if not {pid for pid, _ in new_latest} <= set(call["staged_ids"]):
+            problems.append(
+                "legacy readers show an id that was not committed in this call"
+            )
+    for sid, result in zip(ids, results, strict=True) if complete else ():
+        shown = _found_by_id(dm, sid)
+        if shown != (getattr(result, "status", None) == "available"):
+            problems.append(f"get_plot_by_id({sid}) does not match its commit result")
+    return problems
+
+
+@contextmanager
+def _fresh_case_context(factory, factory_module_path: str, workspace, setup=None):
+    """Fresh real ``DataManagerV2`` -> default LLM guard -> ``setup(dm, mp)`` -> real
+    factory. Patches stay live until the context exits. Shared by execution and coverage.
+    A factory that cannot be built raises (fail closed; no dependency skip)."""
+    import pytest
+
+    from lobster.core.runtime.data_manager import DataManagerV2
+
+    with pytest.MonkeyPatch.context() as mp:
+        dm = DataManagerV2(workspace_path=workspace)
+        _default_llm_guard(mp, factory_module_path)
+        if setup is not None:
+            setup(dm, mp)
+        yield dm, mp, _build_tools(factory, dm)
+
+
+def check_figure_tool_case(
+    case: FigureToolCase,
+    *,
+    factory,
+    factory_module_path: str,
+    workspace,
+    tool_call_id: str,
+) -> List[str]:
+    """Run one case on a fresh real ``DataManagerV2``; return its violations ([] = holds)."""
+    import pytest
+
+    from lobster.config.aquadif import figure_tool_key, is_transitional_figure_producer
+
+    name = case.label or case.tool_name
+    with _fresh_case_context(factory, factory_module_path, workspace, case.setup) as (
+        dm,
+        _mp,
+        built,
+    ):
+        tools = {t.name: t for t in built}
+        if case.tool_name not in tools:
+            return [f"{name}: tool '{case.tool_name}' is not exposed by the factory"]
+        tool = tools[case.tool_name]
+        producer = is_transitional_figure_producer(figure_tool_key(tool))
+
+        before = {
+            "tree": _file_tree(workspace),
+            "catalog": _catalog(dm),
+            "readers": _readers(dm),
+            "data": _dataset_digests(dm) if producer else None,
+        }
+        events: list = []
+        spies = pytest.MonkeyPatch()
+        _install_figure_spies(spies, events, dm, workspace)
+        try:
+            content, status = _invoke(tool, case.args, tool_call_id)
+        except Exception as exc:  # a tool error is a case failure, never a pass
+            return [f"{name}: the tool raised {type(exc).__name__}"]
+        finally:
+            spies.undo()
+
+        problems: List[str] = []
+        if status == "error":
+            problems.append("the tool returned an error ToolMessage")
+        try:
+            case.assert_success(content, dm)
+        except AssertionError as exc:
+            problems.append(f"assert_success failed: {exc}")
+
+        if producer and not case.is_preview:
+            problems.extend(
+                _producer_violations(events, dm, workspace, tool_call_id, before)
+            )
+        else:
+            problems.extend(
+                _no_figure_violations(
+                    events, dm, before["catalog"], before["readers"], producer
+                )
+            )
+            problems.extend(
+                _file_violations(workspace, before["tree"], _file_tree(workspace))
+            )
+        if producer:
+            data_after = _dataset_digests(dm)
+            if set(data_after) != set(before["data"]):
+                problems.append("the set of modalities changed")
+            for mod in sorted(set(before["data"]) & set(data_after)):
+                diff = [
+                    f
+                    for f in PRODUCER_DATASET_FIELDS
+                    if before["data"][mod][f] != data_after[mod][f]
+                ]
+                if diff:
+                    problems.append(f"modality '{mod}' changed: {', '.join(diff)}")
+        return [f"{name}: {p}" for p in problems]
+
+
+def _template_problems(
+    tool_name: str, metadata: Mapping[str, Any], catalog
+) -> List[str]:
+    """``suggests_templates`` names must resolve via ``list_templates()`` (lazy catalog)."""
+    if "suggests_templates" not in metadata:
+        return []
+    names = metadata["suggests_templates"]
+    if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
+        return [f"{tool_name}: suggests_templates must be a list of template names"]
+    if not names:
+        return []
+    known = catalog()
+    if known is None:
+        return [
+            f"{tool_name}: suggests_templates is set but the template catalog "
+            "(lobster.figure_templates.list_templates) is not importable"
+        ]
+    return [
+        f"{tool_name}: suggested template not in list_templates(): {n}"
+        for n in names
+        if n not in known
+    ]
+
+
+def _template_catalog():
+    """Lazy, once-per-coverage-pass: ``set`` of template names, or ``None`` if absent."""
+    cache: Dict[str, Any] = {}
+
+    def get():
+        if "names" not in cache:
+            try:
+                from lobster.figure_templates import list_templates
+            except ImportError:
+                cache["names"] = None
+            else:
+                cache["names"] = {
+                    d.get("name") for d in list_templates() if isinstance(d, Mapping)
+                }
+        return cache["names"]
+
+    return get
+
+
+class FigureContractTestMixin:
+    """Executed figure contract for an agent package's tool cases.
+
+    Use alongside :class:`AgentContractTestMixin` (same ``agent_module`` /
+    ``factory_name`` / ``factory_module`` attributes) and implement
+    :meth:`figure_tool_cases`. Coverage (bounded): every factory-exposed tool
+    whose PRIMARY category is one of the seven provenance-required categories needs at
+    least one case or an explicit ``figure_contract_skips`` entry; DELEGATE and UTILITY
+    (and any other non-provenance primary) are reported as not covered; the named trusted
+    submitters are excluded and not counted; the eight transitional producers can never be
+    skipped and need a saving case. ``suggests_templates`` names must resolve via
+    ``list_templates()``. The existing no-buried-provenance check in
+    :class:`AgentContractTestMixin` keeps the primary category honest.
+    """
+
+    agent_module: ClassVar[str]
+    factory_name: ClassVar[str]
+    factory_module: ClassVar[Optional[str]] = None
+    #: ``{tool_name: reason}`` for covered non-producer tools without a case (reported).
+    figure_contract_skips: ClassVar[Mapping[str, str]] = {}
+
+    def figure_tool_cases(self) -> List[FigureToolCase]:
+        """Return the package's :class:`FigureToolCase` list (valid invocations)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement figure_tool_cases() for figure-tool coverage"
+        )
+
+    def _figure_factory(self):
+        import importlib
+
+        module_path = self.factory_module or self.agent_module
+        module = importlib.import_module(module_path)
+        return getattr(module, self.factory_name), module_path
+
+    def figure_contract_coverage(self, workspace) -> Tuple[List[str], str]:
+        """``(violations, report)`` for the exposed tools vs the supplied cases.
+
+        Inventory: every supplied case gets its own fresh context
+        (real ``DataManagerV2`` at a distinct workspace, default LLM guard, ``case.setup``,
+        real factory); primitive descriptors are frozen at once and united across cases.
+        A same-name tool with a different key or primary category fails; each case's tool
+        must be exposed in its OWN context; every observed ``suggests_templates`` value is
+        validated. With no cases, one fresh empty-``DataManagerV2`` baseline is built (for
+        all-skipped or zero-covered packages). The report states the observed setups; it is
+        not a claim about every configuration, and not proof of execution.
+        """
+        from pathlib import Path
+
+        from lobster.config import aquadif
+
+        factory, module_path = self._figure_factory()
+        cases = list(self.figure_tool_cases())
+        skips = dict(self.figure_contract_skips)
+        catalog = _template_catalog()
+        problems: List[str] = []
+        union: Dict[str, Tuple[str, Optional[str]]] = {}
+
+        def observe(index, setup):
+            ws = Path(workspace) / f"inventory_{index}"
+            ws.mkdir(parents=True)
+            with _fresh_case_context(factory, module_path, ws, setup) as (
+                _dm,
+                _mp,
+                tools,
+            ):
+                seen = {}
+                for tool in tools:
+                    metadata = getattr(tool, "metadata", None) or {}
+                    categories = metadata.get("categories") or []
+                    primary = categories[0] if categories else None
+                    seen[tool.name] = (aquadif.figure_tool_key(tool), primary)
+                    for p in _template_problems(tool.name, metadata, catalog):
+                        if p not in problems:
+                            problems.append(p)
+            return seen
+
+        observations = (
+            [(c, observe(i, c.setup)) for i, c in enumerate(cases)]
+            if cases
+            else [(None, observe(0, None))]
+        )
+        for case, seen in observations:
+            if case is not None and case.tool_name not in seen:
+                problems.append(
+                    f"case {case.label or case.tool_name}: tool not exposed in its own setup"
+                )
+            for name, desc in seen.items():
+                if name in union and union[name] != desc:
+                    problems.append(
+                        f"{name}: key or primary category differs across setups"
+                    )
+                union.setdefault(name, desc)
+
+        with_cases: List[str] = []
+        not_covered: List[str] = []
+        excluded: List[str] = []
+        skipped: List[str] = []
+        for tool_name, (key, primary_value) in sorted(union.items()):
+            if key in aquadif.TRUSTED_FIGURE_SUBMITTERS:
+                excluded.append(tool_name)
+                continue
+            own = [c for c in cases if c.tool_name == tool_name]
+            if aquadif.is_transitional_figure_producer(key):
+                if tool_name in skips:
+                    problems.append(
+                        f"{tool_name}: a transitional producer cannot be skipped"
+                    )
+                if not any(not c.is_preview for c in own):
+                    problems.append(
+                        f"{tool_name}: a transitional producer needs a saving case"
+                    )
+                with_cases.append(tool_name)
+                continue
+            try:
+                primary = aquadif.AquadifCategory(primary_value)
+            except ValueError:
+                problems.append(f"{tool_name}: no valid primary AQUADIF category")
+                continue
+            if primary not in aquadif.FIGURE_CONTRACT_COVERED:
+                not_covered.append(f"{tool_name} ({primary.value})")
+            elif own:
+                with_cases.append(tool_name)
+            elif tool_name in skips:
+                reason = skips[tool_name]
+                if not isinstance(reason, str) or not reason.strip():
+                    problems.append(
+                        f"{tool_name}: skip needs a non-empty string reason"
+                    )
+                skipped.append(f"{tool_name} ({primary.value})")  # names only, no text
+            else:
+                problems.append(f"{tool_name}: no case and no skip ({primary.value})")
+        for tool_name in sorted(set(skips) - set(union)):
+            problems.append(f"skip names an unexposed tool: {tool_name}")
+        basis = (
+            f"inventory across {len(cases)} supplied case setup(s)"
+            if cases
+            else "inventory: one empty-DataManagerV2 baseline (no cases)"
+        )
+        report = (
+            f"D8 figure contract for {self.factory_name} ({basis}): "
+            f"with cases (run by test_figure_tool_cases_hold): {with_cases or 'none'}; "
+            f"skipped (reasons in source, not echoed): {skipped or 'none'}; "
+            f"not covered (non-provenance primary): {not_covered or 'none'}; "
+            f"excluded trusted submitter, not counted: {excluded or 'none'}."
+        )
+        return problems, report
+
+    def test_figure_contract_coverage(self, tmp_path, record_property) -> None:
+        import warnings
+
+        problems, report = self.figure_contract_coverage(tmp_path / "coverage")
+        record_property("d8_coverage", report)
+        warnings.warn(FigureContractReport(report), stacklevel=1)
+        assert not problems, (  # nosec B101 # Contract-test assertion.
+            "D8 coverage:\n  - " + "\n  - ".join(problems)
+        )
+
+    def test_figure_tool_cases_hold(self, tmp_path) -> None:
+        factory, module_path = self._figure_factory()
+        problems: List[str] = []
+        for i, case in enumerate(self.figure_tool_cases()):
+            workspace = tmp_path / f"case_{i}"
+            workspace.mkdir()
+            problems.extend(
+                check_figure_tool_case(
+                    case,
+                    factory=factory,
+                    factory_module_path=module_path,
+                    workspace=workspace,
+                    tool_call_id=f"d8_call_{i}",
+                )
+            )
+        assert not problems, (  # nosec B101 # Contract-test assertion.
+            "D8 figure contract:\n  - " + "\n  - ".join(problems)
+        )

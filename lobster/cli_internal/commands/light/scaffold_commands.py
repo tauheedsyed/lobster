@@ -72,4 +72,8 @@ def scaffold_agent_cmd(
         f"  1. Fill in domain-specific tools in ./{rel_path}/lobster/agents/*/shared_tools.py"
     )
     typer.echo("  2. Add services and platform configs")
-    typer.echo(f"  3. Validate: lobster validate-plugin ./{rel_path}")
+    typer.echo(
+        f"  3. Replace the placeholder figure_tool_cases() in ./{rel_path}/tests/test_contract.py"
+        " with real fixture data (D8: analysis tools never create figures)"
+    )
+    typer.echo(f"  4. Validate: lobster validate-plugin ./{rel_path}")

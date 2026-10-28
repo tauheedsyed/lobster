@@ -7,6 +7,7 @@ RNA-seq data, generating quality metrics and plots.
 This service emits Intermediate Representation (IR) for automatic notebook export.
 """
 
+import inspect
 from typing import Any, Dict, List, Tuple
 
 import anndata
@@ -26,6 +27,25 @@ class QualityError(Exception):
     """Base exception for quality assessment operations."""
 
     pass
+
+
+def _add_drawing_qc_metrics(adata, total_counts, n_genes):
+    """Persist descriptive drawing metrics during QC, never during plotting."""
+    adata.obs["n_counts"] = total_counts
+    adata.obs["n_genes"] = n_genes
+    adata.obs["gene_detection_rate"] = n_genes / max(adata.n_vars, 1) * 100
+    adata.obs["log10_counts"] = np.log10(total_counts + 1)
+    adata.obs["log10_genes"] = np.log10(n_genes + 1)
+    adata.obs["percent_mito"] = adata.obs["mt_pct"].to_numpy()
+    adata.obs["percent_ribo"] = adata.obs["ribo_pct"].to_numpy()
+    hb_mask = adata.var_names.str.startswith(("HBA", "HBB", "hba", "hbb"))
+    hb_counts = np.asarray(adata[:, hb_mask].X.sum(axis=1)).ravel()
+    adata.obs["percent_hb"] = np.divide(
+        hb_counts * 100,
+        total_counts,
+        out=np.zeros(adata.n_obs, dtype=float),
+        where=total_counts != 0,
+    )
 
 
 class QualityService:
@@ -97,6 +117,11 @@ class QualityService:
             adata_qc.obs["mt_pct"] = qc_metrics["mt_pct"]
             adata_qc.obs["ribo_pct"] = qc_metrics["ribo_pct"]
             adata_qc.obs["housekeeping_score"] = qc_metrics["housekeeping_score"]
+            _add_drawing_qc_metrics(
+                adata_qc,
+                qc_metrics["total_counts"].to_numpy(),
+                qc_metrics["n_genes"].to_numpy(),
+            )
 
             # Filter cells based on QC metrics (with upper bound for doublets)
             passing_cells = (
@@ -1133,6 +1158,9 @@ if _hk_genes:
 else:
     adata.obs['housekeeping_score'] = np.zeros(adata.n_obs)
 
+# Drawing metrics are analysis outputs, not figure side effects.
+_add_drawing_qc_metrics(adata, _total_counts, _n_genes)
+
 # QC pass/fail — all FIVE criteria, including the housekeeping floor
 adata.obs['qc_pass'] = (
     (_n_genes >= {{ min_genes }}) &
@@ -1174,7 +1202,10 @@ print(f"Mean mitochondrial %: {adata.obs['mt_pct'].mean():.2f}")
             },
             validates_on_export=True,
             requires_validation=False,
-            helper_code=[ANNOTATE_QC_GENES_HELPER],
+            helper_code=[
+                ANNOTATE_QC_GENES_HELPER,
+                inspect.getsource(_add_drawing_qc_metrics),
+            ],
         )
 
         logger.debug(f"Created IR for quality assessment: {ir.operation}")

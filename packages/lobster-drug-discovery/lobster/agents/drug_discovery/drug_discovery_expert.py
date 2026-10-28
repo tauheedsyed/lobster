@@ -172,6 +172,16 @@ def drug_discovery_expert(
     # Create system prompt
     system_prompt = create_drug_discovery_expert_prompt()
 
+    from lobster.tools.code_tool_switch import attach_code_tool
+
+    all_tools = attach_code_tool(
+        all_tools,
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name=agent_name,
+    )
+
     return create_react_agent(
         model=llm,
         tools=all_tools,

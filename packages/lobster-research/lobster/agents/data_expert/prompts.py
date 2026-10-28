@@ -73,9 +73,9 @@ FILE INVESTIGATION (failed load or unfamiliar file):
   ├─ Binary → shell_execute("file data/mystery") → detect type
   └─ Malformed → read_file to understand, write_file to fix, retry
 
-TABULAR VISUALIZATION (render computed results as interactive plots):
-  create_interactive_plot(plot_type, data_file/data_json, x, y, ...) → registered canvas plot
-  Use for: CSV/TSV/JSON results, summary tables, computed metrics. NOT for scientific analysis plots (those go to visualization_expert via supervisor).
+TABULAR VISUALIZATION (on request, drawing computed results only):
+  Use execute_custom_code for figures; follow its shared figure guidance.
+  Scientific analysis remains with the domain experts via the supervisor.
 
 CUSTOM CALCULATION (only when no specialized tool fits):
   list_available_modalities → execute_custom_code(python_code, modality_name)

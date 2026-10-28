@@ -7,7 +7,11 @@ plugin contract including AQUADIF compliance.
 
 import pytest
 
-from lobster.testing.contract_mixins import AgentContractTestMixin
+from lobster.testing.contract_mixins import (
+    AgentContractTestMixin,
+    FigureContractTestMixin,
+    FigureToolCase,
+)
 
 
 @pytest.mark.contract
@@ -24,3 +28,62 @@ class Test{{ agent_class_name }}Contract(AgentContractTestMixin):
     expected_tier = "{{ tier }}"
     # Set to True once your factory produces working tools with real services
     tools_required = False
+
+
+# =============================================================================
+# D8: analysis tools never create figures (executed on a real DataManagerV2)
+# =============================================================================
+# Each case is a VALID invocation of one tool. The harness builds the real factory, runs
+# the tool as a tool call, and fails if it stages, saves or writes a figure. The cases below
+# are a PLACEHOLDER smoke test, not scientific qualification: replace the data and checks
+# with a small real fixture for your domain.
+
+
+def _store_example(dm, monkeypatch):
+    """Load the case's input data (runs before the factory is built)."""
+    import anndata as ad
+    import numpy as np
+
+    # TODO(D8): replace with a small, real fixture for your domain.
+    dm.store_modality("example", ad.AnnData(X=np.ones((4, 3), dtype="float32")))
+
+
+def _reply_contains(text):
+    def check(reply, dm):
+        # TODO(D8): assert the expected science output (values, new modality, IR),
+        # not only reply text. A returned error message must fail here.
+        assert text in str(reply), f"expected {text!r} in the reply"
+
+    return check
+
+
+@pytest.mark.contract
+class Test{{ agent_class_name }}FigureContract(FigureContractTestMixin):
+    """D8 figure contract for {{ agent_name }} (see FigureContractTestMixin)."""
+
+    agent_module = "lobster.agents.{{ domain }}.{{ agent_name }}"
+    factory_name = "{{ agent_name }}"
+    # {tool_name: reason} for a covered tool that cannot have a case yet (reported).
+    figure_contract_skips = {}
+
+    def figure_tool_cases(self):
+        return [
+            FigureToolCase(
+                "import_{{ domain }}_data",
+                {"file_path": "example.txt"},
+                _store_example,
+                _reply_contains("Imported"),
+            ),
+            FigureToolCase(
+                "assess_{{ domain }}_quality",
+                {"modality_name": "example"},
+                _store_example,
+                _reply_contains("Quality assessment complete"),
+            ),
+            FigureToolCase(
+                "analyze_{{ domain }}",
+                {"modality_name": "example"},
+                _store_example,
+                _reply_contains("Analysis complete"),
+            ),
+        ]

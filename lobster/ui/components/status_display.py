@@ -307,8 +307,11 @@ class EnhancedStatusDisplay:
                 for file_info in files:
                     all_files.append((file_info, category))
 
-            # Sort by modification time (newest first)
-            all_files.sort(key=lambda x: x[0]["modified"], reverse=True)
+            # Sort by modification time (newest first; an unknown mtime sorts last)
+            all_files.sort(
+                key=lambda x: (x[0]["modified"] is not None, x[0]["modified"] or 0),
+                reverse=True,
+            )
 
             # Create files table
             table = Table(
@@ -348,10 +351,13 @@ class EnhancedStatusDisplay:
             if len(all_files) > 5:
                 table.add_row("...", f"+ {len(all_files) - 5} more", "")
 
-        except Exception:
+        except Exception as e:
+            # A listing fault is shown as one (safe reason), never as an empty workspace.
+            from lobster.core.figures.errors import safe_reason
+
             table = Table(show_header=False, box=box.SIMPLE)
-            table.add_column("Info", style="grey50")
-            table.add_row("No files found")
+            table.add_column("Error", style="red")
+            table.add_row(f"Unable to list files ({safe_reason(e)})")
 
         return LobsterTheme.create_panel(table, title="📁 Recent Files")
 

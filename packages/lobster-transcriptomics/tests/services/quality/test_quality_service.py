@@ -649,10 +649,27 @@ class TestQualityIRGeneration:
         replayed = adata.copy()
         namespace = {"adata": replayed, "np": np}
         for helper in ir.helper_code:
-            exec(helper, namespace)  # nosec B102 # Execute repository-generated code on synthetic fixtures to validate replay.
-        exec(ir.render(), namespace)  # nosec B102 # Execute repository-generated code on synthetic fixtures to validate replay.
-        for column in ("mt_pct", "ribo_pct", "housekeeping_score"):
+            exec(
+                helper, namespace
+            )  # nosec B102 # Execute repository-generated code on synthetic fixtures to validate replay.
+        exec(
+            ir.render(), namespace
+        )  # nosec B102 # Execute repository-generated code on synthetic fixtures to validate replay.
+        for column in (
+            "mt_pct",
+            "ribo_pct",
+            "housekeeping_score",
+            "n_counts",
+            "n_genes",
+            "gene_detection_rate",
+            "log10_counts",
+            "log10_genes",
+            "percent_mito",
+            "percent_ribo",
+            "percent_hb",
+        ):
             np.testing.assert_allclose(replayed.obs[column], expected.obs[column])
+        assert adata.obs.empty, "Quality assessment must only write its output copy"
         np.testing.assert_array_equal(replayed.obs["qc_pass"], expected.obs["qc_pass"])
         assert not replayed.obs.loc["cell1", "qc_pass"]
         assert replayed.obs.loc["cell1", "housekeeping_score"] == 0

@@ -4,16 +4,17 @@ Unit tests for PlotManager.
 Tests cover:
 - Plot addition with metadata (3-tuple return pattern)
 - FIFO buffer behavior (max_plots_history enforcement)
-- Thread safety (counter lock, save lock)
-- Rate limiting (min_save_interval)
-- Workspace export (HTML/PNG)
-- PNG skip threshold (>50K points)
+- Thread safety (counter lock)
+- Managed figure lifecycle: add_plot stages, commit_staged publishes (trusted save),
+  save_plots_to_workspace writes nothing
 - Visualization state management
 - Provenance IR generation
 - Backward compatibility (property access)
 - Error handling (invalid plots, missing workspace)
+- Fresh plot managers on one workspace never overwrite an earlier saved figure
 
-All tests run WITHOUT instantiating DataManagerV2 (isolated unit tests).
+All tests except the fresh-worker tests at the end run WITHOUT instantiating DataManagerV2
+(isolated unit tests); those use one real DataManagerV2 per fresh worker.
 """
 
 import threading
@@ -52,18 +53,25 @@ def plot_manager(workspace_path):
 
 @pytest.fixture
 def mock_plotly_figure():
-    """Create mock Plotly Figure."""
-    with patch("lobster.core.plot_manager._ensure_plotly") as mock_ensure:
-        mock_go = Mock()
-        mock_io = Mock()
-        mock_ensure.return_value = (mock_go, mock_io)
+    """Real Plotly Figure (staging serializes byte-exact JSON, so mocks no longer suffice)."""
+    import plotly.graph_objects as go
+    import plotly.io as pio
 
-        # Create mock figure
-        mock_figure = Mock(spec=["update_layout"])
-        mock_figure.update_layout = Mock()
-        mock_go.Figure = type(mock_figure)
+    figure = go.Figure(go.Scatter(x=[1, 2, 3], y=[3, 1, 2], uid="trace-a"))
+    figure.update_layout(title="Service title")
+    yield figure, go, pio
 
-        yield mock_figure, mock_go, mock_io
+
+_CALLS = iter(range(10**6))
+
+
+def _publish(pm, figure, **kw):
+    """add_plot + commit_staged: the only way a figure becomes visible to legacy readers."""
+    plot_id, stats, ir = pm.add_plot(plot=figure, **kw)
+    pm.commit_staged(
+        {"id": "act"}, tool_call_id=f"call_{next(_CALLS)}", staged_ids=[plot_id]
+    )
+    return plot_id, stats, ir
 
 
 @pytest.fixture
@@ -101,7 +109,8 @@ def test_add_plot_basic(plot_manager, mock_plotly_figure):
     assert stats["plot_id"] == plot_id
     assert stats["title"].startswith("Test Plot")
     assert stats["source"] == "test_service"
-    assert stats["plots_in_history"] == 1
+    assert stats["status"] == "staged"
+    assert stats["plots_in_history"] == 0  # staged: not visible until commit_staged
 
     # Verify IR generation
     assert ir.operation == "plot_manager.add_plot"
@@ -162,7 +171,7 @@ def test_fifo_buffer_enforcement(workspace_path, mock_plotly_figure):
 
     # Add 5 plots (exceeds max of 3)
     for i in range(5):
-        pm.add_plot(plot=figure, title=f"Plot {i + 1}")
+        _publish(pm, figure, title=f"Plot {i + 1}")
 
     # Should only keep last 3 plots
     assert len(pm.latest_plots) == 3
@@ -175,11 +184,11 @@ def test_fifo_buffer_preserves_latest(workspace_path, mock_plotly_figure):
     figure, _, _ = mock_plotly_figure
     pm = PlotManager(workspace_path=workspace_path, max_plots_history=2)
 
-    pm.add_plot(plot=figure, title="Old Plot")
+    _publish(pm, figure, title="Old Plot")
     time.sleep(0.01)
-    pm.add_plot(plot=figure, title="Middle Plot")
+    _publish(pm, figure, title="Middle Plot")
     time.sleep(0.01)
-    pm.add_plot(plot=figure, title="New Plot")
+    _publish(pm, figure, title="New Plot")
 
     assert len(pm.latest_plots) == 2
     titles = [p["title"] for p in pm.latest_plots]
@@ -224,83 +233,9 @@ def test_counter_thread_safety(workspace_path, mock_plotly_figure):
     assert pm.plot_counter == 50
 
 
-def test_save_lock_prevents_concurrent_saves(plot_manager, mock_plotly_figure):
-    """Test that save_lock prevents concurrent saves."""
-    figure, _, _ = mock_plotly_figure
-    plot_manager.add_plot(plot=figure, title="Test Plot")
-
-    save_started = []
-    save_completed = []
-
-    def slow_save():
-        # Simulate slow save
-        save_started.append(threading.current_thread().name)
-        saved_files, stats, _ = plot_manager.save_plots_to_workspace()
-        save_completed.append(threading.current_thread().name)
-        return saved_files
-
-    # Attempt concurrent saves
-    threads = [threading.Thread(target=slow_save, name=f"Thread-{i}") for i in range(3)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    # Only one save should succeed (others skipped due to lock)
-    assert len(save_started) == 3
-    # At least one should have been skipped (returned empty list)
-
-
 # =============================================================================
 # Test: Rate Limiting
 # =============================================================================
-
-
-def test_rate_limiting_enforcement(workspace_path, mock_plotly_figure):
-    """Test that min_save_interval is enforced."""
-    figure, _, _ = mock_plotly_figure
-    pm = PlotManager(workspace_path=workspace_path, min_save_interval=0.5)
-    pm.add_plot(plot=figure, title="Test Plot")
-
-    # First save should succeed
-    files1, stats1, _ = pm.save_plots_to_workspace()
-    assert len(files1) > 0
-    assert not stats1.get("skipped")
-
-    # Immediate second save should be rate-limited
-    files2, stats2, _ = pm.save_plots_to_workspace()
-    assert len(files2) == 0
-    assert stats2["skipped"] is True
-    assert stats2["reason"] == "rate_limited"
-
-    # After waiting, third save should succeed
-    time.sleep(0.6)
-    files3, stats3, _ = pm.save_plots_to_workspace()
-    assert len(files3) > 0
-    assert not stats3.get("skipped")
-
-
-def test_rate_limiting_per_instance(workspace_path, mock_plotly_figure):
-    """Test that rate limiting is per PlotManager instance."""
-    figure, _, _ = mock_plotly_figure
-
-    ws1 = workspace_path / "pm1"
-    ws2 = workspace_path / "pm2"
-    ws1.mkdir()
-    ws2.mkdir()
-
-    pm1 = PlotManager(workspace_path=ws1, min_save_interval=0.5)
-    pm2 = PlotManager(workspace_path=ws2, min_save_interval=0.5)
-
-    pm1.add_plot(plot=figure, title="Plot 1")
-    pm2.add_plot(plot=figure, title="Plot 2")
-
-    # Both should save successfully (independent rate limits)
-    files1, stats1, _ = pm1.save_plots_to_workspace()
-    files2, stats2, _ = pm2.save_plots_to_workspace()
-
-    assert len(files1) > 0
-    assert len(files2) > 0
 
 
 # =============================================================================
@@ -308,87 +243,9 @@ def test_rate_limiting_per_instance(workspace_path, mock_plotly_figure):
 # =============================================================================
 
 
-def test_save_plots_to_workspace_html(plot_manager, mock_plotly_figure):
-    """Test HTML export to workspace."""
-    figure, _, mock_io = mock_plotly_figure
-    plot_manager.add_plot(plot=figure, title="Export Test")
-
-    saved_files, stats, ir = plot_manager.save_plots_to_workspace()
-
-    # Verify 3-tuple return
-    assert isinstance(saved_files, list)
-    assert isinstance(stats, dict)
-    assert isinstance(ir, AnalysisStep)
-
-    # Verify files were attempted to be saved
-    mock_io.write_html.assert_called()
-    assert stats["saved_count"] >= 0
-    assert stats["total_plots"] == 1
-
-
-def test_save_plots_empty_list(plot_manager):
-    """Test save with no plots."""
-    saved_files, stats, ir = plot_manager.save_plots_to_workspace()
-
-    assert saved_files == []
-    assert stats["skipped"] is True
-    assert stats["reason"] == "no_plots"
-    assert ir is None  # No IR for skipped operations
-
-
-def test_save_plots_creates_directory(workspace_path, mock_plotly_figure):
-    """Test that plots directory is created if missing."""
-    figure, _, _ = mock_plotly_figure
-    pm = PlotManager(workspace_path=workspace_path)
-    pm.add_plot(plot=figure, title="Test")
-
-    plots_dir = workspace_path / "plots"
-    assert not plots_dir.exists()
-
-    pm.save_plots_to_workspace()
-
-    assert plots_dir.exists()
-    assert plots_dir.is_dir()
-
-
 # =============================================================================
 # Test: PNG Skip Threshold
 # =============================================================================
-
-
-def test_png_skip_for_large_datasets(plot_manager, mock_plotly_figure):
-    """Test that PNG export is skipped for >50K points."""
-    figure, _, mock_io = mock_plotly_figure
-
-    # Add plot with large dataset (>50K cells)
-    plot_manager.add_plot(
-        plot=figure,
-        title="Large Dataset",
-        dataset_info={"n_cells": 75000},
-    )
-
-    saved_files, _, _ = plot_manager.save_plots_to_workspace()
-
-    # PNG export should be skipped
-    # write_image should NOT be called
-    mock_io.write_image.assert_not_called()
-
-
-def test_png_export_for_small_datasets(plot_manager, mock_plotly_figure):
-    """Test that PNG export works for <50K points."""
-    figure, _, mock_io = mock_plotly_figure
-
-    # Add plot with small dataset (<50K cells)
-    plot_manager.add_plot(
-        plot=figure,
-        title="Small Dataset",
-        dataset_info={"n_cells": 10000},
-    )
-
-    saved_files, _, _ = plot_manager.save_plots_to_workspace()
-
-    # PNG export should be attempted
-    mock_io.write_image.assert_called()
 
 
 # =============================================================================
@@ -399,7 +256,7 @@ def test_png_export_for_small_datasets(plot_manager, mock_plotly_figure):
 def test_get_plot_by_id_found(plot_manager, mock_plotly_figure):
     """Test retrieving plot by ID."""
     figure, _, _ = mock_plotly_figure
-    plot_id, _, _ = plot_manager.add_plot(plot=figure, title="Find Me")
+    plot_id, _, _ = _publish(plot_manager, figure, title="Find Me")
 
     retrieved_figure, stats, none_ir = plot_manager.get_plot_by_id(plot_id)
 
@@ -422,7 +279,7 @@ def test_get_latest_plots_all(plot_manager, mock_plotly_figure):
     """Test getting all plots."""
     figure, _, _ = mock_plotly_figure
     for i in range(3):
-        plot_manager.add_plot(plot=figure, title=f"Plot {i + 1}")
+        _publish(plot_manager, figure, title=f"Plot {i + 1}")
 
     plots, stats, _ = plot_manager.get_latest_plots(n=None)
 
@@ -435,7 +292,7 @@ def test_get_latest_plots_limited(plot_manager, mock_plotly_figure):
     """Test getting limited number of plots."""
     figure, _, _ = mock_plotly_figure
     for i in range(5):
-        plot_manager.add_plot(plot=figure, title=f"Plot {i + 1}")
+        _publish(plot_manager, figure, title=f"Plot {i + 1}")
 
     plots, stats, _ = plot_manager.get_latest_plots(n=2)
 
@@ -450,8 +307,8 @@ def test_get_latest_plots_limited(plot_manager, mock_plotly_figure):
 def test_get_plot_history(plot_manager, mock_plotly_figure):
     """Test getting plot history (minimal metadata)."""
     figure, _, _ = mock_plotly_figure
-    plot_manager.add_plot(plot=figure, title="Plot 1", source="service_a")
-    plot_manager.add_plot(plot=figure, title="Plot 2", source="service_b")
+    _publish(plot_manager, figure, title="Plot 1", source="service_a")
+    _publish(plot_manager, figure, title="Plot 2", source="service_b")
 
     history, stats, _ = plot_manager.get_plot_history()
 
@@ -475,8 +332,8 @@ def test_get_plot_history(plot_manager, mock_plotly_figure):
 def test_clear_plots(plot_manager, mock_plotly_figure):
     """Test clearing all plots."""
     figure, _, _ = mock_plotly_figure
-    plot_manager.add_plot(plot=figure, title="Plot 1")
-    plot_manager.add_plot(plot=figure, title="Plot 2")
+    _publish(plot_manager, figure, title="Plot 1")
+    _publish(plot_manager, figure, title="Plot 2")
 
     assert len(plot_manager.latest_plots) == 2
 
@@ -609,17 +466,6 @@ def test_ir_generation_disabled(workspace_path, mock_plotly_figure):
     assert ir is None
 
 
-def test_ir_for_save_operation(plot_manager, mock_plotly_figure):
-    """Test IR generation for save_plots_to_workspace."""
-    figure, _, _ = mock_plotly_figure
-    plot_manager.add_plot(plot=figure, title="Test")
-
-    _, _, ir = plot_manager.save_plots_to_workspace()
-
-    assert isinstance(ir, AnalysisStep)
-    assert ir.operation == "plot_manager.save_plots_to_workspace"
-
-
 def test_ir_for_clear_operation(plot_manager, mock_plotly_figure):
     """Test IR generation for clear_plots."""
     figure, _, _ = mock_plotly_figure
@@ -642,23 +488,9 @@ def test_custom_max_plots_history(workspace_path, mock_plotly_figure):
     pm = PlotManager(workspace_path=workspace_path, max_plots_history=10)
 
     for i in range(15):
-        pm.add_plot(plot=figure, title=f"Plot {i + 1}")
+        _publish(pm, figure, title=f"Plot {i + 1}")
 
     assert len(pm.latest_plots) == 10
-
-
-def test_custom_min_save_interval(workspace_path, mock_plotly_figure):
-    """Test custom min_save_interval configuration."""
-    figure, _, _ = mock_plotly_figure
-    pm = PlotManager(workspace_path=workspace_path, min_save_interval=1.0)
-    pm.add_plot(plot=figure, title="Test")
-
-    # First save
-    pm.save_plots_to_workspace()
-
-    # Immediate retry should fail
-    _, stats, _ = pm.save_plots_to_workspace()
-    assert stats["skipped"] is True
 
 
 # =============================================================================
@@ -678,39 +510,281 @@ def test_add_plot_exception_handling(plot_manager):
             plot_manager.add_plot(plot=None, title="Invalid")
 
 
-def test_save_with_corrupted_plot_entry(plot_manager, mock_plotly_figure):
-    """Test save with corrupted plot entry."""
+# =============================================================================
+# Managed figure lifecycle (contract §6.5)
+# =============================================================================
+
+
+def test_add_plot_stages_and_does_not_mutate_title(
+    plot_manager, mock_plotly_figure, workspace_path
+):
     figure, _, _ = mock_plotly_figure
-    plot_manager.add_plot(plot=figure, title="Valid Plot")
-
-    # Manually corrupt a plot entry
-    plot_manager.latest_plots.append(
-        {"id": "corrupted", "title": "Bad"}
-    )  # Missing 'figure'
-
-    # Should handle gracefully (skip corrupted entry)
-    saved_files, stats, _ = plot_manager.save_plots_to_workspace()
-
-    # Should still report stats (not crash)
-    assert isinstance(saved_files, list)
-    assert isinstance(stats, dict)
+    plot_id, stats, _ = plot_manager.add_plot(
+        plot=figure, title="UMAP - leiden", source="visualization_expert"
+    )
+    assert stats["status"] == "staged"
+    assert figure.layout.title.text == "Service title"  # no enhanced-title mutation
+    assert not (workspace_path / "plots").exists()  # nothing written before commit
 
 
-# =============================================================================
-# Summary
-# =============================================================================
+def test_commit_staged_publishes_after_activity(
+    plot_manager, mock_plotly_figure, workspace_path
+):
+    from lobster.core.figures.store import LocalFigureStore
 
-# Total tests: 40+
-# Coverage areas:
-# - Core functionality (add, retrieve, clear)
-# - 3-tuple pattern compliance
-# - FIFO buffer enforcement
-# - Thread safety (counter lock, save lock)
-# - Rate limiting
-# - Workspace export (HTML/PNG)
-# - PNG skip threshold (>50K)
-# - Visualization state management
-# - Provenance IR generation
-# - Configuration options
-# - Error handling
-# - Isolated (no DataManagerV2 dependency)
+    figure, _, _ = mock_plotly_figure
+    plot_id, _, _ = plot_manager.add_plot(
+        plot=figure, title="UMAP", source="visualization_expert"
+    )
+    results = plot_manager.commit_staged(
+        {"id": "act-7", "tool_name": "create_umap_plot"},
+        tool_call_id="call_1",
+        staged_ids=[plot_id],
+        tool_name="create_umap_plot",
+    )
+    assert [r.status for r in results] == ["available"]
+    store = LocalFigureStore(workspace_path)
+    record = store.read_record(results[0].ref)
+    assert record["change"]["actor"] == "legacy_wrapper:visualization_expert"
+    assert (
+        store.read_execution(record["execution"]["execution_id"])["activity_id"]
+        == "act-7"
+    )
+    assert plot_manager.latest_plots[-1]["figure_ref"] == results[0].ref
+    paths, stats, ir = plot_manager.save_plots_to_workspace()
+    assert paths == [results[0].path] and ir is None
+    assert (
+        plot_manager.save_plots_to_workspace()[0] == []
+    )  # writes nothing, returns only new commits
+
+
+def test_commit_staged_requires_tool_call_id(plot_manager, mock_plotly_figure):
+    from lobster.core.figures.errors import AttemptContextError
+
+    figure, _, _ = mock_plotly_figure
+    plot_id, _, _ = plot_manager.add_plot(plot=figure, title="X")
+    with pytest.raises(AttemptContextError):
+        plot_manager.commit_staged({"id": "a"}, tool_call_id=None, staged_ids=[plot_id])
+
+
+def test_uncommitted_staged_figure_never_becomes_visible(
+    plot_manager, mock_plotly_figure, workspace_path
+):
+    figure, _, _ = mock_plotly_figure
+    plot_id, _, _ = plot_manager.add_plot(
+        plot=figure, title="preview only"
+    )  # save_plot=False path
+    assert plot_manager.discard_staged([plot_id]) == 1
+    assert plot_manager.save_plots_to_workspace()[0] == []
+    assert not (workspace_path / "plots").exists()
+
+
+def test_commit_staged_retry_is_idempotent(plot_manager, mock_plotly_figure):
+    figure, _, _ = mock_plotly_figure
+    first_id, _, _ = plot_manager.add_plot(plot=figure, title="A")
+    [r1] = plot_manager.commit_staged(
+        {"id": "a"}, tool_call_id="call_9", staged_ids=[first_id]
+    )
+    again_id, _, _ = plot_manager.add_plot(plot=figure, title="A")
+    [r2] = plot_manager.commit_staged(
+        {"id": "a"}, tool_call_id="call_9", staged_ids=[again_id]
+    )
+    assert r2.ref == r1.ref
+
+
+# --- review finding: no public legacy reader sees a staged/failed/preview figure ---------
+
+
+def _public_view(pm, plot_id):
+    """Every existing public PlotManager reader (and the DataManagerV2/client wrappers over them)."""
+    return {
+        "latest_plots": [p["id"] for p in pm.latest_plots],
+        "by_id": pm.get_plot_by_id(plot_id)[0] is not None,
+        "latest": [p["id"] for p in pm.get_latest_plots()[0]],
+        "history": [p["id"] for p in pm.get_plot_history()[0]],
+    }
+
+
+_HIDDEN = {"latest_plots": [], "by_id": False, "latest": [], "history": []}
+
+
+def test_staged_preview_is_invisible_to_every_reader(plot_manager, mock_plotly_figure):
+    figure, _, _ = mock_plotly_figure
+    plot_id, _, _ = plot_manager.add_plot(plot=figure, title="save_plot=False preview")
+    assert _public_view(plot_manager, plot_id) == _HIDDEN
+    plot_manager.discard_staged([plot_id])
+    assert _public_view(plot_manager, plot_id) == _HIDDEN
+
+
+def test_failed_commit_stays_invisible_to_every_reader(
+    plot_manager, mock_plotly_figure, monkeypatch
+):
+    from lobster.core.figures.errors import FigureError
+    from lobster.core.figures.store import LocalFigureStore
+
+    def boom(*_a, **_k):
+        raise OSError("CANARY disk detail")
+
+    monkeypatch.setattr(LocalFigureStore, "commit", boom)
+    figure, _, _ = mock_plotly_figure
+    plot_id, _, _ = plot_manager.add_plot(plot=figure, title="will fail")
+    with pytest.raises(FigureError) as exc:
+        plot_manager.commit_staged(
+            {"id": "a"}, tool_call_id="call_f", staged_ids=[plot_id]
+        )
+    assert "CANARY" not in str(exc.value)
+    assert _public_view(plot_manager, plot_id) == _HIDDEN
+    assert plot_manager.save_plots_to_workspace()[0] == []
+
+
+def test_successful_commit_is_visible_with_committed_bytes(
+    plot_manager, mock_plotly_figure
+):
+    import json as _json
+
+    from lobster.core.figures.store import LocalFigureStore
+
+    figure, _, _ = mock_plotly_figure
+    plot_id, _, _ = plot_manager.add_plot(plot=figure, title="kept")
+    figure.update_layout(
+        title="mutated after staging"
+    )  # caller mutation is not the truth
+    [res] = plot_manager.commit_staged(
+        {"id": "a"}, tool_call_id="call_ok", staged_ids=[plot_id]
+    )
+    view = _public_view(plot_manager, plot_id)
+    assert view == {
+        "latest_plots": [plot_id],
+        "by_id": True,
+        "latest": [plot_id],
+        "history": [plot_id],
+    }
+    entry = plot_manager.latest_plots[-1]
+    assert entry["figure_ref"] == res.ref
+    _, fig_bytes, _ = LocalFigureStore(plot_manager.workspace_path).read(res.ref)
+    assert entry["figure"].layout.title.text == "Service title"
+    assert _json.loads(fig_bytes)["layout"]["title"]["text"] == "Service title"
+
+
+# --- fresh plot managers on one workspace never overwrite an earlier saved figure -----
+# A fresh worker starts its in-memory plot counter again, so every worker stages "plot_1".
+# That id is staging-only: each saved figure gets its own random figure/revision ids with
+# exclusive create, and no flat ``plot_1*.html`` is written.
+
+_FRESH_WORKER = r"""
+import json, sys
+import plotly.graph_objects as go
+from lobster.core.runtime.data_manager import DataManagerV2
+
+workspace, call_id, y = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+pm = DataManagerV2(workspace_path=workspace).plot_manager
+figure = go.Figure(go.Scatter(x=[0, 1, 2], y=y, mode="markers"), layout={"title": "UMAP"})
+plot_id, _, _ = pm.add_plot(figure, title="UMAP", source="fresh_worker")
+assert plot_id == "plot_1", plot_id  # precondition, before the save
+[res] = pm.commit_staged(None, tool_call_id=call_id, staged_ids=[plot_id])
+print("RESULT " + json.dumps(
+    {"staged_id": plot_id, "status": res.status, "ref": res.ref, "path": res.path}
+))
+"""
+
+
+def _stage_and_commit_umap(data_manager, call_id, y):
+    import plotly.graph_objects as go
+
+    figure = go.Figure(
+        go.Scatter(x=[0, 1, 2], y=y, mode="markers"), layout={"title": "UMAP"}
+    )
+    pm = data_manager.plot_manager
+    plot_id, _, _ = pm.add_plot(figure, title="UMAP", source="fresh_worker")
+    assert plot_id == "plot_1"  # precondition, before the save
+    [res] = pm.commit_staged(None, tool_call_id=call_id, staged_ids=[plot_id])
+    return {
+        "staged_id": plot_id,
+        "status": res.status,
+        "ref": res.ref,
+        "path": res.path,
+    }
+
+
+def _fresh_worker_process(workspace, call_id, y):
+    """Stage and commit one UMAP figure in its own fresh Python process."""
+    import json
+    import subprocess
+    import sys
+
+    from lobster.utils.subprocess_env import minimal_child_env
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _FRESH_WORKER, str(workspace), call_id, json.dumps(y)],
+        env=minimal_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert len(lines) == 1
+    return json.loads(lines[0][len("RESULT ") :])
+
+
+def _plots_tree(workspace):
+    """{relative path: sha256} of every regular file under ``plots/``."""
+    import hashlib
+
+    root = Path(workspace) / "plots"
+    return {
+        str(p.relative_to(workspace)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and not p.is_symlink()
+    }
+
+
+def _check_two_workers(workspace, commit):
+    from lobster.core.figures.ids import FigureRef
+    from lobster.core.figures.store import LocalFigureStore
+
+    first = commit("call_worker_a", [1, 2, 3])
+    assert first["status"] == "available"
+    first_tree = _plots_tree(workspace)
+    first_read = LocalFigureStore(workspace).read(first["ref"])
+
+    second = commit("call_worker_b", [3, 2, 1])
+    assert second["status"] == "available"
+
+    # both fresh workers staged the same staging id (each also checked before its save)
+    assert first["staged_id"] == second["staged_id"] == "plot_1"
+    # two distinct saved figures, not one figure overwritten or revised
+    assert first["ref"] != second["ref"]
+    a, b = FigureRef.parse(first["ref"]), FigureRef.parse(second["ref"])
+    assert a.figure_id != b.figure_id
+    assert first["path"] != second["path"]
+    # every file the first save wrote is byte-identical after the second save
+    after = _plots_tree(workspace)
+    assert {path: after.get(path) for path in first_tree} == first_tree
+    assert set(after) > set(first_tree)
+    # both records and payloads read back, verified, from a fresh store
+    store = LocalFigureStore(workspace)
+    assert store.read(first["ref"]) == first_read
+    store.read_record(first["ref"])
+    store.read_record(second["ref"])
+    assert store.read(second["ref"])[1] != first_read[1]
+    # no flat legacy HTML named after the staging id
+    assert not list(Path(workspace).rglob("plot_1*.html"))
+
+
+def test_fresh_plot_managers_never_overwrite_an_earlier_saved_figure(tmp_path):
+    from lobster.core.runtime.data_manager import DataManagerV2
+
+    def commit(call_id, y):  # a fresh data manager (and plot manager) per save
+        return _stage_and_commit_umap(
+            DataManagerV2(workspace_path=tmp_path), call_id, y
+        )
+
+    _check_two_workers(tmp_path, commit)
+
+
+def test_fresh_worker_processes_never_overwrite_an_earlier_saved_figure(tmp_path):
+    _check_two_workers(
+        tmp_path, lambda call_id, y: _fresh_worker_process(tmp_path, call_id, y)
+    )

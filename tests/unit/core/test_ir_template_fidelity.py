@@ -35,7 +35,10 @@ def test_exporter_coverage_wording_matches_selection(selection, excluded):
     assert f"{other_selection} IR" not in footer + summary
     assert "**1 activities** have" in summary
     assert "**2 activities** are excluded" in summary
-    assert "IR coverage alone does not establish reproducibility." in footer
+    assert (
+        "IR coverage alone does not show that running it gives the same results."
+        in footer
+    )
     if excluded:
         assert "All selected activities" not in footer
         assert footer.count("`loading`") == 1

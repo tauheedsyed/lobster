@@ -43,7 +43,10 @@ from lobster.config.settings import get_settings
 from lobster.config.supervisor_config import SupervisorConfig
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
-from lobster.tools.custom_code_tool import create_execute_custom_code_tool
+from lobster.tools.code_tool_switch import (
+    SUPERVISOR_CODE_TOOL_DEFAULT,
+    attach_code_tool,
+)
 from lobster.tools.todo_tools import create_todo_tools
 from lobster.tools.workspace_tool import (
     create_delete_from_workspace_tool,
@@ -704,17 +707,9 @@ def _build_supervisor_tools(
         data_manager, agent_name="supervisor"
     )
 
-    # Code execution fallback
-    from lobster.services.execution.custom_code_execution_service import (
-        CustomCodeExecutionService,
-    )
-
-    supervisor_code_service = CustomCodeExecutionService(data_manager)
-    execute_custom_code = create_execute_custom_code_tool(
-        data_manager=data_manager,
-        custom_code_service=supervisor_code_service,
-        agent_name="supervisor",
-        post_processor=None,
+    # Code execution fallback (switchable per agent: lobster.tools.code_tool_switch)
+    code_tools = attach_code_tool(
+        [], data_manager, "supervisor", default=SUPERVISOR_CODE_TOOL_DEFAULT
     )
 
     # Todo tools for planning
@@ -726,7 +721,7 @@ def _build_supervisor_tools(
         delete_from_workspace,
         write_todos,
         read_todos,
-        execute_custom_code,
+        *code_tools,
     ]
 
     # Only include ask_user in interactive mode (chat).

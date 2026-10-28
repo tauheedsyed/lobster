@@ -36,6 +36,9 @@ class AgentRegistryConfig:
             Used for tracing which package registered an agent.
         service_dependencies: List of service names this agent requires to function.
             Used for validation that required services are available at runtime.
+        code_tool_default: Whether the agent gets ``execute_custom_code`` by default, if
+            its factory offers it. Switchable per agent; see
+            ``lobster.tools.code_tool_switch``.
     """
 
     name: str
@@ -52,6 +55,7 @@ class AgentRegistryConfig:
     tier_requirement: str = "free"  # "free", "premium", "enterprise"
     package_name: Optional[str] = None  # PyPI package name (None = core lobster-ai)
     service_dependencies: Optional[List[str]] = None  # Services required by this agent
+    code_tool_default: bool = False  # execute_custom_code on by default (if offered)
 
 
 # =============================================================================

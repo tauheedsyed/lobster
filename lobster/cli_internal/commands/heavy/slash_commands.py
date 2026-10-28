@@ -268,7 +268,7 @@ def extract_available_commands() -> Dict[str, str]:
         "/open": "Open file or folder in system default application",
         "/save": "Save current state to workspace (--force to re-save all)",
         "/read": "View file contents (inspection only)",
-        "/export": "Export to ZIP (--no-png, --force to re-serialize all)",
+        "/export": "Export to ZIP: data + saved figures with HTML views and every recorded PNG; no new PNG is rendered, --no-png only disables generation (--force to re-serialize all)",
         "/reset": "Reset conversation",
         "/config": "Show current configuration (provider, profile, config files)",
         "/config provider": "List available LLM providers",
@@ -1816,14 +1816,24 @@ def _build_files_blocks(
     for category, files in workspace_files.items():
         if not files:
             continue
+        # Newest first; an unknown mtime (None: a saved revision whose file is
+        # missing) sorts last and shows as "unknown", never as the current time.
         files_sorted = sorted(
-            files, key=lambda file_info: file_info["modified"], reverse=True
+            files,
+            key=lambda file_info: (
+                file_info["modified"] is not None,
+                file_info["modified"] or 0,
+            ),
+            reverse=True,
         )
         rows = []
         for file_info in files_sorted:
             size_kb = file_info["size"] / 1024
-            modified_utc = time.strftime(
-                "%Y-%m-%d %H:%M UTC", time.gmtime(file_info["modified"])
+            modified = file_info["modified"]
+            modified_utc = (
+                "unknown"
+                if modified is None
+                else time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(modified))
             )
             rows.append(
                 [

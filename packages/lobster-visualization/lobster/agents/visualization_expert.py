@@ -1,11 +1,11 @@
 """
 Visualization Expert Agent for creating publication-quality plots.
 
-This agent specializes in creating interactive visualizations for all data types
-through supervisor-mediated workflows. No direct agent handoffs.
+This agent specializes in interactive visualizations through supervisor-mediated
+workflows. The retained figure producers publish only after their success fence.
 """
 
-# Agent configuration for entry point discovery (must be at top, before heavy imports)
+# Agent configuration for entry point discovery (before heavy imports)
 from lobster.config.agent_registry import AgentRegistryConfig
 
 AGENT_CONFIG = AgentRegistryConfig(
@@ -25,20 +25,19 @@ AGENT_CONFIG = AgentRegistryConfig(
         "heatmaps, elbow plots, and cluster-composition bar charts. Use when the "
         "user asks to plot, visualize, or draw a figure of AnnData results."
     ),
+    code_tool_default=True,
 )
 
 # === Heavy imports below ===
-import uuid
 from datetime import date
 from pathlib import Path
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 import numpy as np
 import pandas as pd
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.prebuilt import create_react_agent
 
-# Re-export state class so it can be imported from this module
 from lobster.agents.visualization_state import VisualizationExpertState  # noqa: F401
 from lobster.config.inference_context import (
     BoundModelFactory,
@@ -47,6 +46,21 @@ from lobster.config.inference_context import (
 )
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.figures.errors import FigureError
+from lobster.core.figures.records import (
+    STATUS_AVAILABLE,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUSES,
+    CommitResult,
+)
+from lobster.core.figures.saver import (
+    HEADER_NONE,
+    HEADER_PENDING,
+    failure_summary,
+    outcome_state,
+    summarize,
+)
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.visualization.visualization_service import (
@@ -64,12 +78,7 @@ def _plot_ir(
     description: str,
     replayable: bool = False,
 ) -> AnalysisStep:
-    """IR that regenerates a figure by calling the same visualization service.
-
-    A plot that changes no data is exported (the notebook redraws the figure)
-    but not replayable. A plot whose service also writes into ``adata`` must
-    pass ``replayable=True``, or replaying would drop those changes.
-    """
+    """Notebook drawing recipe; QC computations belong to their analysis step."""
     kwargs_template = "".join(
         f"    {name}={{{{ plot_kwargs[{name!r}] | repr }}}},\n" for name in plot_kwargs
     )
@@ -81,8 +90,7 @@ def _plot_ir(
         code_template=(
             "from lobster.services.visualization.visualization_service import (\n"
             "    SingleCellVisualizationService,\n"
-            ")\n"
-            "\n"
+            ")\n\n"
             f"fig = SingleCellVisualizationService().{service_method}(\n"
             "    adata=adata,\n"
             f"{kwargs_template}"
@@ -150,15 +158,93 @@ def visualization_expert(
     # Initialize visualization service
     visualization_service = SingleCellVisualizationService()
 
+    def _require_staged(staged_id, stats):
+        if not staged_id or stats.get("status") != "staged":
+            raise ValueError("Figure staging failed; no revision was created")
+
+    def _discard_failed_stage(staged_id):
+        if staged_id is None:
+            return
+        # Best-effort cleanup must not mask the primary failure.
+        try:
+            data_manager.plot_manager.discard_staged([staged_id])
+        except Exception:
+            logger.warning("Unable to discard an unavailable staged figure")
+
+    def _failure_reply(staged_id, exc, tool_name):
+        _discard_failed_stage(staged_id)
+        summary = failure_summary(exc)
+        normalized = []
+        if isinstance(exc, FigureError) and isinstance(exc.details, dict):
+            results = exc.details.get("results")
+            if (
+                isinstance(results, list)
+                and results
+                and all(isinstance(result, dict) for result in results)
+            ):
+                for index, result in enumerate(results):
+                    status = result.get("status")
+                    if not isinstance(status, str) or status not in STATUSES:
+                        status = STATUS_FAILED
+                    normalized.append(CommitResult(index, status))
+        # Raised details never authenticate an available ref. Preserve pending
+        # status, but surface all reason text through the central summary only.
+        if any(result.status == STATUS_PENDING for result in normalized):
+            logger.warning(
+                "Figure producer %s publication pending: %s", tool_name, summary
+            )
+            overall = (
+                "PENDING"
+                if all(result.status == STATUS_PENDING for result in normalized)
+                else "PARTIAL"
+            )
+            return f"STATUS: {overall}\ntool={tool_name}\n{summary}\n{HEADER_PENDING}"
+        logger.error("Figure producer %s failed: %s", tool_name, summary)
+        return f"STATUS: FAILED\ntool={tool_name}\n{summary}\nNo available figure revision was returned."
+
+    def _finish_figure(
+        staged_id, activity, tool_call_id, tool_name, save_plot, details
+    ):
+        # All service work, metadata/IR construction and logging precede this fence.
+        if not save_plot:
+            data_manager.plot_manager.discard_staged([staged_id])
+            return (
+                f"STATUS: DRY_RUN\n{details}\n"
+                "Drawing discarded; not saved; no figure revision created; no view delivered."
+            )
+        results = data_manager.plot_manager.commit_staged(
+            activity,
+            tool_call_id=tool_call_id,
+            staged_ids=[staged_id],
+            tool_name=tool_name,
+            agent=agent_name,
+        )
+        # Only render trusted results after commit: no writes or data lookups.
+        state = outcome_state(results)
+        summary = summarize(results)
+        if state == "pending":
+            return f"STATUS: PENDING\n{details}\n{HEADER_PENDING}\n{summary}"
+        if state == "none":
+            return f"STATUS: FAILED\n{details}\n{HEADER_NONE}\n{summary}"
+        references = "\n".join(
+            f"figure_ref={result.ref} path={result.path} status={result.status}"
+            for result in results
+            if result.status == STATUS_AVAILABLE
+        )
+        overall = (
+            "PARTIAL"
+            if any(result.status == STATUS_PENDING for result in results)
+            else "SUCCESS"
+        )
+        return f"STATUS: {overall}\n{details}\n{references}\n{summary}\nFigure revision available; display not confirmed."
+
     @tool
     def check_visualization_readiness(modality_name: str) -> str:
         """Check if modality has required data for visualization."""
         try:
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
             available_plots = []
             if "X_umap" in adata.obsm:
                 available_plots.append("UMAP")
@@ -176,7 +262,6 @@ def visualization_expert(
                 available_plots.append("Cluster-based plots")
             if "cell_type" in adata.obs.columns:
                 available_plots.append("Cell type plots")
-
             # Check for batch information
             batch_cols = [
                 col
@@ -185,13 +270,11 @@ def visualization_expert(
             ]
             if batch_cols:
                 available_plots.append("Batch composition plots")
-
             return f"""Visualization readiness for '{modality_name}':
 - Available plots: {", ".join(available_plots) if available_plots else "None"}
 - Data shape: {adata.n_obs} × {adata.n_vars}
 - Has raw data: {"✓" if adata.raw else "✗"}
 - Embeddings: {list(adata.obsm.keys()) if adata.obsm else "None"}"""
-
         except Exception as e:
             return f"Error checking visualization readiness: {str(e)}"
 
@@ -205,60 +288,40 @@ def visualization_expert(
     def create_umap_plot(
         modality_name: str,
         color_by: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
         point_size: Optional[int] = None,
         title: Optional[str] = None,
         save_plot: bool = True,
     ) -> str:
-        """Create an interactive UMAP plot with proper state tracking.
+        """Draw a stored UMAP, then save a revision only on success.
 
-        IMPORTANT: Call check_visualization_readiness() first to identify available columns.
-        NEVER assume 'leiden' — data may use 'seurat_clusters', 'louvain', 'cell_type', etc.
-
-        Args:
-            modality_name: Name of the modality to visualize
-            color_by: Column in adata.obs to color by (REQUIRED).
-                     Common values: 'leiden', 'louvain', 'seurat_clusters', 'cell_type'.
-            point_size: Size of points (auto-scaled if None)
-            title: Custom plot title
-            save_plot: Whether to save the plot
+        Call check_visualization_readiness first; color_by is an existing obs
+        column (never assume leiden). save_plot=False discards the drawing; no view is delivered.
         """
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Auto-scale point size based on cell count
             if point_size is None:
                 n_cells = adata.n_obs
-                if n_cells < 1000:
-                    point_size = 8
-                elif n_cells < 10000:
-                    point_size = 5
-                elif n_cells < 50000:
-                    point_size = 3
-                else:
-                    point_size = 2
-
-            # Create plot using service
+                point_size = (
+                    8
+                    if n_cells < 1000
+                    else 5 if n_cells < 10000 else 3 if n_cells < 50000 else 2
+                )
             plot_kwargs = {
                 "color_by": color_by,
                 "point_size": point_size,
                 "title": title or f"UMAP - {color_by}",
             }
             fig = visualization_service.create_umap_plot(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=umap modality_name={modality_name} color_by={color_by} cells={adata.n_obs} point_size={point_size}"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"UMAP - {color_by}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "umap",
                     "color_by": color_by,
@@ -268,32 +331,16 @@ def visualization_expert(
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "umap",
-                    "modality": modality_name,
-                    "color_by": color_by,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_umap_plot",
                 parameters={
                     "modality_name": modality_name,
                     "color_by": color_by,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created UMAP plot (ID: {plot_id})",
+                description="Prepared UMAP figure",
                 ir=_plot_ir(
                     "create_umap_plot",
                     "create_umap_plot",
@@ -302,105 +349,82 @@ def visualization_expert(
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ UMAP plot created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Colored by: {color_by}
-- Cells shown: {adata.n_obs:,}
-- Point size: {point_size}
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-{f"- Files: {', '.join([f.split('/')[-1] for f in saved_files[:3]])}" if saved_files else ""}
-
-**Report to Supervisor**: UMAP visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating UMAP plot: {e}")
-            return f"❌ Error creating UMAP plot: {str(e)}"
+            return _finish_figure(
+                staged_id,
+                activity,
+                tool_call_id,
+                "create_umap_plot",
+                save_plot,
+                details,
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_umap_plot")
 
     create_umap_plot.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_umap_plot.tags = ["ANALYZE"]
 
     @tool
     def create_qc_plots(
-        modality_name: str, metrics: List[str] = None, save_plot: bool = True
+        modality_name: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
+        metrics: List[str] = None,
+        save_plot: bool = True,
     ) -> str:
-        """Create quality control plots for the modality."""
+        """Draw stored QC metrics; run assess_data_quality first. Dry runs deliver no view."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # SCIENTIFIC VALIDATION: Skip QC plots for DE result subsets
-            # QC metrics (n_genes, n_counts, pct_mito) only make sense for full datasets
-            # DE results contain filtered gene subsets (e.g., 174 genes) - QC plots are meaningless
             is_de_modality = (
                 "_de_" in modality_name.lower()
                 or modality_name.lower().startswith("de_")
                 or "differential" in modality_name.lower()
             )
-            is_small_subset = (
-                adata.n_vars < 1000
-            )  # Likely a filtered result, not full data
-
+            is_small_subset = adata.n_vars < 1000
             if is_de_modality or is_small_subset:
                 return f"""⚠️ Cannot create QC plots for '{modality_name}'
-
-**Scientific Reason**: QC metrics (n_genes, n_counts, percent_mito) are designed for full datasets, not filtered subsets.
-
-- **Current modality**: {adata.n_obs} cells × {adata.n_vars} genes
-- **Detection**: {"DE result modality" if is_de_modality else f"Small gene subset ({adata.n_vars} genes < 1000 threshold)"}
-
-**Recommendation**: QC plots should only be generated for:
-1. Raw data (before filtering)
-2. Normalized/preprocessed full datasets
-3. Datasets with >1000 genes
-
-For DE results, use volcano plots, MA plots, or heatmaps instead.
-
-**Report to Supervisor**: Skipped inappropriate QC visualization (scientific correctness maintained)"""
-
-            # Default QC metrics if not specified
+QC metrics are intended for full datasets, not filtered DE/gene subsets.
+Current modality: {adata.n_obs} cells × {adata.n_vars} genes.
+Detection: {"DE result modality" if is_de_modality else "Small gene subset (<1000 genes)"}.
+Use the full QC-assessed dataset; for DE results request volcano/MA/heatmap drawings."""
+            required_qc_metrics = {
+                "n_genes",
+                "n_counts",
+                "gene_detection_rate",
+                "log10_counts",
+                "log10_genes",
+                "percent_mito",
+                "percent_ribo",
+                "percent_hb",
+            }
+            if not required_qc_metrics.issubset(adata.obs.columns):
+                return (
+                    f"STATUS: FAILED\nmodality_name={modality_name}\n"
+                    "QC metrics are not ready. Run assess_data_quality "
+                    "first, then draw the full QC-assessed modality. "
+                    "Drawing does not compute QC metrics."
+                )
             if metrics is None:
-                metrics = []
-                if "n_genes_by_counts" in adata.obs.columns:
-                    metrics.append("n_genes_by_counts")
-                if "total_counts" in adata.obs.columns:
-                    metrics.append("total_counts")
-                if "pct_counts_mt" in adata.obs.columns:
-                    metrics.append("pct_counts_mt")
-
-                # Fallback to any numeric columns
+                metrics = [
+                    column
+                    for column in ("n_genes_by_counts", "total_counts", "pct_counts_mt")
+                    if column in adata.obs.columns
+                ]
                 if not metrics:
-                    numeric_cols = adata.obs.select_dtypes(
+                    metrics = adata.obs.select_dtypes(
                         include=[np.number]
-                    ).columns.tolist()
-                    metrics = numeric_cols[:3]  # Take first 3 numeric columns
-
+                    ).columns.tolist()[:3]
             if not metrics:
-                return "❌ No suitable QC metrics found in the data"
-
-            # Create QC plots using service
+                return "No suitable QC metrics found; run assess_data_quality first"
             plot_kwargs = {"title": f"QC Plots - {modality_name}"}
             fig = visualization_service.create_qc_plots(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=qc modality_name={modality_name} metrics={','.join(metrics)} cells={adata.n_obs}"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"QC Plots - {modality_name}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "qc",
                     "metrics": metrics,
@@ -409,61 +433,29 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "qc_plots",
-                    "modality": modality_name,
-                    "metrics": metrics,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_qc_plots",
                 parameters={
                     "modality_name": modality_name,
                     "metrics": metrics,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created QC plots (ID: {plot_id})",
-                # The QC service also adds QC metric columns (n_genes, n_counts,
-                # percent_mito, ...) to adata.obs, so replay must include it.
+                description="Prepared QC figure from stored analysis metrics",
                 ir=_plot_ir(
                     "create_qc_plots",
                     "create_qc_plots",
                     plot_kwargs,
-                    f"QC plots of '{modality_name}' (adds QC metric columns to obs)",
-                    replayable=True,
+                    f"QC drawing of '{modality_name}' from existing metrics",
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ QC plots created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Metrics: {", ".join(metrics)}
-- Cells analyzed: {adata.n_obs:,}
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: QC visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating QC plots: {e}")
-            return f"❌ Error creating QC plots: {str(e)}"
+            return _finish_figure(
+                staged_id, activity, tool_call_id, "create_qc_plots", save_plot, details
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_qc_plots")
 
     create_qc_plots.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_qc_plots.tags = ["ANALYZE"]
@@ -473,47 +465,26 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
         modality_name: str,
         genes: List[str],
         groupby: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
         save_plot: bool = True,
     ) -> str:
-        """Create violin plots for specified genes.
-
-        IMPORTANT: Call check_visualization_readiness() first to identify available columns.
-
-        Args:
-            modality_name: Name of the modality to visualize
-            genes: List of gene names to plot
-            groupby: Column in adata.obs to group by (REQUIRED).
-                    Common values: 'leiden', 'louvain', 'seurat_clusters', 'cell_type'.
-            save_plot: Whether to save the plot
-        """
+        """Draw supplied genes by an existing group column; dry runs discard the drawing."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Validate genes exist in the data
             available_genes = [gene for gene in genes if gene in adata.var_names]
             if not available_genes:
-                return (
-                    f"❌ None of the specified genes {genes} found in {modality_name}"
-                )
-
-            # Create violin plot using service
+                return f"None of the specified genes {genes} found in {modality_name}"
             plot_kwargs = {"genes": available_genes, "groupby": groupby}
             fig = visualization_service.create_violin_plot(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=violin modality_name={modality_name} genes={','.join(available_genes)} groupby={groupby} cells={adata.n_obs}"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"Violin Plot - {', '.join(available_genes[:3])}{'...' if len(available_genes) > 3 else ''}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "violin",
                     "genes": available_genes,
@@ -523,34 +494,17 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "violin_plot",
-                    "modality": modality_name,
-                    "genes": available_genes,
-                    "groupby": groupby,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_violin_plot",
                 parameters={
                     "modality_name": modality_name,
                     "genes": available_genes,
                     "groupby": groupby,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created violin plot (ID: {plot_id})",
+                description="Prepared violin figure",
                 ir=_plot_ir(
                     "create_violin_plot",
                     "create_violin_plot",
@@ -559,25 +513,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ Violin plot created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Genes: {", ".join(available_genes)}
-- Grouped by: {groupby}
-- Cells shown: {adata.n_obs:,}
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: Violin plot visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating violin plot: {e}")
-            return f"❌ Error creating violin plot: {str(e)}"
+            return _finish_figure(
+                staged_id,
+                activity,
+                tool_call_id,
+                "create_violin_plot",
+                save_plot,
+                details,
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_violin_plot")
 
     create_violin_plot.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_violin_plot.tags = ["ANALYZE"]
@@ -586,27 +531,21 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
     def create_feature_plot(
         modality_name: str,
         genes: List[str],
+        tool_call_id: Annotated[str, InjectedToolCallId],
         use_raw: bool = True,
         ncols: int = 2,
         point_size: Optional[int] = None,
         save_plot: bool = True,
     ) -> str:
-        """Create feature plots showing gene expression on UMAP."""
+        """Draw gene expression on a stored UMAP; no statistical fitting."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Validate genes exist in the data
             available_genes = [gene for gene in genes if gene in adata.var_names]
             if not available_genes:
-                return (
-                    f"❌ None of the specified genes {genes} found in {modality_name}"
-                )
-
-            # Create feature plot using service
+                return f"None of the specified genes {genes} found in {modality_name}"
             plot_kwargs = {
                 "genes": available_genes,
                 "use_raw": use_raw,
@@ -614,17 +553,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 "point_size": point_size,
             }
             fig = visualization_service.create_feature_plot(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=feature modality_name={modality_name} genes={','.join(available_genes[:5])} n_genes={len(available_genes)} ncols={ncols} use_raw={use_raw}"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"Feature Plot - {', '.join(available_genes[:3])}{'...' if len(available_genes) > 3 else ''}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "feature",
                     "genes": available_genes,
@@ -638,32 +572,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "feature_plot",
-                    "modality": modality_name,
-                    "genes": available_genes,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_feature_plot",
                 parameters={
                     "modality_name": modality_name,
                     "genes": available_genes,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created feature plot (ID: {plot_id})",
+                description="Prepared feature figure",
                 ir=_plot_ir(
                     "create_feature_plot",
                     "create_feature_plot",
@@ -672,26 +590,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ Feature plot created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Genes: {", ".join(available_genes[:5])}{"..." if len(available_genes) > 5 else ""}
-- Total genes: {len(available_genes)}
-- Grid layout: {ncols} columns
-- Using {"raw" if use_raw else "normalized"} data
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: Feature plot visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating feature plot: {e}")
-            return f"❌ Error creating feature plot: {str(e)}"
+            return _finish_figure(
+                staged_id,
+                activity,
+                tool_call_id,
+                "create_feature_plot",
+                save_plot,
+                details,
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_feature_plot")
 
     create_feature_plot.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_feature_plot.tags = ["ANALYZE"]
@@ -701,36 +609,20 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
         modality_name: str,
         genes: List[str],
         groupby: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
         use_raw: bool = True,
         standard_scale: str = "var",
         save_plot: bool = True,
     ) -> str:
-        """Create dot plot for marker gene expression.
-
-        Args:
-            modality_name: Name of the modality to visualize
-            genes: List of gene names to plot
-            groupby: Column in adata.obs to group by (REQUIRED).
-                    Common values: 'leiden', 'louvain', 'seurat_clusters', 'cell_type'.
-            use_raw: Whether to use raw expression values
-            standard_scale: Scale direction ('var' or 'obs')
-            save_plot: Whether to save the plot
-        """
+        """Draw marker gene means/percent-expressing; groupby is an existing column."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Validate genes exist in the data
             available_genes = [gene for gene in genes if gene in adata.var_names]
             if not available_genes:
-                return (
-                    f"❌ None of the specified genes {genes} found in {modality_name}"
-                )
-
-            # Create dot plot using service
+                return f"None of the specified genes {genes} found in {modality_name}"
             plot_kwargs = {
                 "genes": available_genes,
                 "groupby": groupby,
@@ -738,17 +630,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 "standard_scale": standard_scale,
             }
             fig = visualization_service.create_dot_plot(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=dot modality_name={modality_name} n_genes={len(available_genes)} groupby={groupby} use_raw={use_raw} scale={standard_scale} size=percent_expressing color=mean_expression"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"Dot Plot - {groupby}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "dot",
                     "genes": available_genes,
@@ -762,34 +649,17 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "dot_plot",
-                    "modality": modality_name,
-                    "genes": available_genes,
-                    "groupby": groupby,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_dot_plot",
                 parameters={
                     "modality_name": modality_name,
                     "genes": available_genes,
                     "groupby": groupby,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created dot plot (ID: {plot_id})",
+                description="Prepared dot figure",
                 ir=_plot_ir(
                     "create_dot_plot",
                     "create_dot_plot",
@@ -798,30 +668,11 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ Dot plot created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Genes plotted: {len(available_genes)}
-- Grouped by: {groupby}
-- Using {"raw" if use_raw else "normalized"} data
-- Scaling: {standard_scale if standard_scale else "None"}
-
-📈 **Dot Plot Legend**:
-- Dot size: Percentage of cells expressing the gene
-- Dot color: Mean expression level
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: Dot plot visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating dot plot: {e}")
-            return f"❌ Error creating dot plot: {str(e)}"
+            return _finish_figure(
+                staged_id, activity, tool_call_id, "create_dot_plot", save_plot, details
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_dot_plot")
 
     create_dot_plot.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_dot_plot.tags = ["ANALYZE"]
@@ -830,32 +681,19 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
     def create_heatmap(
         modality_name: str,
         groupby: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
         genes: Optional[List[str]] = None,
         use_raw: bool = True,
         n_top_genes: int = 5,
         standard_scale: bool = True,
         save_plot: bool = True,
     ) -> str:
-        """Create heatmap of gene expression.
-
-        Args:
-            modality_name: Name of the modality to visualize
-            groupby: Column in adata.obs to group by (REQUIRED).
-                    Common values: 'leiden', 'louvain', 'seurat_clusters', 'cell_type'.
-            genes: List of specific genes (None to use top marker genes)
-            use_raw: Whether to use raw expression values
-            n_top_genes: Number of top genes per group
-            standard_scale: Whether to standardize expression
-            save_plot: Whether to save the plot
-        """
+        """Draw expression heatmap from explicit genes or stored marker results."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Create heatmap using service
             plot_kwargs = {
                 "genes": genes,
                 "groupby": groupby,
@@ -864,17 +702,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 "standard_scale": standard_scale,
             }
             fig = visualization_service.create_heatmap(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=heatmap modality_name={modality_name} groupby={groupby} genes={len(genes) if genes else 'stored_markers'} n_top_genes={n_top_genes} use_raw={use_raw} standard_scale={standard_scale}"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"Heatmap - {groupby}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "heatmap",
                     "groupby": groupby,
@@ -888,33 +721,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "heatmap",
-                    "modality": modality_name,
-                    "groupby": groupby,
-                    "genes": genes,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_heatmap",
                 parameters={
                     "modality_name": modality_name,
                     "groupby": groupby,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created heatmap (ID: {plot_id})",
+                description="Prepared heatmap figure",
                 ir=_plot_ir(
                     "create_heatmap",
                     "create_heatmap",
@@ -923,56 +739,38 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ Heatmap created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Grouped by: {groupby}
-- Genes: {len(genes) if genes else f"Top {n_top_genes} marker genes per group"}
-- Using {"raw" if use_raw else "normalized"} data
-- Z-score normalized: {"Yes" if standard_scale else "No"}
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: Heatmap visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating heatmap: {e}")
-            return f"❌ Error creating heatmap: {str(e)}"
+            return _finish_figure(
+                staged_id, activity, tool_call_id, "create_heatmap", save_plot, details
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_heatmap")
 
     create_heatmap.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_heatmap.tags = ["ANALYZE"]
 
     @tool
     def create_elbow_plot(
-        modality_name: str, n_pcs: int = 50, save_plot: bool = True
+        modality_name: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
+        n_pcs: int = 50,
+        save_plot: bool = True,
     ) -> str:
-        """Create elbow plot for PCA variance explained."""
+        """Draw stored PCA variance explained; does not compute PCA."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Create elbow plot using service
             plot_kwargs = {"n_pcs": n_pcs}
             fig = visualization_service.create_elbow_plot(adata=adata, **plot_kwargs)
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = (
+                f"plot_type=elbow modality_name={modality_name} requested_n_pcs={n_pcs}"
+            )
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title="PCA Elbow Plot",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "elbow",
                     "n_pcs": n_pcs,
@@ -981,32 +779,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "elbow_plot",
-                    "modality": modality_name,
-                    "n_pcs": n_pcs,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_elbow_plot",
                 parameters={
                     "modality_name": modality_name,
                     "n_pcs": n_pcs,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created elbow plot (ID: {plot_id})",
+                description="Prepared elbow figure",
                 ir=_plot_ir(
                     "create_elbow_plot",
                     "create_elbow_plot",
@@ -1015,28 +797,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ Elbow plot created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- PCs shown: {n_pcs}
-- Shows individual and cumulative variance explained
-
-💡 **How to interpret**:
-- Look for the "elbow" where variance explained plateaus
-- This indicates the optimal number of PCs to use for clustering
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: Elbow plot visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating elbow plot: {e}")
-            return f"❌ Error creating elbow plot: {str(e)}"
+            return _finish_figure(
+                staged_id,
+                activity,
+                tool_call_id,
+                "create_elbow_plot",
+                save_plot,
+                details,
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_elbow_plot")
 
     create_elbow_plot.metadata = {"categories": ["ANALYZE"], "provenance": True}
     create_elbow_plot.tags = ["ANALYZE"]
@@ -1045,28 +815,17 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
     def create_cluster_composition_plot(
         modality_name: str,
         cluster_col: str,
+        tool_call_id: Annotated[str, InjectedToolCallId],
         sample_col: Optional[str] = None,
         normalize: bool = True,
         save_plot: bool = True,
     ) -> str:
-        """Create stacked bar plot showing cluster composition.
-
-        Args:
-            modality_name: Name of the modality to visualize
-            cluster_col: Column in adata.obs containing cluster assignments (REQUIRED).
-                        Common values: 'leiden', 'louvain', 'seurat_clusters', 'cell_type'.
-            sample_col: Column for sample grouping (optional)
-            normalize: Whether to normalize counts
-            save_plot: Whether to save the plot
-        """
+        """Draw cluster counts/composition using an existing cluster column."""
+        staged_id = None
         try:
-            # Validate modality
             if modality_name not in data_manager.list_modalities():
                 return f"Modality '{modality_name}' not found"
-
             adata = data_manager.get_modality(modality_name)
-
-            # Create composition plot using service
             plot_kwargs = {
                 "cluster_col": cluster_col,
                 "sample_col": sample_col,
@@ -1075,17 +834,12 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
             fig = visualization_service.create_cluster_composition_plot(
                 adata=adata, **plot_kwargs
             )
-
-            # Generate unique plot ID
-            plot_id = str(uuid.uuid4())
-
-            # Add to plot manager with metadata
-            data_manager.plot_manager.add_plot(
+            details = f"plot_type=composition modality_name={modality_name} cluster_col={cluster_col} sample_col={sample_col or 'auto'} normalize={normalize}"
+            staged_id, stats, _ = data_manager.plot_manager.add_plot(
                 plot=fig,
                 title=f"Cluster Composition - {cluster_col}",
                 source="visualization_expert",
                 dataset_info={
-                    "plot_id": plot_id,
                     "modality_name": modality_name,
                     "plot_type": "composition",
                     "cluster_col": cluster_col,
@@ -1099,34 +853,17 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 modalities=data_manager.modalities,
                 current_dataset=data_manager.current_dataset,
             )
-
-            # Track in visualization state
-            data_manager.plot_manager.add_visualization_record(
-                plot_id,
-                {
-                    "type": "cluster_composition",
-                    "modality": modality_name,
-                    "cluster_col": cluster_col,
-                    "sample_col": sample_col,
-                    "created_by": "visualization_expert",
-                },
-            )
-
-            # Save if requested
-            saved_files = []
-            if save_plot:
-                saved_files, _, _ = data_manager.plot_manager.save_plots_to_workspace()
-
-            # Log operation
-            data_manager.log_tool_usage(
+            _require_staged(staged_id, stats)
+            activity = data_manager.log_tool_usage(
                 tool_name="create_cluster_composition_plot",
                 parameters={
                     "modality_name": modality_name,
                     "cluster_col": cluster_col,
                     "sample_col": sample_col,
-                    "plot_id": plot_id,
+                    "save_plot": save_plot,
+                    "tool_call_id": tool_call_id,
                 },
-                description=f"Created cluster composition plot (ID: {plot_id})",
+                description="Prepared cluster composition figure",
                 ir=_plot_ir(
                     "create_cluster_composition_plot",
                     "create_cluster_composition_plot",
@@ -1135,25 +872,16 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
                 ),
                 agent=agent_name,
             )
-
-            return f"""✅ Cluster composition plot created successfully!
-
-📊 **Plot Details**:
-- Plot ID: {plot_id}
-- Modality: {modality_name}
-- Cluster column: {cluster_col}
-- Sample column: {sample_col if sample_col else "Auto-detected or none"}
-- Normalized: {"Yes (percentages)" if normalize else "No (counts)"}
-
-💾 **Storage**:
-- Added to workspace plots
-- Saved files: {len(saved_files)}
-
-**Report to Supervisor**: Cluster composition visualization completed for {modality_name}"""
-
-        except Exception as e:
-            logger.error(f"Error creating cluster composition plot: {e}")
-            return f"❌ Error creating cluster composition plot: {str(e)}"
+            return _finish_figure(
+                staged_id,
+                activity,
+                tool_call_id,
+                "create_cluster_composition_plot",
+                save_plot,
+                details,
+            )
+        except Exception as exc:
+            return _failure_reply(staged_id, exc, "create_cluster_composition_plot")
 
     create_cluster_composition_plot.metadata = {
         "categories": ["ANALYZE"],
@@ -1163,26 +891,25 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
 
     @tool
     def get_visualization_history() -> str:
-        """Review visualization history from DataManagerV2."""
+        """Read LEGACY visualization history, not the managed figure catalog."""
         try:
             history, _, _ = data_manager.plot_manager.get_visualization_history(
                 limit=10
             )
-
             if not history:
-                return "No visualizations created yet in this session"
-
-            response = "📊 **Recent Visualization History**:\n\n"
-            for i, record in enumerate(history, 1):
+                return "LEGACY history is empty. This does not mean no managed figures exist; use the canonical workspace figure listing."
+            response = "LEGACY Visualization History (not managed revisions):\n\n"
+            for index, record in enumerate(history, 1):
                 metadata = record.get("metadata", {})
-                response += f"{i}. **{metadata.get('type', 'unknown')}** for {metadata.get('modality', 'unknown')}\n"
-                response += f"   - Plot ID: {record.get('plot_id', 'N/A')}\n"
-                response += f"   - Created: {record.get('timestamp', 'N/A')}\n\n"
-
-            return response
-
-        except Exception as e:
-            return f"Error retrieving history: {str(e)}"
+                response += f"{index}. {metadata.get('type', 'unknown')} for {metadata.get('modality', 'unknown')}\n"
+                response += f"   Legacy plot ID: {record.get('plot_id', 'N/A')}\n"
+                response += f"   Created: {record.get('timestamp', 'N/A')}\n\n"
+            return (
+                response
+                + "For managed figure revisions, use the canonical workspace listing."
+            )
+        except Exception as exc:
+            return f"Error retrieving legacy history: {exc}"
 
     get_visualization_history.metadata = {
         "categories": ["UTILITY"],
@@ -1207,11 +934,9 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
 {f"**Message**: {message}" if message else ""}
 
 **Action Required**: Please inform {requesting_agent} that visualization {plot_id} is ready."""
-
             return completion_report
-
-        except Exception as e:
-            return f"Error reporting completion: {str(e)}"
+        except Exception as exc:
+            return f"Error reporting completion: {exc}"
 
     report_visualization_complete.metadata = {
         "categories": ["UTILITY"],
@@ -1219,7 +944,6 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
     }
     report_visualization_complete.tags = ["UTILITY"]
 
-    # Combine base tools with any handoff tools
     base_tools = [
         check_visualization_readiness,
         create_umap_plot,
@@ -1233,66 +957,49 @@ For DE results, use volcano plots, MA plots, or heatmaps instead.
         get_visualization_history,
         report_visualization_complete,
     ]
-
     tools = base_tools + (delegation_tools or [])
-
     system_prompt = f"""
-You are a visualization expert specializing in creating publication-quality
-interactive figures for bioinformatics data analysis.
-
-<Role>
-You create professional visualizations for single-cell RNA-seq, bulk RNA-seq,
-proteomics, and multi-omics data. You work exclusively through supervisor-mediated
-workflows - all requests come from the supervisor, and all results are reported
-back to the supervisor.
-
-**CRITICAL**: 
-- You ONLY respond to supervisor requests
-- You NEVER communicate directly with other agents
-- You ALWAYS report completion back to supervisor
-- You MAINTAIN visualization state in DataManagerV2
-</Role>
+You are a visualization expert for interactive bioinformatics figures.
+All requests and results go through the supervisor; never contact another agent directly.
 
 <Task>
-When the supervisor assigns you a visualization task:
-1. Validate the requested modality exists
-2. Check visualization readiness
-3. Create the requested visualization(s)
-4. Store plot with unique ID in DataManagerV2
-5. Track in visualization history
-6. Report completion to supervisor
-
-You handle these visualization types:
-- Dimensionality reduction (UMAP, PCA, t-SNE)
-- Quality control dashboards
-- Gene/protein expression plots
-- Clustering visualizations
-- Statistical plots
-- Multi-panel publication figures
+1. Validate modality and required data with check_visualization_readiness.
+2. Draw the requested figure from existing analysis results.
+3. The retained plotting tools stage a candidate, log the activity, then commit
+   through the trusted saver only on success. save_plot=False is a dry run:
+   the drawing is discarded, not saved, and no view is delivered.
+4. Report ONLY committed figure_ref/path from the tool reply. Refer to canonical
+   workspace figure listings for managed revisions; legacy history is not the catalog.
+5. Report failures or dry runs explicitly; never claim a figure was displayed.
 </Task>
 
 <Guidelines>
-1. **Always validate** modality and required data before plotting
-2. **Auto-detect parameters** when not specified
-3. **Use consistent styling** across related plots
-4. **Generate unique plot IDs** using UUID
-5. **Track all visualizations** in DataManagerV2 state
-6. **Report to supervisor** upon completion
-7. **Handle errors gracefully** with informative messages
+- Do not create UUIDs or write visualization history: revision identity is assigned by the authority.
+- QC metrics must already have been computed by assess_data_quality; drawings never mutate datasets.
+- Prefer templates/custom code for flexible figures, following the shared tool guidance.
+- Preserve the existing data and report the actual tool outcome, not an invented success.
+- If using report_visualization_complete, its plot_id argument must be the actual committed FigureRef;
+  it is a report formatter, not evidence that a revision exists or was displayed.
 </Guidelines>
 
 <Response_Format>
-Your responses are read by the supervisor AI, not end users. Optimize for machine parsing:
-- Lead with STATUS: SUCCESS | PARTIAL | FAILED
-- Use key=value pairs and compact lists, not prose
-- Omit markdown headers, decorations, and filler text
-- Include: plot_id, plot_type, modality_name, file_path, warnings, next steps
-- The supervisor will reformulate your output for the user
+Responses are read by the supervisor AI. Lead with STATUS: SUCCESS | DRY_RUN | PENDING | PARTIAL | FAILED.
+Use compact key=value fields: figure_ref, plot_type, modality_name, path, warnings, next steps.
+Use only committed refs/paths for SUCCESS; dry runs create no revision and deliver no view.
+PENDING means publication is unresolved, not available yet; do not claim failure or that nothing was saved.
 </Response_Format>
 
 Today's date: {date.today()}
 """.strip()
+    from lobster.tools.code_tool_switch import attach_code_tool
 
+    tools = attach_code_tool(
+        tools,
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name=agent_name,
+    )
     return create_react_agent(
         model=llm,
         tools=tools,

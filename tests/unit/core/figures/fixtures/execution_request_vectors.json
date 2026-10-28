@@ -1,0 +1,158 @@
+{
+ "schema": "lobster.figure_execution_request_vectors/2",
+ "request_schema": "lobster.figure_execution_request/2",
+ "plan_domain": "lobster.figure_execution_plan/2",
+ "canonicalization": "record: json.dumps(sort_keys=True, separators=(',',':'), ensure_ascii=False, allow_nan=False) of JSON-native values (non-JSON refused); activity: same plus default=str at the producer boundary only, then fixed bytes",
+ "plan_digest": "sha256(canonical(request minus activity_id/activity_unavailable/activity_record, with schema=plan_domain))",
+ "notes": "candidate_count = every candidate of the attempt (0..n-1); planned_candidates = eligible subset, sorted, unique, may have holes. 'expected' is the local engine store outcome (code:reason); Cloud may map codes but must reject every negative.",
+ "positives": [
+  {
+   "name": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "record_sha256": "b145af5a0ae5ce06a5eea92ad690755093a74b0c76a61ddd07fd7a1364596ed5",
+   "plan_digest": "7ffcb2ab30c0bf7bcec0233dc137cd83012b60f181501a81df8320057cb2f4ff",
+   "expected": "accepted"
+  },
+  {
+   "name": "wrapper_provenance_disabled",
+   "record_utf8": "{\"activity_id\":null,\"activity_record\":null,\"activity_unavailable\":\"provenance_disabled\",\"agent\":\"visualization_expert\",\"attempt_base\":\"s1:call_2\",\"candidate_count\":1,\"code\":null,\"code_id\":null,\"engine_version\":\"1.2.0.dev0\",\"parameters\":{},\"persist\":true,\"planned_candidates\":[{\"attempt_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"index\":0}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"create_umap_plot\"}",
+   "code_utf8": null,
+   "activity_utf8": null,
+   "record_sha256": "785bac706628b1a3d8b08eb3227dd54c796200e067eb3ab0383cb54d10e8a324",
+   "plan_digest": "258f69bcd4a3aa184852c9069f066c6258542e1cca2ef08d364b5a9944d8c616",
+   "expected": "accepted"
+  }
+ ],
+ "negatives": [
+  {
+   "name": "code_sha_wrong",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "fingerprint_mismatch:code_blob_mismatch"
+  },
+  {
+   "name": "code_bytes_wrong",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":86,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "fingerprint_mismatch:code_blob_mismatch"
+  },
+  {
+   "name": "code_id_wrong",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-0000000000000000000000000000000000000000000000000000000000000000\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "fingerprint_mismatch:code_blob_mismatch"
+  },
+  {
+   "name": "code_blob_missing",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": null,
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:code_blob_required"
+  },
+  {
+   "name": "activity_sha_wrong",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "fingerprint_mismatch:activity_blob_mismatch"
+  },
+  {
+   "name": "activity_bytes_wrong",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":122,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "fingerprint_mismatch:activity_blob_mismatch"
+  },
+  {
+   "name": "activity_id_mismatch",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-other\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:activity_fields_inconsistent"
+  },
+  {
+   "name": "activity_blob_missing",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": null,
+   "expected": "figure_invalid:activity_blob_required"
+  },
+  {
+   "name": "activity_unavailable_with_activity",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":\"provenance_disabled\",\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:activity_fields_inconsistent"
+  },
+  {
+   "name": "candidate_count_missing",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:planned_candidates"
+  },
+  {
+   "name": "planned_index_out_of_range",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":2,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:planned_candidates"
+  },
+  {
+   "name": "planned_unsorted",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2},{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:planned_candidates"
+  },
+  {
+   "name": "planned_duplicate_index",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:planned_candidates"
+  },
+  {
+   "name": "planned_empty",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:planned_candidates"
+  },
+  {
+   "name": "schema_wrong",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1:call_1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/1\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:execution_request_schema"
+  },
+  {
+   "name": "attempt_base_malformed",
+   "base": "custom_code_with_activity_and_hole",
+   "record_utf8": "{\"activity_id\":\"act-1\",\"activity_record\":{\"bytes\":121,\"sha256\":\"18170dacd21711fdb8eed2e24d2374aa23ecea1eb516dfb69993c8a27150f15f\"},\"activity_unavailable\":null,\"agent\":\"proteomics_de_analysis_expert\",\"attempt_base\":\"s1\",\"candidate_count\":3,\"code\":{\"bytes\":85,\"sha256\":\"556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\"},\"code_id\":\"sha256-556c92c8d7aa08b11c6a977f85e9016b33694cb8a060a4809422166bb811c807\",\"engine_version\":\"1.2.0.dev0\",\"parameters\":{\"modality_name\":\"prot_de\"},\"persist\":false,\"planned_candidates\":[{\"attempt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"index\":0},{\"attempt_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"index\":2}],\"plotly_version\":\"7.1.0\",\"schema\":\"lobster.figure_execution_request/2\",\"tool\":\"execute_custom_code\"}",
+   "code_utf8": "fig = make_volcano(adata)\nsubmit_figure(fig, label='Volcano — treated vs control')\n",
+   "activity_utf8": "{\"agent\":\"proteomics_de_analysis_expert\",\"id\":\"act-1\",\"ir\":{\"operation\":\"custom_code\"},\"tool_name\":\"execute_custom_code\"}",
+   "expected": "figure_invalid:execution_attempt_base"
+  }
+ ]
+}

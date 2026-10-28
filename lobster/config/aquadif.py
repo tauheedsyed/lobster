@@ -142,3 +142,70 @@ def has_provenance_call(tree: ast.AST) -> bool:
                             continue  # ir=None writes no provenance
                         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Figure contract: analysis tools never create figures
+# ---------------------------------------------------------------------------
+# Tools are identified by ``<module of the unwrapped implementation>.<tool.name>``
+# (see :func:`figure_tool_key`), never by ``__qualname__``: factory-nested tools carry
+# ``<locals>`` in their qualname.
+
+#: Exactly the eight retained transitional figure producers. They keep their
+#: existing AQUADIF metadata (ANALYZE, provenance); this set is NOT a category or tag.
+#: No wildcard, no pattern: a same-name tool in another module is not a producer. The
+#: set and the eight wrappers are removed together in a later release.
+TRANSITIONAL_FIGURE_PRODUCERS: FrozenSet[str] = frozenset(
+    f"lobster.agents.visualization_expert.{name}"
+    for name in (
+        "create_umap_plot",
+        "create_qc_plots",
+        "create_violin_plot",
+        "create_feature_plot",
+        "create_dot_plot",
+        "create_heatmap",
+        "create_elbow_plot",
+        "create_cluster_composition_plot",
+    )
+)
+
+#: Trusted figure submitters: they save through the trusted-save path straight to the
+#: figure store (not PlotManager). Named exclusions from the figure-contract tool-case
+#: harness, covered by core trusted-save tests instead, and reported as "not counted".
+#: Not a CODE_EXEC exemption: no other CODE_EXEC tool is listed here.
+TRUSTED_FIGURE_SUBMITTERS: FrozenSet[str] = frozenset(
+    {"lobster.tools.custom_code_tool.execute_custom_code"}
+)
+
+#: Primary categories whose tools must have executed figure-contract cases (bounded
+#: coverage): the seven provenance-required categories.
+FIGURE_CONTRACT_COVERED: FrozenSet[AquadifCategory] = PROVENANCE_REQUIRED
+
+#: Primary categories explicitly NOT covered by executed figure-contract cases (reported).
+FIGURE_CONTRACT_NOT_COVERED: FrozenSet[AquadifCategory] = frozenset(
+    {AquadifCategory.DELEGATE, AquadifCategory.UTILITY}
+)
+
+
+def figure_tool_key(tool) -> str:
+    """``<module>.<tool name>`` of the callable that actually implements ``tool``.
+
+    The coroutine wins over ``func`` (an async tool's ``func`` is a sync-fallback
+    closure), and ``functools.wraps`` chains are unwrapped, matching the provenance
+    checks. Raises ``ValueError`` if the tool has no implementation to identify.
+    """
+    import inspect
+
+    fn = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
+    if fn is None:
+        raise ValueError(f"tool {getattr(tool, 'name', tool)!r} has no implementation")
+    module = getattr(inspect.unwrap(fn), "__module__", None)
+    name = getattr(tool, "name", None)
+    if not isinstance(module, str) or not isinstance(name, str) or not name:
+        raise ValueError("tool implementation has no module or name")
+    return f"{module}.{name}"
+
+
+def is_transitional_figure_producer(key: str) -> bool:
+    """True only for one of the exact eight retained producer keys (no pattern matching)."""
+    return key in TRANSITIONAL_FIGURE_PRODUCERS

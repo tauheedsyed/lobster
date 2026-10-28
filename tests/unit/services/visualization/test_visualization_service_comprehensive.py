@@ -31,10 +31,34 @@ from lobster.services.visualization.visualization_service import (
     SingleCellVisualizationService,
     VisualizationError,
 )
+from tests.qc_fixtures import prepare_stored_qc
 
 # ===============================================================================
 # Fixtures
 # ===============================================================================
+
+
+def _assert_same_qc_data(actual, before):
+    assert actual.shape == before.shape
+    if isinstance(actual.X, csr_matrix):
+        assert isinstance(before.X, csr_matrix)
+        assert (actual.X != before.X).nnz == 0
+    else:
+        np.testing.assert_array_equal(actual.X, before.X)
+    pd.testing.assert_frame_equal(actual.obs, before.obs)
+    pd.testing.assert_frame_equal(actual.var, before.var)
+    assert set(actual.obsm) == set(before.obsm)
+    for key in before.obsm:
+        np.testing.assert_array_equal(actual.obsm[key], before.obsm[key])
+    np.testing.assert_equal(actual.uns, before.uns)
+    assert actual.raw is before.raw is None
+
+
+def _draw_stored_qc(service, adata):
+    before = adata.copy()
+    figure = service.create_qc_plots(adata)
+    _assert_same_qc_data(adata, before)
+    return figure
 
 
 @pytest.fixture
@@ -64,7 +88,7 @@ def basic_adata():
     # Add clustering
     adata.obs["leiden"] = pd.Categorical([str(i % 5) for i in range(n_cells)])
 
-    return adata
+    return prepare_stored_qc(adata)
 
 
 @pytest.fixture
@@ -85,7 +109,7 @@ def single_cell_adata():
     adata.obsm["X_umap"] = np.array([[0.5, 0.5]])
     adata.obsm["X_pca"] = np.random.randn(1, 50)
     adata.obs["leiden"] = pd.Categorical(["0"])
-    return adata
+    return prepare_stored_qc(adata)
 
 
 @pytest.fixture
@@ -98,7 +122,7 @@ def sparse_adata():
     adata.var_names = [f"gene_{i}" for i in range(n_genes)]
     adata.obsm["X_umap"] = np.random.randn(n_cells, 2)
     adata.obs["leiden"] = pd.Categorical([str(i % 5) for i in range(n_cells)])
-    return adata
+    return prepare_stored_qc(adata)
 
 
 @pytest.fixture
@@ -144,7 +168,7 @@ def large_adata():
     adata.obsm["X_pca"] = np.random.randn(n_cells, 50)
     adata.uns["pca"] = {"variance_ratio": np.linspace(0.2, 0.01, 50)}
     adata.obs["leiden"] = pd.Categorical([str(i % 20) for i in range(n_cells)])
-    return adata
+    return prepare_stored_qc(adata)
 
 
 # ===============================================================================
@@ -475,7 +499,7 @@ def test_heatmap_missing_genes_warning(service, basic_adata):
 
 def test_qc_plots_basic(service, basic_adata):
     """Test basic QC plot generation."""
-    fig = service.create_qc_plots(basic_adata)
+    fig = _draw_stored_qc(service, basic_adata)
     assert isinstance(fig, go.Figure)
     # Should have multiple subplots (16 panels)
     assert len(fig.data) > 10
@@ -484,7 +508,7 @@ def test_qc_plots_basic(service, basic_adata):
 def test_qc_plots_with_doublet_scores(service, basic_adata):
     """Test QC plots with doublet detection scores."""
     basic_adata.obs["doublet_score"] = np.random.rand(len(basic_adata))
-    fig = service.create_qc_plots(basic_adata)
+    fig = _draw_stored_qc(service, basic_adata)
     assert isinstance(fig, go.Figure)
 
 
@@ -493,19 +517,19 @@ def test_qc_plots_with_batch_column(service, basic_adata):
     basic_adata.obs["batch"] = pd.Categorical(
         [f"batch_{i % 3}" for i in range(len(basic_adata))]
     )
-    fig = service.create_qc_plots(basic_adata)
+    fig = _draw_stored_qc(service, basic_adata)
     assert isinstance(fig, go.Figure)
 
 
 def test_qc_plots_sparse_matrix(service, sparse_adata):
     """Test QC plots with sparse matrix."""
-    fig = service.create_qc_plots(sparse_adata)
+    fig = _draw_stored_qc(service, sparse_adata)
     assert isinstance(fig, go.Figure)
 
 
 def test_qc_plots_single_cell(service, single_cell_adata):
     """Test QC plots with single cell."""
-    fig = service.create_qc_plots(single_cell_adata)
+    fig = _draw_stored_qc(service, single_cell_adata)
     assert isinstance(fig, go.Figure)
 
 
@@ -742,7 +766,7 @@ def test_pca_plot_uses_scattergl_for_large_data(service, large_adata):
 
 def test_qc_plots_uses_scattergl(service, basic_adata):
     """Test QC plots use Scattergl for performance."""
-    fig = service.create_qc_plots(basic_adata)
+    fig = _draw_stored_qc(service, basic_adata)
     # Check if any traces use Scattergl
     has_scattergl = any(isinstance(trace, go.Scattergl) for trace in fig.data)
     assert has_scattergl or len(fig.data) > 0  # Some panels use Scattergl
@@ -785,12 +809,14 @@ def test_qc_plots_with_large_dataset(service, large_adata):
     """Test QC plots with large dataset."""
     import time
 
+    before = large_adata.copy()
     start = time.time()
     fig = service.create_qc_plots(large_adata)
     duration = time.time() - start
 
     assert isinstance(fig, go.Figure)
     assert duration < 30.0  # Should complete in under 30 seconds
+    _assert_same_qc_data(large_adata, before)
 
 
 def test_feature_plot_memory_efficiency(service, large_adata):
@@ -862,25 +888,50 @@ def test_heatmap_with_single_group(service, basic_adata):
 
 
 def test_qc_plots_with_hemoglobin_genes(service, basic_adata):
-    """Test QC plots calculates hemoglobin percentage."""
-    # Add hemoglobin genes
+    """Test QC plots consume stored hemoglobin percentage without recalculating it."""
+    # Add hemoglobin genes; the stored assessment remains authoritative.
     basic_adata.var_names = [
         f"HBA{i}" if i < 5 else f"gene_{i}" for i in range(len(basic_adata.var))
     ]
-    fig = service.create_qc_plots(basic_adata)
+    prepare_stored_qc(basic_adata)
+    fig = _draw_stored_qc(service, basic_adata)
     assert isinstance(fig, go.Figure)
     assert "percent_hb" in basic_adata.obs.columns
 
 
-def test_qc_plots_calculates_metrics(service, basic_adata):
-    """Test QC plots calculates all necessary metrics."""
-    fig = service.create_qc_plots(basic_adata)
+def test_qc_plots_consumes_stored_metrics(service, basic_adata):
+    """Drawing consumes all stored assessment metrics and changes no data."""
+    fig = _draw_stored_qc(service, basic_adata)
+    assert isinstance(fig, go.Figure)
 
-    # Check metrics are calculated
+    # Preserve the original metric-presence controls; these are precomputed.
     assert "n_genes" in basic_adata.obs.columns
     assert "n_counts" in basic_adata.obs.columns
     assert "gene_detection_rate" in basic_adata.obs.columns
     assert "log10_counts" in basic_adata.obs.columns
+
+
+@pytest.mark.parametrize(
+    "missing_metric",
+    [
+        "n_genes",
+        "n_counts",
+        "gene_detection_rate",
+        "log10_counts",
+        "log10_genes",
+        "percent_mito",
+        "percent_ribo",
+        "percent_hb",
+    ],
+)
+def test_qc_plots_requires_stored_metrics_without_mutation(
+    service, basic_adata, missing_metric
+):
+    basic_adata.obs = basic_adata.obs.drop(columns=[missing_metric])
+    before = basic_adata.copy()
+    with pytest.raises(VisualizationError, match="assess_data_quality"):
+        service.create_qc_plots(basic_adata)
+    _assert_same_qc_data(basic_adata, before)
 
 
 def test_cluster_composition_auto_detects_batch(service, basic_adata):

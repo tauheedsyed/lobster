@@ -9,6 +9,7 @@ AGENT_CONFIG = AgentRegistryConfig(
     factory_function="lobster.agents.metadata_assistant.metadata_assistant.metadata_assistant",
     handoff_tool_name="handoff_to_metadata_assistant",
     handoff_tool_description="Assign metadata operations (cross-dataset sample mapping, metadata standardization to Pydantic schemas, dataset validation before download, metadata reading/formatting, publication queue filtering) to the metadata assistant",
+    code_tool_default=True,
 )
 
 __all__ = ["AGENT_CONFIG"]

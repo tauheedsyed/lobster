@@ -4,7 +4,7 @@ Post-generation plugin validation.
 Provides AST-level and structural checks for generated plugin packages.
 Used by `lobster validate-plugin <dir>` CLI command.
 
-Eight validation checks (ordered by severity):
+Nine validation checks (ordered by severity):
 1. PEP 420 compliance — no __init__.py at lobster/ or lobster/agents/ level
 2. pyproject.toml entry points — lobster.agents group exists with correct format
 3. AGENT_CONFIG position — appears before heavy imports (AST check)
@@ -13,6 +13,13 @@ Eight validation checks (ordered by severity):
 6. Provenance calls — tools with provenance: True call log_tool_usage(ir=ir)
 7. No core imports — plugin doesn't import from lobster.agents.* core agents
 8. No ImportError guards — domain __init__.py must not use try/except ImportError
+9. Figure contract — tests use FigureContractTestMixin and every tool whose primary
+   AQUADIF category requires provenance has a FigureToolCase or a skip with a reason.
+   This is a PRESENCE check only, never behavioural acceptance: the contract assertion itself is
+   executed by the package's own pytest run
+   (lobster.testing.contract_mixins.FigureContractTestMixin). Only LITERAL tool names in
+   ``FigureToolCase(...)`` and literal ``figure_contract_skips`` keys are seen (no AST
+   evaluation); non-literal ones are reported as "not checked".
 
 SYNC NOTE: Standalone equivalent at skills/lobster-dev/scripts/validate_plugin.py — keep checks aligned.
 """
@@ -24,7 +31,11 @@ from pathlib import Path
 from typing import List
 
 # Delta 1: Import has_provenance_call from aquadif.py, don't reimplement
-from lobster.config.aquadif import has_provenance_call
+from lobster.config.aquadif import (
+    PROVENANCE_REQUIRED,
+    AquadifCategory,
+    has_provenance_call,
+)
 
 
 @dataclass
@@ -40,7 +51,7 @@ class ValidationResult:
 def validate_plugin(plugin_dir: Path) -> List[ValidationResult]:
     """Validate a plugin package for contract compliance.
 
-    Runs 7 structural checks against the plugin directory.
+    Runs 9 structural checks against the plugin directory.
 
     Args:
         plugin_dir: Root directory of the plugin package
@@ -58,6 +69,7 @@ def validate_plugin(plugin_dir: Path) -> List[ValidationResult]:
     results.extend(_check_provenance_calls(plugin_dir))
     results.extend(_check_import_boundaries(plugin_dir))
     results.extend(_check_no_import_error_guard(plugin_dir))
+    results.extend(_check_figure_contract(plugin_dir))
 
     return results
 
@@ -546,4 +558,148 @@ def _check_no_import_error_guard(plugin_dir: Path) -> List[ValidationResult]:
                 )
             )
 
+    return results
+
+
+def _declared_tool_categories(plugin_dir: Path) -> dict:
+    """``tool name -> primary category`` from ``<tool>.metadata = {"categories": [...]}``."""
+    out = {}
+    for module_path in _find_agent_modules(plugin_dir):
+        try:
+            tree = ast.parse(module_path.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+                continue
+            for target in node.targets:
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "metadata"
+                    and isinstance(target.value, ast.Name)
+                ):
+                    continue
+                for key, value in zip(node.value.keys, node.value.values):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "categories"
+                        and isinstance(value, ast.List)
+                        and value.elts
+                        and isinstance(value.elts[0], ast.Constant)
+                    ):
+                        out[target.value.id] = value.elts[0].value
+    return out
+
+
+def _figure_contract_declarations(plugin_dir: Path):
+    """``(uses_mixin, literal case names, literal skip names, non-literal count)`` (AST).
+
+    Literal-only: a case name or skips mapping that is not a literal is counted as
+    dynamic and is NOT evaluated.
+    """
+    uses_mixin, cases, skips, dynamic = False, set(), set(), 0
+    tests_dir = plugin_dir / "tests"
+    for test_file in sorted(tests_dir.rglob("*.py")) if tests_dir.is_dir() else []:
+        try:
+            tree = ast.parse(test_file.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    name = getattr(base, "id", None) or getattr(base, "attr", None)
+                    if name == "FigureContractTestMixin":
+                        uses_mixin = True
+            elif isinstance(node, ast.Call):
+                fname = getattr(node.func, "id", None) or getattr(
+                    node.func, "attr", None
+                )
+                if fname != "FigureToolCase":
+                    continue
+                first = node.args[0] if node.args else None
+                for kw in node.keywords:
+                    if kw.arg == "tool_name":
+                        first = kw.value
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    cases.add(first.value)
+                else:
+                    dynamic += 1
+            elif isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "figure_contract_skips" for t in node.targets
+            ):
+                if not isinstance(node.value, ast.Dict):
+                    dynamic += 1
+                    continue
+                for k in node.value.keys:
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                        skips.add(k.value)
+                    else:
+                        dynamic += 1
+    return uses_mixin, cases, skips, dynamic
+
+
+def _check_figure_contract(plugin_dir: Path) -> List[ValidationResult]:
+    """Check 9: figure contract is wired (presence only; pytest executes it)."""
+    check = "Figure contract (D8)"
+    covered = sorted(
+        name
+        for name, primary in _declared_tool_categories(plugin_dir).items()
+        if primary in {c.value for c in PROVENANCE_REQUIRED}
+        or primary not in {c.value for c in AquadifCategory}
+    )
+    if not covered:
+        return [
+            ValidationResult(
+                check=check,
+                passed=True,
+                message="no tools with a provenance-required primary category",
+                severity="warning",
+            )
+        ]
+    uses_mixin, cases, skips, dynamic = _figure_contract_declarations(plugin_dir)
+    if not uses_mixin:
+        return [
+            ValidationResult(
+                check=check,
+                passed=False,
+                message="tests do not use FigureContractTestMixin (lobster.testing.contract_mixins)",
+            )
+        ]
+    results = []
+    if dynamic:
+        results.append(
+            ValidationResult(
+                check=check,
+                passed=True,
+                message=(
+                    f"{dynamic} non-literal case name(s) or skip(s) not checked "
+                    "(presence check is literal-only; pytest executes D8)"
+                ),
+                severity="warning",
+            )
+        )
+    for name in covered:
+        if name in cases:
+            results.append(
+                ValidationResult(
+                    check=check, passed=True, message=f"{name}: has a case"
+                )
+            )
+        elif name in skips:
+            results.append(
+                ValidationResult(
+                    check=check,
+                    passed=True,
+                    message=f"{name}: skipped (reason in figure_contract_skips)",
+                    severity="warning",
+                )
+            )
+        else:
+            results.append(
+                ValidationResult(
+                    check=check,
+                    passed=False,
+                    message=f"{name}: no FigureToolCase and no figure_contract_skips entry",
+                )
+            )
     return results

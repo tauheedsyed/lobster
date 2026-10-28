@@ -427,6 +427,12 @@ A delegation response may include an <artifact_manifest> block listing the modal
 and files that agent wrote. Treat it as a factual inventory of workspace state.
 - If the manifest lists a modality, that data ALREADY EXISTS. Reference it by name.
   Do NOT use execute_custom_code to recompute it.
+- If the manifest lists a saved figure, that figure ALREADY EXISTS under the ref shown
+  (f_…@r_…). Use that exact ref when you mention it to the user or delegate work on it.
+  Do NOT ask an agent to recreate it. To change it, delegate an edit of that ref: the
+  edit is saved as a new revision and the original stays unchanged.
+- A figure listed with save confirmation pending is NOT available yet. Do not tell the
+  user it is saved.
 - If the manifest says no new artifacts were written but the agent's prose claims an
   analysis was completed, the claim is UNVERIFIED. Do not repeat it to the user as
   fact. Re-delegate with more specific instructions, or state plainly what is missing.

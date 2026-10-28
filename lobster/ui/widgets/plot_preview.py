@@ -101,6 +101,24 @@ class PlotPreview(Vertical):
             plot = self._plots[idx]
             file_path = plot.get("file_path")
 
+            # Managed revision: open its HTML view (written once on this explicit view path).
+            if not file_path and plot.get("figure_ref") and self.client:
+                from lobster.core.figures.renditions import ensure_html_rendition
+
+                dm = self.client.data_manager
+                view = ensure_html_rendition(dm.figure_store, plot["figure_ref"])
+                if view.status != "available":
+                    self.notify(
+                        (
+                            f"Save confirmation pending ({view.reason})"
+                            if view.status == "pending"
+                            else f"Figure saved; HTML view failed ({view.reason})"
+                        ),
+                        severity="warning",
+                    )
+                    return
+                file_path = str(dm.workspace_path / view.path)
+
             # Fallback: construct path from workspace if not stored
             if not file_path and self.client and hasattr(self.client, "data_manager"):
                 plot_id = plot.get("id", "")

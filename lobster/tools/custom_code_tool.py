@@ -28,9 +28,9 @@ See Also:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, List, Optional
 
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolCallId, tool
 
 from lobster.utils.logger import get_logger
 
@@ -96,8 +96,8 @@ DEFENSIVE CODING:
 - Check isinstance(data, dict) before dict operations
 
 PERSIST PARAMETER:
-- persist=False (default): Ephemeral — logged but NOT in /notebook export
-- persist=True: Reproducible — included in exported Jupyter notebook
+- persist=False (default): Ephemeral — logged, but not included in the default notebook export
+- persist=True: recorded and eligible for the default notebook export; omitted steps are listed in the notebook.
 
 STATE PERSISTENCE:
 Modified adata is saved as NEW modality with _custom suffix.
@@ -163,6 +163,7 @@ def create_execute_custom_code_tool(
         load_workspace_files: bool = True,
         persist: bool = False,
         description: str = "Custom code execution",
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> str:
         """Execute custom Python code with workspace context.
 
@@ -174,6 +175,24 @@ def create_execute_custom_code_tool(
         Namespace: WORKSPACE, OUTPUT_DIR, adata (if modality_name), auto-loaded files.
         Assign results to `result` variable. Large output (>8K chars) is truncated
         — save to OUTPUT_DIR instead.
+
+        Figures: call submit_figure(fig, source=df, intent="what it shows", label="...")
+        for every Plotly figure to keep; it is saved only if the code succeeds.
+        publish_plot(fig, title) is an alias. Figures are NOT captured automatically
+        (changed in 1.2.0): an unsubmitted Figure variable is named in the reply and not
+        saved. Saved figures of this session: list_figures(), load_figure("f_..@r_..")
+        (write refs literally to load non-latest revisions), load_figure_config(ref),
+        load_source(source_id). Ready-made figure templates and the house style are
+        available: list_templates(), get_template(name), show_template_source(name);
+        prefer a matching template over hand-written plotting code. A request about a
+        figure that already exists ("make the title bigger", "use log scale") is an
+        EDIT: fig = load_figure("f_..@r_.."),
+        change it, then submit_figure(fig, parent="f_..@r_..") with that same ref. This
+        saves a new revision of the same figure; the original is kept and the parent's
+        config is kept unless you pass config={...} ({} clears it). Make a new figure
+        (no parent) only for a genuinely separate plot or a different underlying
+        dataset, and say so in the reply; filtering or restyling an existing plot (e.g.
+        "show only the top 20 genes") is still an edit.
 
         Args:
             python_code: Python code to execute (multi-line supported)
@@ -232,6 +251,10 @@ def create_execute_custom_code_tool(
 
             # Execute via service in a thread so the event loop stays free for
             # SSE heartbeats during long-running subprocess calls.
+            submitted: List[Any] = []
+            # Born set (the attempt fence): captured BEFORE execute() materializes any input, so a
+            # session purge during this attempt fences its figures (generation_fenced).
+            attempt_fence = _attempt_fence(data_manager)
             result, stats, ir = await asyncio.to_thread(
                 custom_code_service.execute,
                 code=python_code,
@@ -240,10 +263,11 @@ def create_execute_custom_code_tool(
                 workspace_keys=workspace_keys_list,
                 persist=persist,
                 description=description,
+                figure_sink=submitted,
             )
 
-            # Log provenance
-            data_manager.log_tool_usage(
+            # Log provenance FIRST: the figure execution record links this exact activity.
+            activity = data_manager.log_tool_usage(
                 tool_name="execute_custom_code",
                 parameters={
                     "description": description,
@@ -265,6 +289,21 @@ def create_execute_custom_code_tool(
                 agent=agent_name,
             )
 
+            # Trusted save of explicitly submitted figures (successful attempt only).
+            figure_report = _commit_submitted_figures(
+                data_manager,
+                submitted,
+                stats,
+                activity=activity,
+                tool_call_id=tool_call_id,
+                agent_name=agent_name,
+                code=python_code,
+                modality_name=modality_name,
+                workspace_key=workspace_key,
+                persist=persist,
+                attempt_fence=attempt_fence,
+            )
+
             # Agent-specific post-processing (only on success)
             post_processor_msg = None
             if post_processor and stats.get("success", False):
@@ -277,7 +316,9 @@ def create_execute_custom_code_tool(
                     post_processor_msg = f"Warning: Post-processing failed: {e}"
 
             # Format response
-            return _format_response(result, stats, persist, post_processor_msg)
+            return _format_response(
+                result, stats, persist, post_processor_msg, figure_report
+            )
 
         except CodeValidationError as e:
             logger.error(f"Code validation failed: {e}")
@@ -322,15 +363,19 @@ def create_execute_custom_code_tool(
                     "- result = {'saved_to': str(path), 'count': N, 'preview': data[:5]}"
                 )
 
-            return json.dumps(
-                {
-                    "success": False,
-                    "error": error_str + hints,
-                    "error_type": "execution_error",
-                    "stderr": error_str,
-                },
-                indent=2,
-            )
+            failed = {
+                "success": False,
+                "error": error_str + hints,
+                "error_type": "execution_error",
+                "stderr": error_str,
+            }
+            discarded = getattr(e, "figures_submitted", 0)
+            if discarded:
+                failed["figures"] = (
+                    f"No figure saved: the code failed, so {discarded} submitted "
+                    "figure(s) were discarded."
+                )
+            return json.dumps(failed, indent=2)
         except Exception as e:
             logger.error(f"Unexpected error in execute_custom_code: {e}", exc_info=True)
             import json
@@ -484,6 +529,7 @@ def _format_response(
     stats: Dict[str, Any],
     persist: bool,
     post_processor_msg: Optional[str] = None,
+    figure_report: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Format unified JSON response for all agents (DeepAgents pattern).
@@ -527,11 +573,202 @@ def _format_response(
         "persisted": persist,
         "new_modality_name": stats.get("new_modality_name"),
         "write_back_error": stats.get("write_back_error"),
-        "captured_plots": stats.get("captured_plots", 0),
+        "replay_excluded": stats.get("replay_excluded"),
         "post_processor_message": post_processor_msg,
     }
+    if figure_report:
+        response_obj.update(figure_report)
 
     return json.dumps(response_obj, indent=2)
+
+
+# =============================================================================
+# Trusted save of explicitly submitted figures
+# =============================================================================
+
+
+_FENCED_COMPLETION_STATES = frozenset(
+    {"completion_unconfirmed", "result_missing", "result_unreadable"}
+)
+
+
+def _safe_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _unsubmitted_warning(names: List[str]) -> Optional[str]:
+    if not names:
+        return None
+    return (
+        f"Not saved: {', '.join(names)}. "
+        "Call submit_figure(fig, source=…, intent=…) to save a figure."
+    )
+
+
+def _attempt_fence(data_manager) -> Any:
+    """The store's born-set fence for one attempt, or None for a store without one (Cloud)."""
+    store = data_manager.figure_store
+    capture = getattr(store, "attempt_fence", None)
+    return capture() if callable(capture) else None
+
+
+def _commit_submitted_figures(
+    data_manager,
+    submitted: List[Any],
+    stats: Dict[str, Any],
+    *,
+    activity: Optional[Dict[str, Any]],
+    tool_call_id: str,
+    agent_name: str,
+    code: str,
+    modality_name: Optional[str],
+    workspace_key: Optional[str],
+    persist: bool,
+    attempt_fence: Any = None,
+) -> Dict[str, Any]:
+    """Commit the successful attempt's submissions; return reply fields (codes only).
+
+    ``attempt_fence``: the born set captured before the attempt's first input read (the tool
+    always passes it; None only for direct calls and stores without one)."""
+    import uuid
+
+    from lobster.core.figures.records import (
+        KIND_CREATED,
+        KIND_EDITED,
+        Candidate,
+        ExecutionInfo,
+        InputEdge,
+    )
+    from lobster.core.figures.saver import TrustedSaver, outcome_state, summarize
+
+    report: Dict[str, Any] = {}
+    warning = _unsubmitted_warning(stats.get("unsubmitted_figures") or [])
+    completion = stats.get("completion")
+    if not (isinstance(completion, str) and completion == "complete") and stats.get(
+        "figures_submitted"
+    ):
+        # Exit 0 but the run did not finish normally (early exit, missing/unreadable result).
+        # Closed vocabulary only: an unknown state is reported as completion_unconfirmed.
+        state = (
+            completion
+            if isinstance(completion, str) and completion in _FENCED_COMPLETION_STATES
+            else "completion_unconfirmed"
+        )
+        report["figures"] = (
+            "No figure saved: the run did not finish normally, so "
+            f"{_safe_count(stats.get('figures_submitted'))} submitted figure(s) were "
+            "discarded "
+            f"({state})."
+        )
+        if warning:
+            report["unsubmitted_figures"] = warning
+        return report
+    if stats.get("figure_submission_error"):
+        report["figures"] = (
+            "No figure saved: the submitted figures were malformed "
+            f"({stats['figure_submission_error']})."
+        )
+        if warning:
+            report["unsubmitted_figures"] = warning
+        return report
+    if not submitted:
+        if warning:
+            report["figures"] = "No figure saved."
+            report["unsubmitted_figures"] = warning
+        return report
+
+    # Inside a graph run LangChain always supplies the tool call id; a direct call gets a
+    # one-off id with NO repeat-safety.
+    call_id = tool_call_id or f"direct_{uuid.uuid4().hex[:12]}"
+    session = str(getattr(data_manager, "session_id", None) or "local")
+    base = f"{session}:{call_id}"
+    # Input edges were captured at materialization, before the child ran, from the object
+    # actually given to it. No lookup here: a later store/eviction cannot rebind them.
+    inputs = tuple(InputEdge.from_dict(d) for d in stats.get("input_edges") or ())
+    # Config: explicit -> exactly those bytes ({} = clear); omitted on an edit ->
+    # the parent's EXACT saved config via a full sha-verified read (current lifecycle);
+    # omitted on a create -> {}. A failed parent read is a typed refusal, never {}.
+    from lobster.core.figures.errors import FigureError
+
+    configs: Dict[int, bytes] = {}
+    pre_refused: Dict[int, FigureError] = {}
+    for fig in submitted:
+        explicit = getattr(fig, "config_bytes", None)
+        if explicit is not None:
+            configs[fig.index] = explicit
+        elif fig.parent:
+            try:
+                configs[fig.index] = data_manager.figure_store.read(fig.parent)[2]
+            except FigureError as exc:
+                pre_refused[fig.index] = exc
+                configs[fig.index] = (
+                    b"{}"  # placeholder: never validated/digested/stored
+                )
+        else:
+            configs[fig.index] = b"{}"
+    candidates = [
+        Candidate(
+            attempt_key=f"{base}:{fig.index}",
+            candidate_index=fig.index,
+            figure_bytes=fig.figure_bytes,
+            config_bytes=configs[fig.index],
+            kind=KIND_EDITED if fig.parent else KIND_CREATED,
+            actor=f"expert:{agent_name}",
+            label=fig.label,
+            request=fig.request,
+            resolved_intent=fig.resolved_intent,
+            parent_ref=fig.parent,
+            inputs=inputs,
+            source=fig.source,
+        )
+        for fig in submitted
+    ]
+    try:
+        import plotly
+
+        plotly_version = plotly.__version__
+    except Exception:  # pragma: no cover
+        plotly_version = "unknown"
+    try:
+        from lobster.version import __version__ as engine_version
+    except Exception:  # pragma: no cover
+        engine_version = "unknown"
+    info = ExecutionInfo(
+        attempt_base=base,
+        tool="execute_custom_code",
+        agent=agent_name,
+        parameters={
+            "modality_name": modality_name,
+            "workspace_key": workspace_key,
+            "persist": bool(persist),
+        },
+        persist=bool(persist),
+        code_bytes=code.encode("utf-8"),
+        activity=activity,
+        engine_version=engine_version,
+        plotly_version=plotly_version,
+    )
+    results = TrustedSaver(data_manager.figure_store).commit_attempt(
+        info,
+        candidates,
+        succeeded=True,
+        pre_refused=pre_refused,
+        fence=attempt_fence,
+    )
+    report["figures"] = summarize(results)
+    report["figure_refs"] = [r.ref for r in results if r.status == "available"]
+    report["figure_outcome"] = outcome_state(results)
+    if warning:
+        report["unsubmitted_figures"] = warning
+    truncated = (stats.get("figure_snapshot") or {}).get("snapshot_truncated")
+    if truncated:
+        report["figure_snapshot"] = f"snapshot_truncated: {truncated} not listed"
+    unknown = stats.get("input_identity_unknown") or []
+    if unknown and report["figure_refs"]:
+        report["input_identity"] = (
+            "Input identity unknown (recorded as unverified): " + ", ".join(unknown)
+        )
+    return report
 
 
 # =============================================================================

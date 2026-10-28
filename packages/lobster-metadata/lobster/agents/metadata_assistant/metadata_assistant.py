@@ -65,19 +65,14 @@ from lobster.agents.metadata_assistant.prompts import create_metadata_assistant_
 
 # Publication queue schemas
 from lobster.core.schemas.publication_queue import HandoffStatus, PublicationStatus
-from lobster.services.execution.custom_code_execution_service import (
-    CustomCodeExecutionService,
-)
 from lobster.services.metadata.metadata_standardization_service import (
     MetadataStandardizationService,
 )
 
 # Sample mapping service
 from lobster.services.metadata.sample_mapping_service import SampleMappingService
-from lobster.tools.custom_code_tool import (
-    create_execute_custom_code_tool,
-    metadata_store_post_processor,
-)
+from lobster.tools.code_tool_switch import attach_code_tool
+from lobster.tools.custom_code_tool import metadata_store_post_processor
 from lobster.tools.knowledgebase_tools import create_cross_database_id_mapping_tool
 from lobster.utils.logger import get_logger
 
@@ -313,22 +308,22 @@ def metadata_assistant(
     else:
         logger.debug("Microbiome features not available (optional)")
 
-    # Custom code execution service for sample-level operations
-    custom_code_service = CustomCodeExecutionService(data_manager)
+    # Shared execute_custom_code tool for sample-level operations, switchable per agent
+    # (lobster.tools.code_tool_switch). AGENT_CONFIG lives in the package __init__.
+    from lobster.agents.metadata_assistant import AGENT_CONFIG
 
-    # Create shared execute_custom_code tool via factory (v2.7+: unified tool)
-    execute_custom_code = create_execute_custom_code_tool(
-        data_manager=data_manager,
-        custom_code_service=custom_code_service,
-        agent_name="metadata_assistant",
+    code_tools = attach_code_tool(
+        [],
+        data_manager,
+        AGENT_CONFIG.name,
+        default=AGENT_CONFIG.code_tool_default,
+        tool_agent_name="metadata_assistant",
         post_processor=metadata_store_post_processor,
     )
 
     # Cross-database ID mapping tool (UniProt + Ensembl)
     map_cross_database_ids = create_cross_database_id_mapping_tool(data_manager)
 
-    execute_custom_code.metadata = {"categories": ["CODE_EXEC"], "provenance": False}
-    execute_custom_code.tags = ["CODE_EXEC"]
     map_cross_database_ids.metadata = {"categories": ["ANNOTATE"], "provenance": True}
     map_cross_database_ids.tags = ["ANNOTATE"]
 
@@ -3558,7 +3553,7 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
         get_content_from_workspace,
         write_to_workspace,
         # Custom code execution for sample-level operations
-        execute_custom_code,
+        *code_tools,
         # Cross-database ID mapping (UniProt + Ensembl)
         map_cross_database_ids,
     ]

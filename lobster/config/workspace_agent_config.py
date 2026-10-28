@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,8 @@ class AgentSettings(BaseModel):
         model: Model override for this agent (e.g., "claude-sonnet-4-20250514")
         thinking_preset: Thinking preset override (e.g., "high", "medium", "low")
         temperature: Temperature override for model responses
+        code_tool: Turn ``execute_custom_code`` on (true) or off (false) for this agent;
+            unset keeps the agent's default. Only a TOML boolean is accepted.
 
     Example:
         >>> settings = AgentSettings(
@@ -83,6 +85,19 @@ class AgentSettings(BaseModel):
     temperature: Optional[float] = Field(
         None, ge=0.0, le=2.0, description="Temperature override (0.0-2.0)"
     )
+
+    code_tool: Optional[bool] = Field(
+        None, description="execute_custom_code on (true) or off (false) for this agent"
+    )
+
+    @field_validator("code_tool", mode="before")
+    @classmethod
+    def _code_tool_is_a_boolean(cls, value):
+        # A wrong type drops only this setting (with a warning), not the whole file.
+        if value is None or isinstance(value, bool):
+            return value
+        logger.warning("Ignoring agent_settings code_tool: expected true or false")
+        return None
 
 
 class ProviderSettings(BaseModel):

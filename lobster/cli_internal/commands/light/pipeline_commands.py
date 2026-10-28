@@ -70,8 +70,8 @@ def pipeline_export(
         output: OutputAdapter for rendering
         name: Notebook name (without extension). If None, prompts interactively.
         description: Optional notebook description. If None, prompts interactively.
-        mode: "successful" (curated, the default) or "replay" (every step
-            needed to reproduce the result).
+        mode: "successful" (curated, the default) or "replay" (every recorded
+            step marked for replay, in order).
         force: Replace an existing notebook of the same name. Without it the
             export refuses, because the file may hold the user's own edits.
 
