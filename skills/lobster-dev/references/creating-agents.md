@@ -1,602 +1,233 @@
-# Creating Agents
+# Creating Agents — Lobster AI 1.2
 
-Complete guide for building Lobster AI agents — from scoping through PR.
+Start with [planning-workflow.md](planning-workflow.md) for a new biological
+capability. For an existing agent's tool, read its actual factory and service
+implementations before changing the contract.
 
-## Scoping: Before You Write Code
+## Scope the Capability
 
-### Tool Inventory via AQUADIF Categories
+Inventory the inputs, scientific decisions, outputs and failure cases. Map each
+operation to AQUADIF before choosing a package/agent structure:
 
-Enumerate candidate tools by AQUADIF category to ensure comprehensive domain coverage.
-Read [references/aquadif-contract.md](aquadif-contract.md) first to internalize the taxonomy — AQUADIF is the design basis for all Lobster tools.
+| Category | Main operation | IR required |
+|---|---|---|
+| IMPORT | External data into workspace representation | Yes |
+| QUALITY | Quality metrics and technical assessments | Yes |
+| FILTER | Remove observations/features | Yes |
+| PREPROCESS | Transform representation | Yes |
+| ANALYZE | Statistics, embeddings, patterns | Yes |
+| ANNOTATE | Biological meaning/labels | Yes |
+| SYNTHESIZE | Combine scientific results | Yes |
+| DELEGATE | Specialist handoff | No |
+| UTILITY | Administrative/session support | No |
+| CODE_EXEC | Custom code escape hatch | Exempt in the category gate |
 
-| AQUADIF Category | Purpose | Provenance |
-|------------------|---------|------------|
-| IMPORT | Load external data formats | Required |
-| QUALITY | QC metrics, artifact detection | Required |
-| FILTER | Subset data (remove samples/features) | Required |
-| PREPROCESS | Transform representation (normalize, batch correct) | Required |
-| ANALYZE | Extract patterns (PCA, clustering, statistics) | Required |
-| ANNOTATE | Add biological meaning | Required |
-| DELEGATE | Handoff to specialist child agent | Not required |
-| SYNTHESIZE | Combine results across analyses | Required |
-| UTILITY | Workspace management, status, export | Not required |
-| CODE_EXEC | Custom code execution (escape hatch) | Conditional |
+Do not make arbitrary code the primary scientific workflow. Add a child agent
+when the decision space and expertise are distinct; do not split agents merely
+because vendor formats differ. Use entry-point discovery rather than counting
+or hardcoding a fixed agent catalog.
 
-**Tool count target: 8–15 per agent.** <5 feels incomplete. >20 degrades LLM tool selection.
+### Data Loading Boundary
 
-**AQUADIF guides completeness:** Every parent agent needs at minimum IMPORT + QUALITY + one of ANALYZE or DELEGATE. If a category is missing, verify it's intentional — the agent either handles it differently or delegates to a child.
+The Data Expert dispatches generic loading through adapters and downloads through
+queue/database services. Domain IMPORT tools handle formats requiring domain
+knowledge, such as vendor outputs or count-quantification directories. Do not
+reimplement generic CSV/H5AD loading in every domain.
 
-### Parent vs Child Decision
+For GEO bulk count workflows,
+`execute_download_from_queue(..., data_requirement="gene_counts")` requires a
+suitable series-level gene-count import; empty requirement retains ordinary
+imports. Refusals are scientific constraints, not a reason to substitute normalized
+expression. DESeq2 count validation prefers valid `layers['counts']`, then `X`
+only when the counts layer is absent. Do not round normalized matrices to pass.
 
-**Create a child agent when ALL are true:**
-1. Distinct user skill required (e.g., clinical genomicist vs population geneticist)
-2. Different knowledge bases needed (e.g., ClinVar vs GWAS catalog)
-3. >5 tools with a different focus area
-4. The child workflow is a natural "next step" after the parent
+## Generate the Package
 
-**Keep on the parent when ANY are true:**
-1. Downstream analysis is identical across sub-platforms
-2. Auto-detection handles platform differences
-3. Total tool count <15
-4. Workflow is linear without branching
-
-**Real examples:**
-- Created `variant_analysis_expert` as child of `genomics_expert` — clinical interpretation is a distinct skill
-- Did NOT create `affinity_proteomics_expert` — affinity and MS share identical DE and biomarker tools
-
-### Package Boundary Decision
-
-**New package when:** New omics domain, >1 agent, domain-specific services.
-**Extend existing package when:** Adding a child, adding tools, adding services for existing domain.
-
-### Data Loading Boundary: data_expert vs. Domain IMPORT Tools
-
-Lobster has a **two-layer data loading architecture**. Understanding this boundary prevents your agent from duplicating functionality that already exists in core.
-
-**Layer 1 — `data_expert` (core, in `lobster-research` package):**
-- Downloads from public databases via `execute_download_from_queue` → `DownloadOrchestrator` → database-specific services (GEO, SRA, PRIDE, MetaboLights, etc.)
-- Loads local files via `load_modality(adapter="...")` → generic adapter system
-- Manages modalities (list, remove, concatenate, validate)
-- Has **ZERO** domain-specific parsing logic — it dispatches to adapters
-
-**Layer 2 — Domain agent IMPORT tools (your package):**
-- Parse **vendor-specific or domain-specific file formats** that require domain expertise
-- Apply scientific defaults during import (contaminant filtering, localization thresholds, orientation detection)
-- Examples: MaxQuant `proteinGroups.txt` (proteomics), Salmon `quant.sf` directories (transcriptomics), VCF files via cyvcf2 (genomics)
-
-**Decision rule for your IMPORT tools:**
-
-| Your domain has... | Action |
-|---------------------|--------|
-| Vendor-specific formats requiring specialized parsing (e.g., narrowPeak, IDAT, vendor software output) | Create domain IMPORT tools in your agent |
-| Only generic CSV/TSV/H5AD files | Register an **adapter** via `lobster.adapters` entry point — `data_expert.load_modality()` handles loading |
-| Both specialized formats AND generic files | Create IMPORT tools for specialized formats; let `data_expert` handle generic loading |
-
-**Do NOT** duplicate generic CSV/H5AD loading in your IMPORT tools — `data_expert` already handles that. Your IMPORT tools should accept domain-specific formats and apply domain knowledge that the generic adapter cannot.
-
-**Real examples from existing agents:**
-- `proteomics_expert.import_proteomics_data` — auto-detects MaxQuant/DIA-NN/Spectronaut, applies contaminant filtering, selects intensity types (LFQ vs raw)
-- `transcriptomics_expert.import_bulk_counts` — auto-detects Salmon/kallisto/featureCounts, handles `#` comment headers, auto-transposes gene-vs-sample orientation
-- `genomics_expert.load_vcf` — uses cyvcf2 for VCF parsing, supports region filtering, PASS-only selection
-- `metabolomics_expert` — has NO import tools; metabolomics data loads through `data_expert.load_modality()` via adapters
-
----
-
-## Package Structure
-
-### Directory Layout
-
-```
-packages/lobster-DOMAIN/
-├── pyproject.toml
-├── lobster/
-│   ├── agents/
-│   │   └── DOMAIN/
-│   │       ├── __init__.py          # Tier-aware exports
-│   │       ├── DOMAIN_expert.py     # Agent factory + AGENT_CONFIG
-│   │       ├── config.py            # Constants, thresholds, PlatformConfig
-│   │       ├── prompts.py           # System prompt builder function
-│   │       ├── state.py             # LangGraph state class
-│   │       └── shared_tools.py      # Tool factory (8-15 tools)
-│   └── services/
-│       ├── quality/
-│       │   └── DOMAIN_quality_service.py
-│       └── analysis/
-│           └── DOMAIN_analysis_service.py
-└── tests/
-    └── unit/
-        └── agents/
-            └── test_DOMAIN_expert.py
+```bash
+lobster scaffold agent --name domain_expert --display-name "Domain Expert" \
+  --description "Analyze the selected biological domain" -o packages/
+lobster validate-plugin ./packages/lobster-domain/
 ```
 
-**With children:**
-```
-lobster/agents/DOMAIN/
-├── DOMAIN_expert.py          # Parent: child_agents=["child_expert"]
-├── child_expert.py           # Child: supervisor_accessible=False
-├── config.py                 # Shared config
-├── prompts.py                # Prompt builders for ALL agents in domain
-├── state.py                  # State classes for ALL agents
-└── shared_tools.py           # Parent tools (children get their own)
-```
+External plugin authors omit `-o packages/` or choose their own approved directory.
+Do not create package scaffolding by hand. The generated namespace, entry points,
+configuration and tests are the starting point; placeholder services/fixtures must
+be replaced with domain implementations.
 
-**No `lobster/__init__.py` anywhere** — PEP 420 namespace package.
+The 1.2 scaffold generates `lobster-ai~=1.2`. Validate the plugin against the engine version that will execute it.
 
-### pyproject.toml
+Keep engine/plugin compatibility aligned. Preserve shared PEP 420 boundaries:
+no plugin `lobster/__init__.py` or `lobster/agents/__init__.py`. A domain's optional
+`__init__.py` should expose only cheap package-specific state, not eager agent
+factories or ImportError-based discovery.
 
-```toml
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "lobster-DOMAIN"
-version = "1.0.0"
-description = "DOMAIN agent for Lobster AI"
-license = "AGPL-3.0-or-later"
-authors = [{name = "Omics-OS", email = "info@omics-os.com"}]
-requires-python = ">=3.12,<3.14"
-dependencies = [
-    "lobster-ai>=1.0.13",
-    # Domain-specific deps here
-]
-
-[project.entry-points."lobster.agents"]
-domain_expert = "lobster.agents.DOMAIN.domain_expert:AGENT_CONFIG"
-# If children exist:
-child_expert = "lobster.agents.DOMAIN.child_expert:AGENT_CONFIG"
-
-[project.entry-points."lobster.states"]
-DomainExpertState = "lobster.agents.DOMAIN.state:DomainExpertState"
-
-# CRITICAL: Enable PEP 420 namespace merging
-[tool.setuptools]
-packages.find = {where = ["."], include = ["lobster*"], namespaces = true}
-```
-
-### __init__.py (PEP 420 Namespace)
-
-PEP 420 namespace packages do not need `__init__.py` at the agent level. Agent discovery happens through entry points in `pyproject.toml`, not eager imports. If you need an `__init__.py` for state exports, keep it minimal:
+## AGENT_CONFIG Before Heavy Imports
 
 ```python
-# __init__.py — PEP 420 namespace, minimal exports only
-# Agent discovery happens through entry points in pyproject.toml
-# Do NOT use try/except ImportError — it contradicts PEP 420 and Hard Rule #8
-
-from lobster.agents.DOMAIN.state import DomainExpertState
-
-__all__ = ["DomainExpertState"]
-```
-
-**WARNING:** Do NOT import agent functions or use `try/except ImportError` here. Entry points handle agent availability — see `pyproject.toml` entry points above.
-
----
-
-## AGENT_CONFIG
-
-**Must be at the TOP of the agent file**, before any heavy imports. Enables <50ms entry point discovery.
-
-```python
-"""Domain Expert agent for Lobster AI."""
-
 from lobster.config.agent_registry import AgentRegistryConfig
 
 AGENT_CONFIG = AgentRegistryConfig(
     name="domain_expert",
     display_name="Domain Expert",
-    description="One-sentence with key capabilities",
-    factory_function="lobster.agents.DOMAIN.domain_expert.domain_expert",
+    description="Specific supported inputs and analyses",
+    factory_function="lobster.agents.domain.domain_expert.domain_expert",
     handoff_tool_name="handoff_to_domain_expert",
-    handoff_tool_description="When to route here: capability A, capability B, capability C",
-    supervisor_accessible=True,       # False for child agents
-    child_agents=["child_expert"],    # or None
+    handoff_tool_description="Route the selected domain's supported analyses here",
+    supervisor_accessible=True,
+    child_agents=None,
 )
-
-# === Heavy imports below ===
-from pathlib import Path
-from typing import Optional
-from langgraph.prebuilt import create_react_agent
-from lobster.config.llm_factory import create_llm
-from lobster.config.settings import get_settings
-from lobster.core.runtime.data_manager import DataManagerV2
 ```
 
-### Field Reference
+Entry-point name must match the config name. `factory_function` is the actual
+module-and-function path. `supervisor_accessible=False` is appropriate for a
+child routed through its parent. Provide concrete handoff descriptions; vague
+"handle domain tasks" text is a poor routing signal.
 
-| Field | Purpose |
-|-------|---------|
-| `name` | Internal ID. Must match entry point name. |
-| `display_name` | Human-readable name for UI/logs. |
-| `description` | Capabilities summary for component registry. |
-| `factory_function` | Dotted path: `"lobster.agents.DOMAIN.domain_expert.domain_expert"` |
-| `handoff_tool_name` | `"handoff_to_{name}"` — tool the supervisor calls. |
-| `handoff_tool_description` | **Critical** — supervisor LLM reads this to decide routing. Be specific. |
-| `supervisor_accessible` | `True` = supervisor routes directly. `False` = only via parent. |
-| `child_agents` | List of child names. `None` = no children. |
+Use the scaffold's factory rather than copying an old complete factory example.
+The standard parameters include `data_manager`, `callback_handler`, `agent_name`,
+`delegation_tools` and `workspace_path`; source signatures determine supported
+optional inference overrides. Use the existing inference-construction path, not
+an independently created LLM that loses the session's authorized context.
 
-**The `handoff_tool_description` is the single most important field for routing.**
+### Infrastructure Import Paths
 
-Good: `"Assign genomics tasks: WGS/SNP QC, GWAS, LD pruning, kinship, clumping, variant annotation."`
-Bad: `"Handle genomics tasks"`
+| Symbol | Module |
+|---|---|
+| AgentRegistryConfig | `lobster.config.agent_registry` |
+| DataManagerV2 | `lobster.core.runtime.data_manager` |
+| AnalysisStep | `lobster.core.provenance.analysis_ir` |
+| create_llm | `lobster.config.llm_factory` |
+| get_settings | `lobster.config.settings` |
+| create_react_agent | `langgraph.prebuilt` |
+| AgentState | `langgraph.prebuilt.chat_agent_executor` |
 
----
+Generated state inherits the appropriate AgentState rather than replacing it with
+a messages-only state that lacks required graph fields. Heavy scientific imports
+belong inside factories/services; no module-level `component_registry` calls.
 
-## Factory Function
+## Tool Construction
+
+Create factory-local tools using real stateless services:
 
 ```python
-def domain_expert(
-    data_manager: DataManagerV2,
-    callback_handler=None,
-    agent_name: str = "domain_expert",
-    delegation_tools: list = None,
-    workspace_path: Optional[Path] = None,
-    provider_override: Optional[str] = None,
-    model_override: Optional[str] = None,
-    **kwargs,
-) -> CompiledGraph:
-    # 1. Lazy prompt import (allows AGENT_CONFIG discovery before prompts.py exists)
-    from lobster.agents.DOMAIN.prompts import create_domain_expert_prompt
+from langchain_core.tools import tool
 
-    # 2. LLM creation
-    settings = get_settings()
-    model_params = settings.get_agent_llm_params("domain_expert")
-    llm = create_llm(
-        "domain_expert", model_params,
-        provider_override=provider_override,
-        model_override=model_override,
-        workspace_path=workspace_path,
+
+@tool
+def assess_quality(modality_name: str) -> str:
+    """Assess the quality of the supplied modality."""
+    adata = data_manager.get_modality(modality_name)
+    output, stats, ir = quality_service.assess(adata)
+    data_manager.store_modality(f"{modality_name}_quality_assessed", output)
+    data_manager.log_tool_usage(
+        "assess_quality",
+        {"modality_name": modality_name},
+        description="Assessed modality quality",
+        ir=ir,
     )
+    return str(stats)
 
-    # 3. Callback wiring
-    if callback_handler and hasattr(llm, "with_config"):
-        callbacks = callback_handler if isinstance(callback_handler, list) else [callback_handler]
-        llm = llm.with_config(callbacks=callbacks)
 
-    # 4. Validate data manager
-    if not isinstance(data_manager, DataManagerV2):
-        raise ValueError("Requires DataManagerV2 for modular analysis")
-
-    # 5. Initialize stateless services
-    quality_service = DomainQualityService()
-    analysis_service = DomainAnalysisService()
-
-    # 6. Create tools via shared_tools factory
-    tools = create_shared_tools(data_manager, quality_service, analysis_service)
-
-    # 7. Add delegation tools for children
-    if delegation_tools:
-        tools = tools + delegation_tools
-
-    # 8. Build prompt and return agent
-    system_prompt = create_domain_expert_prompt()
-    return create_react_agent(
-        model=llm, tools=tools, prompt=system_prompt,
-        name=agent_name, state_schema=DomainExpertState,
-    )
-```
-
-**Key points:**
-- Lazy prompt import (step 1) — enables incremental development
-- Services instantiated inside factory, not at module level
-- `delegation_tools` appended, not prepended — domain tools first in LLM's tool list
-
-### Critical Import Paths
-
-**Do NOT guess these paths.** They are the only correct imports for agent infrastructure:
-
-| Symbol | Correct Import | Common Hallucination |
-|--------|---------------|----------------------|
-| `create_llm` | `from lobster.config.llm_factory import create_llm` | ~~`lobster.core.llm_factory`~~ |
-| `get_settings` | `from lobster.config.settings import get_settings` | ~~`lobster.core.settings`~~ |
-| `AgentRegistryConfig` | `from lobster.config.agent_registry import AgentRegistryConfig` | — |
-| `DataManagerV2` | `from lobster.core.runtime.data_manager import DataManagerV2` | — |
-| `create_react_agent` | `from langgraph.prebuilt import create_react_agent` | — |
-| `AgentState` | `from langgraph.prebuilt.chat_agent_executor import AgentState` | ~~`MessagesState`~~ |
-| `get_logger` | `from lobster.utils.logger import get_logger` | ~~`lobster.core.logger`~~ |
-
-The `lobster.config` package holds LLM/settings/registry. The `lobster.core` package holds data infrastructure. Do not mix them.
-
-**State base class:** Your state class MUST extend `AgentState`, NOT `MessagesState`. `AgentState` adds `remaining_steps` which `create_react_agent` requires at runtime. Using `MessagesState` will pass all structural checks but fail when the graph tries to load the agent.
-
----
-
-## Tool Design (shared_tools.py)
-
-**Contributor only.** Adding tools to an existing agent requires write access to that agent's package source (e.g., `packages/lobster-visualization/`). There is no entry point mechanism to inject tools into another agent's factory from an external package. If you're a plugin author without repo access, your options are:
-1. Contribute the tool upstream (fork → PR)
-2. Create a new agent in your own package that complements the existing one
-
-Every tool follows this exact structure:
-
-```python
-def create_shared_tools(data_manager, quality_service, analysis_service) -> list:
-    """Create domain tools. Returns list of 8-15 tool functions."""
-
-    @tool
-    def assess_quality(modality_name: str) -> str:
-        """Assess data quality. Args: modality_name - dataset to assess."""
-        adata = data_manager.get_modality(modality_name)
-        if adata is None:
-            return f"Error: Modality '{modality_name}' not found. Use list_modalities."
-
-        result, stats, ir = quality_service.assess(adata)
-        new_name = f"{modality_name}_quality_assessed"
-        data_manager.store_modality(new_name, result)
-        data_manager.log_tool_usage("assess_quality", {"modality_name": modality_name}, stats, ir=ir)
-        return f"QC complete. Stored as '{new_name}'. {stats}"
-
-    @tool
-    def normalize_data(modality_name: str, method: str = None) -> str:
-        """Normalize data. Args: modality_name - dataset, method - normalization method."""
-        adata = data_manager.get_modality(modality_name)
-        if adata is None:
-            return f"Error: Modality '{modality_name}' not found."
-
-        result, stats, ir = analysis_service.normalize(adata, method=method)
-        new_name = f"{modality_name}_normalized"
-        data_manager.store_modality(new_name, result)
-        data_manager.log_tool_usage("normalize_data", {"modality_name": modality_name, "method": method}, stats, ir=ir)
-        return f"Normalization ({method}) complete. Stored as '{new_name}'. {stats}"
-
-    return [assess_quality, normalize_data]
-```
-
-### Tool Rules
-
-1. `modality_name` is always the first parameter
-2. Tool name in `log_tool_usage()` must match the function name
-3. `ir=ir` is mandatory — never skip
-4. Return a string — tells the LLM what happened and what to do next
-5. Use `return f"Error: ..."` not exceptions for user-facing errors
-
-### Modality Naming
-
-```
-{source}_{id}                        # raw import
-{source}_{id}_quality_assessed       # after QC
-{source}_{id}_filtered               # after filtering
-{source}_{id}_normalized             # after normalization
-{source}_{id}_clustered              # after clustering
-{source}_{id}_annotated              # after annotation
-{source}_{id}_de_results             # differential expression
-```
-
-### Anti-Patterns
-
-| Anti-Pattern | Fix |
-|-------------|-----|
-| Missing `ir=ir` in log_tool_usage | Always pass IR |
-| `len(param)` without None guard | `len(param) if param else 'all'` |
-| Inline tool definitions in agent file | Use `shared_tools.py` factory |
-| Module-level `component_registry` calls | Use lazy functions inside factory |
-| Silent platform default | Log warning when auto-detecting |
-
----
-
-## Platform-Aware Design
-
-Use when one agent handles multiple data sub-types (e.g., LC-MS vs GC-MS vs NMR).
-
-### PlatformConfig
-
-```python
-# config.py
-@dataclass
-class PlatformConfig:
-    platform_type: str
-    display_name: str
-    default_normalization: str
-    default_imputation: str
-    log_transform: bool
-    max_missing_per_sample: float
-    max_missing_per_feature: float
-
-PLATFORM_CONFIGS: Dict[str, PlatformConfig] = {
-    "lc_ms": PlatformConfig(platform_type="lc_ms", display_name="LC-MS", ...),
-    "gc_ms": PlatformConfig(...),
-    "nmr": PlatformConfig(...),
+assess_quality.metadata = {
+    "categories": ["QUALITY"],
+    "provenance": True,
+    "suggests_templates": ["sc.qc"],  # only when that installed template matches the output
 }
+assess_quality.tags = ["QUALITY"]
 ```
 
-### Auto-Detection + Usage in Tools
+This is an illustrative wrapper; `quality_service.assess` must be implemented
+and produce the data expected by the suggested template. Avoid unsupported
+suggestions: contract tests resolve declared names against the installed catalog.
+
+- Metadata/tags are assigned after `@tool`, with the primary category first.
+- Use parameterized collection annotations such as `list[str]`, not bare `list`.
+- Use a fresh metadata dictionary per tool and matching category tags.
+- Log a real IR describing the same operation, inputs, output and parameters.
+- Do not assume every tool's first argument is a modality; import/search tools
+  have different contracts. Follow the actual exposed schema.
+- A returned error string is not successful science just because invocation
+  returned normally. Tests must reject it.
+
+## Scientific Results and Figures
+
+An ordinary scientific tool produces data/results and may suggest a template.
+It must not silently stage/save a figure as a side effect. Templates draw from
+retained results without refitting or mutating the input. QC drawing requires
+`assess_data_quality` first, then `create_qc_plots` on the full QC-assessed modality;
+drawing does not compute missing metrics or accept DE/small-gene subsets.
+
+For a supported figure producer, use the shared staging/saving path. Preview is
+not a stored revision; report save outcomes, not merely Python object creation.
+Custom-code figures require `submit_figure` explicitly. An edit loads a literal
+saved revision ref and resubmits with the same parent; it does not replace the
+original. Source data and Plotly config must be handled explicitly.
+
+Add the executed figure contract alongside agent/AQUADIF tests. Ordinary
+provenance-category tools need representative valid cases or explicit skip
+reasons; transitional producers cannot skip and need saving cases. See
+[testing.md](testing.md), [plugin-architecture.md](plugin-architecture.md) and
+[aquadif-contract.md](aquadif-contract.md).
+
+Factories offering custom code must use
+`lobster.tools.code_tool_switch.attach_code_tool(tools, data_manager, AGENT_CONFIG.name,
+ default=AGENT_CONFIG.code_tool_default)` rather than constructing and appending
+the tool unconditionally. The helper returns a new tool list; use that result.
+When disabled, it does not construct the code execution service. Declare the
+plugin's default explicitly if code access is intended; the registry default is
+`False`. The supervisor and selected built-ins enable it by default, but
+`research_agent` has no code-tool wiring. See [cli.md](cli.md#code-tool-availability)
+for canonical env names, workspace settings, precedence and limitations.
+Custom code runs as your own OS user, not within a confinement boundary; run only code you trust.
+
+## Prompt Design
+
+The tool schema already carries names, parameters and docstrings. Do not duplicate
+that catalog in a system prompt. The prompt should explain decision order,
+scientific assumptions, boundaries and when to delegate.
+
+Useful sections:
+
+- Identity and domain responsibility.
+- Constraints: unsupported tasks, representation requirements and output boundaries.
+- Operational rules: sequential dependencies, replicate/design checks, naming,
+  provenance, refusals and bounded retry behavior.
+- Decision trees: when to choose an operation, ask for metadata or delegate.
+
+Do not write "always normalize before DE". Analysis representation is method-
+specific: count-model DE must preserve raw counts even when a normalized copy is
+used for exploratory plots. Do not claim an analysis completed without inspecting
+its actual outputs.
+
+## Error Recovery and Privacy
+
+`InferenceRefused` is terminal for the current authorized operation. Generic
+recovery handlers must propagate it before logging exceptions or returning a
+fallback:
 
 ```python
-def create_shared_tools(data_manager, ..., force_platform_type=None):
-    _forced = force_platform_type
+from lobster.core.exceptions import reraise_inference_refusal
 
-    def _get_platform(modality_name):
-        if _forced:
-            return get_platform_config(_forced)
-        adata = data_manager.get_modality(modality_name)
-        return get_platform_config(detect_platform_type(adata))
-
-    @tool
-    def normalize(modality_name: str, method: str = None) -> str:
-        platform = _get_platform(modality_name)
-        method = method or platform.default_normalization  # Auto-default
-        # ... rest of tool
+try:
+    result = run_operation()
+except Exception as error:
+    reraise_inference_refusal(error)
+    # Handle only the remaining domain errors with a bounded, safe response.
+    raise
 ```
 
----
+Do not expose raw SDK request bodies or secrets, switch credentials silently, or
+interpret a budget/policy failure as permission to run alternative science.
+Handle custom-code execution as powerful code access, not a confinement claim.
 
-## System Prompts (prompts.py)
+## Completion Checklist
 
-**Cardinal rule: NEVER describe a tool in both the system prompt AND the tool's docstring.** LangGraph serializes every `@tool` docstring into the JSON tool schema sent on every API call. If you also list tools in a `<Your_Tools>` section, the LLM sees the same info twice — wasting tokens and creating split-brain maintenance.
-
-**Budget targets:** Prompt text should be 800-1200 tokens. Combined prompt + tool schemas should stay under 50% of the smallest target model's context window when added to supervisor overhead (~4,300 tokens).
-
-**What goes WHERE:**
-
-| Information | Goes in... | NOT in... |
-|------------|-----------|-----------|
-| Tool parameters, types | `@tool` docstring | System prompt |
-| When to use tool A vs B | `<Decision_Trees>` | Tool docstring |
-| Hard boundaries | `<Constraints>` | Scattered across sections |
-| Error recovery guidance | Tool return values (just-in-time) | System prompt |
-| Domain workflows from GPTomics | `<Decision_Trees>` branches | Duplicate `<Your_Tools>` listing |
-
-```python
-def create_domain_expert_prompt() -> str:
-    return f"""You are the Domain Expert in Lobster AI. You handle [domain]-specific
-analysis under the supervisor. You never interact with end users directly.
-
-<Constraints>
-DO: [2-3 bullet points — what this agent handles]
-DO NOT:
-- Literature search (research_agent), downloads (data_expert), direct user communication
-- [domain-specific boundary, e.g., "generic CSV loading — data_expert handles via adapters"]
-</Constraints>
-
-<Operational_Rules>
-1. [Sequencing — what must be sequential vs parallel]
-2. [Error handling — fail-fast, retry limits]
-3. [Naming — modality naming pattern: {{source}}_{{operation}}]
-4. [Domain-specific — e.g., "always normalize before DE", from GPTomics research]
-5. Provenance: every data-modifying tool must pass ir=ir to log_tool_usage
-</Operational_Rules>
-
-<Decision_Trees>
-
-TASK_TYPE_1 (most common):
-  tool_a → tool_b →
-  ├─ Good result → tool_c
-  └─ Error → investigate, retry once
-
-TASK_TYPE_2:
-  tool_d(params) →
-  ├─ Condition A → handoff_to_child_expert
-  └─ Condition B → tool_e
-
-OUTSIDE SCOPE:
-  → Report to supervisor, recommend correct agent
-
-</Decision_Trees>
-
-Today's date is {{date.today().isoformat()}}.
-"""
-```
-
-**Note:** No `<Your_Tools>`, no `<Your_Environment>`, no `<Communication_Style>`. Tool schemas carry the "how"; decision trees carry the "when"; constraints carry the "what not". If you discovered domain workflows from GPTomics, encode them as decision tree branches — NOT as a duplicate tool listing.
-
-### Required Sections
-
-| Section | Purpose | Target Size | Required |
-|---------|---------|-------------|----------|
-| Identity (1-2 sentences) | Who, role, reports to supervisor | ~50 tok | Yes |
-| `<Constraints>` | DO/DO NOT boundaries | ~100-200 tok | Yes |
-| `<Operational_Rules>` | Numbered rules: sequencing, errors, naming | ~200-400 tok | Yes |
-| `<Decision_Trees>` | WHEN to use which tool, tree-structured routing | ~200-500 tok | Yes |
-| Domain-specific (1 section max) | Adapters, platform routing, validation levels | ~100-200 tok | If needed |
-| Date footer | `Today's date is {date.today().isoformat()}.` | ~10 tok | Yes |
-
-**NEVER include** (they duplicate tool schemas or waste tokens):
-
-| Removed Section | Why | Where info lives instead |
-|----------------|-----|--------------------------|
-| `<Your_Tools>` | Duplicates tool docstrings | Tool schemas (auto-serialized) |
-| `<Your_Environment>` | Unnecessary context | Agent knows it's an LLM |
-| `<Example_Workflows>` | Duplicates decision trees | `<Decision_Trees>` |
-| `<Communication_Style>` | Generic formatting | Models already format well |
-| `<Core_Capabilities>` | Duplicates constraints | `<Constraints>` DO list |
-
----
-
-## Parent-Child Hierarchy
-
-### Topology
-
-```
-Supervisor
-├── research_agent (parent)
-│   └── metadata_assistant (child, shared)
-├── data_expert_agent (parent)
-│   └── metadata_assistant (child, shared)
-├── transcriptomics_expert (parent)
-│   ├── annotation_expert (child)
-│   └── de_analysis_expert (child)
-├── genomics_expert (parent)
-│   └── variant_analysis_expert (child)
-├── proteomics_expert (parent)
-│   ├── proteomics_de_analysis_expert (child)
-│   └── biomarker_discovery_expert (child)
-├── machine_learning_expert (parent)
-│   ├── feature_selection_expert (child)
-│   └── survival_analysis_expert (child)
-├── drug_discovery_expert (parent)
-│   ├── cheminformatics_expert (child)
-│   ├── clinical_dev_expert (child)
-│   └── pharmacogenomics_expert (child)
-├── metabolomics_expert (no children)
-├── visualization_expert_agent (no children)
-└── protein_structure_visualization_expert (no children)
-```
-
-**Rules:** Supervisor → parents only. Parents → children via `delegation_tools`. No child-to-child.
-
-**Parent AGENT_CONFIG:** `supervisor_accessible=True, child_agents=["child_name"]`
-**Child AGENT_CONFIG:** `supervisor_accessible=False, child_agents=None`
-
-The graph builder uses lazy delegation tools — children are resolved at invocation time, not creation time.
-
----
-
-## Testing
-
-See [testing.md](testing.md) for full testing patterns, fixtures, and CI setup.
-
-**Required for every new agent:**
-- Contract tests via `AgentContractTestMixin` (validates AQUADIF compliance, factory signature, entry points)
-- Tool unit tests (mock `data_manager`, verify `ir=ir` in `log_tool_usage`)
-- Semantic prompt tests (all required XML sections present, all tools documented by name)
-
----
-
-## Checklist: New Agent from Zero to PR
-
-```
-RESEARCH
-[ ] 1. Audit domain — data formats, workflows, key libraries
-[ ] 2. Inventory candidate tools by workflow stage
-[ ] 3. Decide: new package vs extend existing
-[ ] 4. Decide: parent-only vs parent+children
-[ ] 5. Decide: platform-aware defaults needed?
-
-AQUADIF
-[ ] 5a. Map candidate tools to AQUADIF categories (see aquadif-contract.md)
-[ ] 5b. Verify: parent has IMPORT + QUALITY + ANALYZE or DELEGATE
-[ ] 5c. Set .metadata and .tags on every tool in create_shared_tools()
-
-SCAFFOLD
-[ ] 6. Create package directory structure
-[ ] 7. Write pyproject.toml with entry points
-[ ] 8. Create state.py with state class
-[ ] 9. Create config.py with constants + PlatformConfig if needed
-
-IMPLEMENT
-[ ] 10. Write services following 3-tuple contract
-[ ] 11. Write shared_tools.py with tool factory (8-15 tools)
-[ ] 12. Write AGENT_CONFIG at top of agent file
-[ ] 13. Write factory function
-[ ] 14. Write prompts.py with all required sections
-[ ] 15. Write __init__.py — PEP 420 namespace, NO try/except ImportError (use entry points for discovery)
-
-TEST
-[ ] 16. Contract tests pass
-[ ] 17. Tool unit tests pass
-[ ] 18. Semantic prompt tests pass
-[ ] 19. Agent creates successfully with mock data_manager
-
-INTEGRATE
-[ ] 20. Entry points registered and discoverable
-[ ] 21. Graph wires agent correctly
-[ ] 22. Supervisor routes for relevant queries
-[ ] 23. Child handoffs work (if applicable)
-
-VERIFY
-[ ] 24. Tool count in 8-15 range
-[ ] 25. All tools log with ir=ir
-[ ] 26. Modality naming follows conventions
-[ ] 27. Prompt documents all tools by name
-[ ] 28. No module-level component_registry calls
-[ ] 29. No try/except ImportError in __init__.py (use entry points, not eager imports)
-```
+- Need and overlap assessment completed for new capabilities.
+- Package generated with scaffold; entry points/config/factory paths agree.
+- Real stateless services and typed tool schemas implemented.
+- Metadata/tags, real IR and template suggestions match runtime behavior.
+- Focused scientific/refusal tests and executed figure cases use real fixtures.
+- Placeholder `tools_required=False` changed once working tools exist.
+- Local discovery, approved CLI behavior and output paths checked.
+- Prompt decision trees do not duplicate the schema catalog.
+- Documentation describes only the delivered behavior; publication needs approval.

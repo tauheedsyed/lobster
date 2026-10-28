@@ -1,120 +1,111 @@
 ---
 name: lobster-dev
 description: |
-  Develop, extend, and contribute to Lobster AI — the multi-agent self-extending bioinformatics engine.
-  Use when working on Lobster codebase, creating agents/services, understanding architecture,
-  fixing bugs, adding features, or contributing to the open-source project.
-
-  IMPORTANT: Before creating new agents or packages, follow the planning
-  workflow first (see "What To Do Based On Your Task" → planning-workflow.md).
-
-  Trigger phrases: "add agent", "create service", "extend lobster", "contribute",
-  "understand architecture", "how does X work in lobster", "fix bug", "add feature",
-  "write tests", "lobster development", "agent development", "bioinformatics code",
-  "build a new agent for", "add support for", "create plugin", "new domain"
+  Develop and extend Lobster AI: agent plugins, stateless services, tool metadata,
+  provenance IR, figure templates, contract tests, and local CLI behavior.
+  Use for creating an agent or service, fixing Lobster code, adding a tool,
+  understanding architecture, migrating a plugin, or writing tests.
+  Before adding a new capability, follow the need-first planning workflow.
+  Generate new agent packages with lobster scaffold agent, not by hand.
 ---
 
-# Lobster AI Development Guide
+# Lobster AI Development Guide — 1.2
 
-**Lobster AI** is an open-source multi-agent bioinformatics engine (LangGraph, Python 3.12+) powering **Omics-OS**. Lobster solves bioinformatics tasks starting from raw data to scientific insights to visualization using supervisor multi-agent architecture. This skill teaches you how to extend it — from adding a single tool to building entire domain agent packages.
+Lobster AI is the Python bioinformatics engine powering Omics-OS. Plugins are
+namespace packages discovered through entry points. This skill covers engine
+implementation; the supported Cloud client is npm `@omicsos/lobster`, a separate
+client contract, not Python/Go Cloud compatibility.
 
-## Step 0: Discover Your Environment
-
-Before any work, determine what's available and how you're working:
+## Start with the Installed Environment and Source
 
 ```bash
-# 1. Is lobster installed? Where?
 which lobster
 lobster --version
-
-# 2. What agents are already installed?
-python -c "from lobster.core.component_registry import component_registry; component_registry.reset(); print(component_registry.list_agents())"
-
-# 3. Where is lobster source? (for reading reference implementations)
-python -c "import lobster; print(lobster.__path__)"
-
-# 4. Are you in the lobster repo, or building a standalone plugin?
-ls packages/lobster-*/pyproject.toml 2>/dev/null && echo "CONTRIBUTOR" || echo "PLUGIN_AUTHOR"
+uv run python -c "import lobster; print(list(lobster.__path__))"
+uv run python -c "from lobster.core.component_registry import component_registry; print(sorted(component_registry.list_agents()))"
 ```
 
-**HARD GATE — If `lobster` is not installed, STOP. Install it NOW before doing anything else:**
+Run Python inspection in the environment containing the engine and plugin.
+Do not modify installed site-packages. If the engine is unavailable, get user
+approval before installation or environment changes:
+
 ```bash
-uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install 'lobster-ai[anthropic]'  # or [openai], [google], depending on provider
-lobster --version  # Must succeed before you proceed
-```
-Do NOT skip this. Do NOT "come back to it later". Do NOT manually create package directories.
-`lobster scaffold agent` is the ONLY way to create new agent packages — it generates correct
-PEP 420 structure, entry points, AQUADIF metadata, and contract tests that you WILL get wrong
-by hand. If scaffold is unavailable, installing lobster-ai is your first task.
-
-**Your development mode determines your workflow:**
-
-| Mode | How you got here | Where you create packages | How you test |
-|---|---|---|---|
-| **Contributor** | `git clone` + `make dev-install` | Inside `packages/` in the repo | `make test`, full repo access |
-| **Plugin author** | `uv pip install lobster-ai` or `uv tool install` | Anywhere — scaffold creates standalone packages | `uv pip install -e ./lobster-<domain>/` then `pytest` |
-
-Both modes produce the same result: a PEP 420 namespace package discovered by `ComponentRegistry` via entry points. The scaffold output is identical — a standalone package that works in either mode.
-
-## What To Do Based On Your Task
-
-| You want to... | Fast path? | Read these references (in order) |
-|---|---|---|
-| **Create a new agent** for a new domain | No — full workflow | [planning-workflow.md](references/planning-workflow.md) → [scaffold.md](references/scaffold.md) → [creating-agents.md](references/creating-agents.md) → [aquadif-contract.md](references/aquadif-contract.md) |
-| **Add a tool** to an existing agent | Yes (contributor only) | [creating-agents.md](references/creating-agents.md) §Tool Design → [aquadif-contract.md](references/aquadif-contract.md) |
-| **Extend an agent** with a child agent | No — needs scoping | [creating-agents.md](references/creating-agents.md) §Parent-Child → [scaffold.md](references/scaffold.md) |
-| **Add a database provider or adapter** | No | [plugin-architecture.md](references/plugin-architecture.md) |
-| **Create or modify a service** | Yes | [creating-services.md](references/creating-services.md) |
-| **Fix a bug** | Yes | [code-layout.md](references/code-layout.md) → [architecture.md](references/architecture.md) |
-| **Understand the codebase** | — | [architecture.md](references/architecture.md) → [code-layout.md](references/code-layout.md) |
-| **Write or fix tests** | Yes | [testing.md](references/testing.md) |
-| **Migrate AQUADIF metadata** on existing agent | Yes | [aquadif-contract.md](references/aquadif-contract.md) §Migration |
-| **Find domain knowledge** for a new agent | — | [bioskills-bridge.md](references/bioskills-bridge.md) |
-
-**"Fast path"** = skip the planning workflow, go straight to the reference files.
-
-## Examples
-
-### Example 0: THE WORKFLOW FOR EVERYTHING
-
-user requests: "Build a Lobster agent for epigenomics analysis (bisulfite-seq, ChIP-seq, ATAC-seq) because no lobster packages cover this domain"
-
-```
-Step 1: lobster --version          # Not found? Install it FIRST (see Step 0 hard gate)
-Step 2: Read planning-workflow.md  # Understand need, check what exists, gather domain knowledge
-Step 3: lobster scaffold agent ... # Generate correct package structure (NEVER skip this)
-Step 4: Fill in real domain logic  # Read creating-agents.md, creating-services.md
-Step 5: lobster validate-plugin ./lobster-<domain>/  # Must pass 8/8
-Step 6: uv pip install -e ./lobster-<domain>/ && pytest tests/ -m contract
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python 'lobster-ai[anthropic]~=1.2'
 ```
 
-**Expected result:** A standalone PEP 420 package at `./lobster-<your implementation>/` that installs with `uv pip install -e ./lobster-<your implementation>/` and registers via entry points, runs 'lobster status' without errors and running 'lobster query "hi"' without any errors.
+A `uv tool` installation is isolated from a project's Python environment. For
+plugin development, keep engine and plugin in the same `.venv`. When npm's
+`lobster` wins PATH, `uv run python -m lobster` targets the local engine explicitly.
 
-## Success Criteria
+## Choose the Workflow
 
-Before calling your work done, verify:
+| Task | Read |
+|---|---|
+| New domain/capability | [planning-workflow.md](references/planning-workflow.md) → [scaffold.md](references/scaffold.md) → [creating-agents.md](references/creating-agents.md) |
+| Existing agent tool | [creating-agents.md](references/creating-agents.md) → [aquadif-contract.md](references/aquadif-contract.md) |
+| Stateless service | [creating-services.md](references/creating-services.md) |
+| Adapter/provider/omics extension | [plugin-architecture.md](references/plugin-architecture.md) |
+| Figure template or saved-figure behavior | [plugin-architecture.md](references/plugin-architecture.md) → [testing.md](references/testing.md) |
+| Contract migration | [aquadif-migration.md](references/aquadif-migration.md) |
+| Tests | [testing.md](references/testing.md) |
+| Source discovery / architecture | [code-layout.md](references/code-layout.md) → [architecture.md](references/architecture.md) |
+| Local developer commands | [cli.md](references/cli.md) |
+| External domain knowledge | [bioskills-bridge.md](references/bioskills-bridge.md) |
 
-- [ ] `python scripts/validate_plugin.py <plugin-dir>` passes 8/8 checks
-- [ ] Contract tests green: `pytest tests/ -m contract`
-- [ ] Every `@tool` has `.metadata` and `.tags` assigned immediately after
-- [ ] Every provenance-required tool (IMPORT, QUALITY, FILTER, PREPROCESS, ANALYZE, ANNOTATE, SYNTHESIZE) calls `log_tool_usage(ir=ir)`
-- [ ] No `lobster/__init__.py` or `lobster/agents/__init__.py` (PEP 420)
+## Scaffold First
+
+```bash
+lobster scaffold agent --name domain_expert --display-name "Domain Expert" \
+  --description "Analyze the chosen biological domain"
+lobster validate-plugin ./lobster-domain/
+```
+
+Fill in the generated domain logic and replace placeholder contract fixtures with
+small real fixtures and scientific assertions. Structural validation does not
+establish that the biology is correct or that a notebook produces the same outputs.
+
+The 1.2 scaffold generates `lobster-ai~=1.2`; keep the plugin's compatibility range aligned with the installed engine.
+
+The bundled `scripts/validate_plugin.py` is **superseded** by
+`lobster validate-plugin`. It is retained for compatibility; use the installed
+engine's command and current test kit, not that older script as a release gate.
 
 ## Hard Rules
 
-Non-negotiable. Violating these causes runtime failures or contract test failures.
+1. Discover components through `ComponentRegistry` and entry points, not a
+   hardcoded agent catalog or module-level registry calls.
+2. Put `AGENT_CONFIG` before heavy imports; load scientific dependencies lazily.
+3. Keep analysis services stateless and returning `(AnnData or None, dict, AnalysisStep)`.
+4. For provenance-required tools, pass a real `ir` into `log_tool_usage`;
+   literal `ir=None` is hollow. Record parameters, transformations and outcomes.
+5. Preserve PEP 420 boundaries: no `lobster/__init__.py` or shared namespace
+   `__init__.py` in a plugin. Avoid eager cross-agent imports and ImportError guards
+   pretending to perform agent discovery.
+6. Every tool has AQUADIF `.metadata` and `.tags`, assigned after `@tool`;
+   primary category first, parameterized collection types in its schema.
+7. Ordinary scientific tools should provide results and template suggestions,
+   not silently save figures. Use the shared saved-figure path for a figure producer.
+8. Run the current `AgentContractTestMixin` and `FigureContractTestMixin` cases.
+   A metadata declaration or placeholder reply assertion is not an execution check.
+9. Preserve raw-count source for DESeq2; never round normalized values to satisfy
+   count validation. Drawing a figure must not rerun an analysis unnecessarily.
+10. Propagate terminal `InferenceRefused` through recovery handlers; do not switch
+    inference authority or expose raw SDK errors/request payloads to the user.
 
-1. **ComponentRegistry is truth** — agents discovered via entry points, NOT hardcoded registries
-2. **AGENT_CONFIG at module top** — define before heavy imports for <50ms entry point discovery
-3. **Services return 3-tuple** — `(AnnData, Dict, AnalysisStep)` always
-4. **Always pass `ir=ir`** — every `log_tool_usage()` call for provenance-required tools
-5. **No `lobster/__init__.py`** — PEP 420 namespace package (also no `lobster/agents/__init__.py`)
-6. **No `try/except ImportError`** — use entry points for agent discovery, not eager imports
-7. **No module-level `component_registry` calls** — causes slow startup; use lazy functions inside factories
-8. **All tools MUST have AQUADIF metadata** — `.metadata` and `.tags` assigned after `@tool` decorator
-9. **NEVER manually create package directories** — always use `lobster scaffold agent`. If lobster is not installed, install it first. Scaffold gets PEP 420, entry points, and contract tests right; you won't.
+Custom-code exposure uses `attach_code_tool` and the canonical registry name. The supervisor, `data_expert_agent`, `metadata_assistant`, and `visualization_expert_agent` default to enabled; other participating built-in experts default to disabled. `research_agent` does not offer this tool. See [CLI configuration](references/cli.md#code-tool-availability) for overrides and precedence. Code runs as your own OS user, not within a confinement boundary; run only code you trust.
 
-## Contributing
+## Completion Checklist
 
-After building a plugin, ask your user if they want to submit a PR. If confirmed: fork → feature branch → `make test` → `make format` → PR with clear description.
+- [ ] Canonical `lobster validate-plugin` has no unresolved failures or warnings.
+- [ ] Focused contract and scientific tests cover valid inputs, refusals and outputs.
+- [ ] Real IR is tested against the recorded transformation, not just its presence.
+- [ ] Figure cases cover relevant tools, previews and save outcomes; skip reasons
+      are explicit and not represented as tested behavior.
+- [ ] Required entry points are discovered in the same environment as the engine.
+- [ ] Changes have user-facing documentation with appropriately bounded claims.
+
+Use `uv run pytest` for Python tests. Run only the scope approved for the task;
+never turn a documentation audit into installs, network inference or a full suite.
+Before contribution, ask whether the user wants publication. A fork, push, PR,
+package release or tag is not implied by permission to make a local change.

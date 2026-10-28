@@ -1,326 +1,175 @@
-# Testing Guide
+# Testing Plugins and Scientific Outputs — Lobster AI 1.2
 
-How to test Lobster AI components effectively.
+Passing a structural check is not scientific qualification. Test the actual tool,
+data transformation, refusal and saved-file outcome using representative inputs.
+Run only the scope approved for the task; keep provider calls and external network
+out of unit/contract tests.
 
-## Quick Commands
-
-```bash
-# Run all tests
-make test
-
-# Unit tests only (fast)
-pytest tests/unit/ -v
-
-# Integration tests
-pytest tests/integration/ -v
-
-# Specific test file
-pytest tests/unit/test_my_feature.py -v
-
-# Specific test function
-pytest tests/unit/test_my_feature.py::test_specific_function -v
-
-# With coverage
-pytest --cov=lobster tests/
-
-# Parallel execution
-pytest -n auto tests/
-```
-
-## Test Structure
-
-```
-tests/
-├── unit/                     # Fast, isolated tests
-│   ├── agents/
-│   ├── services/
-│   ├── core/
-│   └── tools/
-├── integration/              # Tests with external deps
-│   ├── test_workflows.py
-│   └── test_downloads.py
-├── conftest.py               # Shared fixtures
-└── fixtures/                 # Test data
-```
-
-## Fixtures (`conftest.py`)
-
-```python
-import pytest
-import anndata as ad
-import numpy as np
-
-@pytest.fixture
-def sample_adata():
-    """Standard AnnData for testing."""
-    return ad.AnnData(
-        X=np.random.rand(100, 50),
-        obs={"cell_type": ["A"] * 50 + ["B"] * 50},
-        var={"gene_name": [f"gene_{i}" for i in range(50)]}
-    )
-
-@pytest.fixture
-def mock_data_manager(sample_adata):
-    """Mock DataManagerV2 with v1.0.0 methods."""
-    from unittest.mock import MagicMock
-    dm = MagicMock()
-    dm.get_modality.return_value = sample_adata
-    dm.list_modalities.return_value = ["test_modality"]
-    dm.store_modality.return_value = None
-    dm.log_tool_usage.return_value = None
-    return dm
-
-@pytest.fixture
-def mock_llm():
-    """Mock LLM for agent tests."""
-    from unittest.mock import MagicMock
-    llm = MagicMock()
-    llm.invoke.return_value = "Test response"
-    return llm
-```
-
-## Testing Services
-
-```python
-# tests/unit/services/test_my_service.py
-
-import pytest
-from lobster.services.analysis.my_service import MyService
-
-
-class TestMyService:
-    """Tests for MyService."""
-    
-    def test_returns_3_tuple(self, sample_adata):
-        """Service must return (AnnData, dict, AnalysisStep)."""
-        service = MyService()
-        result = service.analyze(sample_adata, param="test")
-        
-        assert len(result) == 3
-        adata, stats, ir = result
-        
-        assert isinstance(adata, ad.AnnData) or adata is None
-        assert isinstance(stats, dict)
-        assert hasattr(ir, "activity_type")
-    
-    def test_stats_contain_required_fields(self, sample_adata):
-        """Stats must include status."""
-        service = MyService()
-        _, stats, _ = service.analyze(sample_adata, param="test")
-        
-        assert "status" in stats
-    
-    def test_provenance_captures_params(self, sample_adata):
-        """IR must capture all parameters."""
-        service = MyService()
-        _, _, ir = service.analyze(sample_adata, param="test", extra=42)
-        
-        assert ir.params["param"] == "test"
-        assert ir.params["extra"] == 42
-    
-    def test_handles_empty_data(self):
-        """Service handles edge cases gracefully."""
-        service = MyService()
-        empty_adata = ad.AnnData(X=np.array([]).reshape(0, 10))
-        
-        result = service.analyze(empty_adata, param="test")
-        assert result[1]["status"] in ("complete", "warning")
-```
-
-## Testing Agents
-
-Use the **AgentContractTestMixin** for standard contract validation:
-
-```python
-# tests/test_contract.py
-from lobster.testing import AgentContractTestMixin
-
-
-class TestMyExpertAgent(AgentContractTestMixin):
-    """Contract tests for my_expert_agent."""
-
-    agent_module = "lobster.agents.mydomain.my_agent"
-    factory_name = "my_expert_agent"  # Must match factory function name
-```
-
-For custom agent tests:
-
-```python
-# tests/unit/agents/test_my_agent.py
-
-import pytest
-from unittest.mock import MagicMock, patch
-
-
-class TestMyAgent:
-    """Additional tests for my_expert_agent."""
-
-    def test_agent_config_exists(self):
-        """AGENT_CONFIG must be AgentRegistryConfig."""
-        from lobster.agents.mydomain.my_agent import AGENT_CONFIG
-        from lobster.config.agent_registry import AgentRegistryConfig
-
-        assert isinstance(AGENT_CONFIG, AgentRegistryConfig)
-        assert AGENT_CONFIG.name == "<domain>_expert"
-
-    def test_agent_config_loads_fast(self):
-        """Config must load in <50ms (entry point discovery)."""
-        import time
-        start = time.time()
-
-        from lobster.agents.mydomain.my_agent import AGENT_CONFIG
-
-        elapsed = time.time() - start
-        assert elapsed < 0.05, f"Config load took {elapsed}s, must be <50ms"
-
-    def test_factory_signature(self):
-        """Factory must have standard signature."""
-        import inspect
-        from lobster.agents.mydomain.my_agent import my_expert_agent
-
-        sig = inspect.signature(my_expert_agent)
-        params = list(sig.parameters.keys())
-
-        assert "data_manager" in params
-        assert "delegation_tools" in params  # NOT handoff_tools
-        assert "workspace_path" in params
-        assert "handoff_tools" not in params  # Deprecated
-```
-
-## Testing Core Components
-
-```python
-# tests/unit/core/test_component_registry.py
-
-import pytest
-
-
-class TestComponentRegistry:
-    """Tests for ComponentRegistry."""
-    
-    def test_discovers_agents(self):
-        """Registry discovers installed agents."""
-        from lobster.core.component_registry import ComponentRegistry
-        
-        registry = ComponentRegistry()
-        agents = registry.get_available_agents()
-        
-        assert len(agents) > 0
-        assert "supervisor" in [a["name"] for a in agents]
-    
-    def test_get_agent_returns_config(self):
-        """get_agent returns valid config."""
-        from lobster.core.component_registry import ComponentRegistry
-        
-        registry = ComponentRegistry()
-        config = registry.get_agent("supervisor")
-        
-        assert config is not None
-        assert "name" in config
-        assert "description" in config
-```
-
-## Mocking External Dependencies
-
-```python
-# Mocking LLM calls
-@patch("langchain_core.language_models.BaseLLM.invoke")
-def test_with_mocked_llm(mock_invoke, sample_adata):
-    mock_invoke.return_value = "Mocked response"
-    # Your test code
-
-# Mocking data loading
-@patch.object(DataManagerV2, "get_current_modality_data")
-def test_with_mocked_data(mock_get_data, sample_adata):
-    mock_get_data.return_value = sample_adata
-    # Your test code
-
-# Mocking external APIs
-@patch("requests.get")
-def test_with_mocked_api(mock_get):
-    mock_get.return_value.json.return_value = {"data": "test"}
-    # Your test code
-```
-
-## Integration Tests
-
-```python
-# tests/integration/test_workflow.py
-
-import pytest
-
-@pytest.mark.integration
-@pytest.mark.slow
-def test_full_analysis_workflow(tmp_path):
-    """Test complete analysis from data load to results."""
-    from lobster.core.client import AgentClient
-    
-    client = AgentClient(workspace_dir=str(tmp_path))
-    
-    # Load data
-    result = client.query("Load test_data.h5ad")
-    assert "loaded" in result.lower()
-    
-    # Run analysis
-    result = client.query("Run QC and clustering")
-    assert "complete" in result.lower()
-    
-    # Check outputs
-    assert (tmp_path / "results").exists()
-```
-
-## Test Markers
-
-```python
-# In pyproject.toml
-[tool.pytest.ini_options]
-markers = [
-    "slow: marks tests as slow",
-    "integration: integration tests",
-    "requires_network: needs internet",
-    "premium: tests premium features",
-]
-
-# Usage
-@pytest.mark.slow
-def test_slow_operation():
-    pass
-
-@pytest.mark.skip(reason="Not implemented yet")
-def test_future_feature():
-    pass
-```
-
-## CI/CD Considerations
+## Focused Commands
 
 ```bash
-# Fast CI (unit only)
-pytest tests/unit/ -v --timeout=60
-
-# Full CI (all tests)
-pytest tests/ -v --timeout=300 --ignore=tests/integration/slow/
-
-# Coverage report
-pytest --cov=lobster --cov-report=xml tests/
+uv run pytest packages/lobster-domain/tests/ -m contract -v
+uv run pytest tests/unit/test_my_feature.py -v
+uv run pytest tests/unit/test_my_feature.py::test_specific_case -v
+lobster validate-plugin ./packages/lobster-domain/
 ```
 
-## AQUADIF Contract Tests
+The domain/test paths are placeholders for your package. External plugin authors
+run the generated package's `tests/` from its directory. Use the same environment
+for the engine, installed editable plugin and test runner. Do not start with
+unbounded parallelism or the full suite when a small focused check is sufficient.
 
-All agents are validated for AQUADIF compliance using `AgentContractTestMixin` (14 methods). These run on every CI push/PR via `.github/workflows/ci-basic.yml`.
+## Static Validator vs Executed Tests
 
-**Run contract tests locally:**
-```bash
-pytest -m contract                      # All agents
-pytest -m contract -k transcriptomics   # Single package
+`lobster validate-plugin` inspects package structure, entry points, config position,
+factory signatures, metadata/provenance declarations, imports and figure-contract
+declarations. It is not an execution test. It may still warn rather than fail for
+an old hollow `ir=None` declaration; that does **not** make the IR acceptable.
+`AgentContractTestMixin` rejects hollow provenance and unreadable tool source.
+
+The bundled skill `scripts/validate_plugin.py` is superseded by the installed
+engine's `lobster validate-plugin`; do not use its older checks as a release gate.
+Neither command produces an assurance about scientific correctness.
+
+## Agent/AQUADIF Contract
+
+Use the current attribute names:
+
+```python
+import pytest
+from lobster.testing.contract_mixins import AgentContractTestMixin
+
+
+@pytest.mark.contract
+class TestDomainContract(AgentContractTestMixin):
+    agent_module = "lobster.agents.domain.domain_expert"
+    factory_name = "domain_expert"
+    is_parent_agent = False
+    tools_required = True
 ```
 
-**Full reference:** See `aquadif-contract.md` for contract test method descriptions, factory setup patterns, and LLM mock configuration.
+`agent_module` contains AGENT_CONFIG; optional `factory_module` is used when the
+factory lives elsewhere. `factory_name` is the actual function name.
+Do not substitute `agent_name` or `factory_function` as test configuration.
 
-## Best Practices
+The mixin checks factory parameters, AGENT_CONFIG, tool metadata/categories,
+provenance calls, independent metadata objects and collection schemas. It rejects
+deprecated `handoff_tools`; factories use `delegation_tools`. When
+`is_parent_agent=True`, the minimum is IMPORT + QUALITY + (ANALYZE or DELEGATE).
+Do not label a missing scientific tool tested by disabling a gate. Generated
+placeholder factories can start with
+`tools_required=False`, but working plugins should require actual tools.
 
-1. **Test the 3-tuple** — Every service test should verify the return format
-2. **Test AGENT_CONFIG early** — Ensure fast loading for entry point discovery
-3. **Mock external deps** — Never make real API calls in unit tests
-4. **Use fixtures** — Avoid duplicating test data
-5. **Test edge cases** — Empty data, None inputs, invalid params
-6. **Mark slow tests** — So CI can skip when appropriate
+Mock inference construction through the real factory's source path when needed.
+A MagicMock graph or manually fabricated tool list does not demonstrate what the
+real factory exposes.
+
+## Executed Figure Contract
+
+Use `FigureContractTestMixin` and `FigureToolCase` from
+`lobster.testing.contract_mixins`. The test kit creates a fresh real DataManagerV2,
+builds the actual factory, invokes the tool as a tool call and observes figure/
+filesystem behavior. A case has:
+
+```python
+FigureToolCase(
+    tool_name="analyze_domain",
+    args={"modality_name": "example"},
+    setup=store_small_real_input,
+    assert_success=assert_expected_scientific_output,
+    label="representative domain input",
+)
+```
+
+This describes the case shape, not a runnable test: implement both fixture
+functions and use an exposed tool's real argument schema.
+
+- `setup(dm, monkeypatch)` runs before factory construction. Store a small real
+  modality and patch external services/inference here; patches survive through
+  invocation and assertions.
+- `assert_success(reply, dm)` must reject returned error strings and verify actual
+  expected values, metadata, new modalities or IR. A reply substring alone is a
+  scaffold smoke check, not a scientific test.
+- `figure_tool_cases()` supplies representative valid invocations. Coverage is
+  over tools observed in those setups, not every possible factory configuration.
+- Every ordinary tool with a provenance-required primary category needs a case
+  or a nonempty reason in `figure_contract_skips`.
+- Transitional figure producers cannot be skipped and need a **saving** case.
+  `args={"save_plot": False, ...}` is a preview and does not count as that case.
+- Preview/ordinary-tool cases must not stage/save/write a figure. Producers also
+  must not alter the analysis dataset while drawing.
+- `suggests_templates` entries must resolve in the installed template catalog.
+  Coverage reports distinguish cases, skips, uncovered categories and excluded
+  trusted submitters; a reported skip is not tested behavior.
+
+Use the generated `test_contract.py` as the structural starting point. Replace
+its placeholder input and reply checks with domain fixtures and assertions.
+
+For a native visualization tool such as `create_qc_plots`, direct invocation
+requires a full ToolCall, not bare `tool.invoke(args)`:
+
+```python
+reply = tool.invoke({"name": tool.name, "args": {"modality_name": "qc_assessed"},
+                     "id": "draw_qc_1", "type": "tool_call"})
+```
+
+Here `tool` is the selected tool from the real factory; the envelope injects the
+call ID, not an invented scientific argument. An underlying service callable is
+a different interface.
+
+## Scientific and IR Tests
+
+For every service/tool, check:
+
+1. The return tuple contains the expected data, statistics and real AnalysisStep.
+2. Input data is unchanged unless mutation is an explicit contract.
+3. Values, identifiers, layers and relevant metadata match expected outputs.
+4. Parameters in IR correspond to the operation actually executed.
+5. Replaying executable IR on a copy produces the same relevant transformation;
+   record-only `replayable=False` steps are treated as records, not transformations.
+6. Invalid/empty/nonfinite data and missing biological metadata are refused.
+7. Randomness is seeded or outcomes retained, and output files are discovered by
+   returned paths rather than assumed current-directory globs.
+
+`AnalysisStep` uses `operation` and `parameters`, not `activity_type`/`params`.
+Do not invent a `+` operator for composing IR. The helper
+`lobster.testing.provenance_replay.replay_ir` executes a recorded template for
+comparison; inspect the helper's source/signature before using it in a new test.
+
+### Counts and GEO
+
+Test both valid raw-count input and normalized/log input that must refuse.
+When `layers['counts']` exists but is invalid, DESeq2 must refuse rather than use
+`X`. Include sparse/dense forms and sample identity preservation where relevant.
+Numeric count validity alone does not prove upstream raw-count origin.
+
+For `data_requirement="gene_counts"`, cover no candidate, ambiguous selection,
+incomplete/sample-mismatched data and value fidelity. Do not mark a handled
+refusal as a successful download.
+
+### Saved Figures and Templates
+
+Assert actual save outcomes and saved revision identity, not object existence.
+Check explicit submission, failed-code no-save, preview no-save, edit parent
+preservation, source/config behavior and unsubmitted-figure warnings. Include
+pending confirmation: it is uncertainty, not a definitive no-save or confirmed
+save. Export tests should distinguish view-package contents from omitted lifecycle
+artifacts and unsupported legacy files.
+Template fixtures should cover Plotly validity, input immutability, declared
+parameters, stable IDs where applicable and house style. Drawing must not rerun
+an upstream scientific model merely to produce a chart.
+
+## Privacy and Inference Refusals
+
+Test propagation of typed `InferenceRefused` through broad recovery handlers.
+Do not log raw SDK bodies or leak credentials when failures are wrapped.
+Privacy tests need assertions against their approved outward fields, not a claim
+that all system logs are sanitized. Provider requests are never made implicitly
+as part of a documentation or contract inspection task.
+
+## Report What Actually Ran
+
+Record commands and outcomes, including skips, warnings and limits. Keep these
+categories separate: source inspection, static validation, executed contract,
+scientific fixture comparison, notebook execution and live integration. A pass
+in one category does not establish another.

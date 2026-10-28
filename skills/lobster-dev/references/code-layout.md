@@ -1,195 +1,88 @@
-# Code Layout
+# Code Layout — Lobster AI 1.2
 
-Quick reference for finding files in the Lobster AI codebase. For data flow and component explanations, see [architecture.md](architecture.md).
+Paths below are relative to the engine repository root. Installed namespace
+packages can occupy multiple source directories; inspect their entry points and
+module paths instead of assuming everything is in the core distribution.
 
-## Top-Level Structure
+## Core SDK
 
-```
-lobster/                          # Repository root
-├── lobster/                      # Core SDK (lobster-ai package)
-│   ├── agents/                   # Supervisor + graph builder
-│   ├── core/                     # Infrastructure
-│   ├── services/                 # Core services
-│   ├── tools/                    # Agent tools
-│   └── cli.py                    # CLI implementation (3,900+ lines)
-├── packages/                     # Agent packages (PEP 420)
-│   ├── lobster-<domain>/         # A domain agent installed from the lobster pypi repository
-│   └── lobster-research/         # The research agent of lobster allowing for interactions with biological databases
+| Path | Responsibility |
+|---|---|
+| `lobster/cli.py`, `lobster/__main__.py` | Local command entry points |
+| `lobster/cli_internal/commands/light/` | Configuration, workspace, files, queue, scaffold and validation commands |
+| `lobster/cli_internal/commands/heavy/` | Local chat/query, session setup, slash dispatch, visualization |
+| `lobster/agents/supervisor.py`, `graph.py` | Supervisor and graph/delegation construction |
+| `lobster/core/component_registry.py` | Lazy installed component discovery |
+| `lobster/config/agent_registry.py` | AgentRegistryConfig |
+| `lobster/config/llm_factory.py`, `settings.py`, `providers/` | Inference configuration/provider construction |
+| `lobster/core/client.py` | AgentClient and session execution |
+| `lobster/core/runtime/data_manager.py` | DataManagerV2 (canonical implementation) |
+| `lobster/core/adapters/`, `interfaces/` | Data adapters and interfaces |
+| `lobster/core/omics_registry.py` | Omics type metadata and detection |
+| `lobster/core/provenance/` | Analysis IR, provenance persistence and stage contracts |
+| `lobster/core/governance/` | Runtime tool monitoring and result-claim checks |
+| `lobster/core/figures/` | Saved revisions, source payloads, saver, listings and custom-code snapshots |
+| `lobster/core/plot_manager.py` | Plot staging and saved-figure integration |
+| `lobster/figure_templates/` | Public template API and style |
+| `lobster/figure_template_providers/` | Built-in template providers |
+| `lobster/pricing/` | Offline price data, overrides and usage normalization |
+| `lobster/tools/code_tool_switch.py` | Per-agent code-tool exposure, env/workspace precedence and factory helper |
+| `lobster/tools/custom_code_tool.py` | Shared execute_custom_code wrapper and explicit figure submission |
+| `lobster/tools/download_orchestrator.py` | Queue download orchestration |
+| `lobster/services/` | Shared stateless services |
+| `lobster/testing/` | Contract mixins and IR replay/comparison helpers |
+| `lobster/scaffold/` | Plugin generators, templates and static validators |
 
-├── tests/
-│   ├── unit/
-│   └── integration/
-├── .claude/                      # Claude Code integration
-│   ├── docs/                     # Internal docs
-│   └── skills/                   # Skills for Claude Code
-```
+`lobster/core/data_manager_v2.py` is a compatibility shim, not the place to add
+runtime behavior. Provenance is a package, not an old root `provenance.py` file.
 
-## Core SDK (`lobster/lobster/`)
+## Domain Packages
 
-### Agents (`lobster/agents/`)
-
-| File | Purpose |
-|------|---------|
-| `supervisor.py` | Main routing agent |
-| `graph.py` | LangGraph builder (`create_bioinformatics_graph`) |
-| `state.py` | State definitions |
-
-### Core (`lobster/core/`)
-
-| File | Purpose |
-|------|---------|
-| `component_registry.py` | Agent discovery via entry points |
-| `data_manager_v2.py` | Data/workspace management |
-| `provenance.py` | W3C-PROV tracking |
-| `protocols.py` | Interface definitions |
-| `client.py` | AgentClient, APIAgentClient |
-| `config.py` | Configuration management |
-
-### Services (`lobster/services/`)
-
-Core services that stay in the base package:
-- Database adapters
-- Format parsers
-- Shared utilities
-
-### Tools (`lobster/tools/`)
-
-| File | Purpose |
-|------|---------|
-| `download_orchestrator.py` | 9-step download flow |
-| `common_tools.py` | Shared agent tools |
-| `data_tools.py` | Data manipulation tools |
-
-## Agent Packages (`packages/`)
-
-Each package follows this structure:
-
-```
-lobster-{domain}/
-├── pyproject.toml              # Package config + entry points
-├── README.md
-└── lobster/                    # PEP 420 — NO __init__.py
-    ├── agents/                 # PEP 420 — NO __init__.py
-    │   └── {domain}/
-    │       ├── __init__.py
-    │       └── {agent_name}.py
-    └── services/               # PEP 420 — NO __init__.py
-        ├── analysis/
-        │   └── {domain}_analysis_service.py
-        └── quality/
-            └── {domain}_quality_service.py
+```text
+packages/lobster-<domain>/
+  pyproject.toml                  # entry points and compatibility dependencies
+  lobster/                        # PEP 420 shared namespace: no __init__.py
+    agents/                       # shared namespace: no __init__.py
+      <domain>/                   # package-specific agent modules
+    services/                     # shared namespace: no __init__.py
+      analysis/ or quality/ ...   # function-oriented scientific services
+    figure_template_providers/    # optional provider module; no namespace __init__.py
+  tests/                          # contract and scientific tests
 ```
 
-### Package Contents
+Do not force existing packages into that illustrative shape: some factories,
+including visualization, live directly in the agents namespace. The exact import
+path comes from the package's `[project.entry-points."lobster.agents"]` entries.
+`lobster-vector` provides cross-cutting services rather than agent factories;
+`lobster-ai-tui` packages the Go binary built from `lobster-tui/`.
 
-| Package | Agents |
-|---------|--------|
-| `lobster-transcriptomics` | transcriptomics_expert, annotation_expert, de_analysis_expert |
-| `lobster-research` | research_agent, data_expert_agent |
-| `lobster-visualization` | visualization_expert_agent |
-| `lobster-proteomics` | proteomics_expert, proteomics_de_analysis_expert, biomarker_discovery_expert |
-| `lobster-genomics` | genomics_expert, variant_analysis_expert |
-| `lobster-metabolomics` | metabolomics_expert |
-| `lobster-ml` | machine_learning_expert, feature_selection_expert, survival_analysis_expert |
-| `lobster-drug-discovery` | drug_discovery_expert, cheminformatics_expert, clinical_dev_expert, pharmacogenomics_expert |
-| `lobster-metadata` | metadata_assistant |
-| `lobster-vector` | _(no agents — cross-cutting service)_ |
-| `lobster-structural-viz` | protein_structure_visualization_expert |
-
-## packages/lobster-vector/
-
-Semantic vector search engine. Cross-cutting service consumed by multiple agents and CLI.
-
-- `lobster/vector/__init__.py` — Public API with lazy imports (no heavy deps on import)
-- `lobster/vector/service.py` — VectorSearchService (query, query_batch, match_ontology, ONTOLOGY_COLLECTIONS)
-- `lobster/vector/config.py` — VectorSearchConfig (env-driven factory: LOBSTER_VECTOR_BACKEND, LOBSTER_EMBEDDING_PROVIDER)
-- `lobster/vector/artifact.py` — ArtifactMetadata + CollectionUnavailable (compatibility contract)
-- `lobster/vector/ontology_graph.py` — NetworkX OBO graph traversal (OBO_URLS, load_obo_graph)
-- `lobster/vector/backends/` — ChromaDB, FAISS, pgvector implementations (BaseVectorBackend ABC)
-- `lobster/vector/embeddings/` — SapBERT, MiniLM, OpenAI providers (BaseEmbedder ABC)
-- `lobster/vector/rerankers/` — CrossEncoder, Cohere rerankers (BaseReranker ABC)
-
-## Tests (`tests/`)
-
-```
-tests/
-├── unit/
-│   ├── agents/               # Agent tests
-│   ├── services/             # Service tests
-│   ├── core/                 # Core component tests
-│   └── tools/                # Tool tests
-├── integration/
-│   ├── test_workflows.py     # End-to-end workflows
-│   └── test_downloads.py     # Download tests
-└── conftest.py               # Shared fixtures
-```
-
-## Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `pyproject.toml` | Root package config |
-| `.env` | Environment variables |
-| `.env.example` | Env var template |
-| `CLAUDE.md` | Claude Code system prompt |
-| `Makefile` | Dev commands |
-
-## Documentation
-
-| Location | Content |
-|----------|---------|
-| `wiki/` | User guides (58 pages) |
-| `docs/` | Developer docs (17 files) |
-| `.claude/docs/` | Internal architecture docs |
-| `docs-site/` | Online docs (Next.js) |
-
-## Finding Things
-
-### "Where is agent X?"
+## Source Discovery
 
 ```bash
-# Find agent file
-find packages -name "*agent*.py" | grep -i {name}
+# Agent registration and factory locations
+rg -n 'lobster.agents|AGENT_CONFIG' packages/*/pyproject.toml
+find packages -path '*/agents/*' -name '*.py'
 
-# Or check entry points
-grep -r "lobster.agents" packages/*/pyproject.toml
+# Scientific services and tool definitions
+find packages -path '*/services/*' -name '*.py'
+rg -n '@tool' packages/lobster-transcriptomics/lobster/agents/
+
+# Installed source, in the same Python environment as the engine
+uv run python -c "import lobster; print(list(lobster.__path__))"
+uv run python -c "import lobster.agents.transcriptomics as m; print(list(m.__path__))"
 ```
 
-### "Where is service X?"
+Reading installed source is fine; editing site-packages is not a development
+workflow. Scaffold a plugin or work in an approved source checkout instead.
 
-```bash
-# In packages
-find packages -path "*/services/*" -name "*.py"
+## Tests and Documentation
 
-# In core
-find lobster/services -name "*.py"
-```
+- Core tests: `tests/unit/`, `tests/integration/` and feature-specific directories.
+- Domain tests: each package's `tests/` directory.
+- Contract implementation: `lobster/testing/contract_mixins.py`.
+- Generated contract example: `lobster/scaffold/templates/test_contract.py.j2`.
+- Developer guidance: this skill's `references/`, plus `CONTRIBUTING.md`.
+- Public documentation: `https://docs.omics-os.com` (discover pages through llms.txt).
 
-### "What tools does agent X have?"
-
-```bash
-# Search for @tool decorators
-grep -A5 "@tool" packages/lobster-{domain}/lobster/agents/{domain}/*.py
-```
-
-### "How is X configured?"
-
-```bash
-# Check AGENT_CONFIG
-grep -A20 "AGENT_CONFIG" packages/lobster-{domain}/lobster/agents/{domain}/*.py
-```
-
-## Key Files Quick Reference
-
-**Start here when...**
-
-| Task | Read This |
-|------|-----------|
-| Understanding flow | `lobster/agents/graph.py` |
-| Agent discovery | `lobster/core/component_registry.py` |
-| Data management | `lobster/core/data_manager_v2.py` |
-| Provenance | `lobster/core/provenance.py` |
-| CLI commands | `lobster/cli.py` |
-| Download logic | `lobster/tools/download_orchestrator.py` |
-| Agent example | `packages/lobster-transcriptomics/lobster/agents/transcriptomics/transcriptomics_expert.py` |
-| Service example | Any file in `packages/*/lobster/services/*/` |
+Do not assume an old wiki, private instructions or a sibling documentation checkout
+exists in a contributor's environment. Follow the paths that actually exist.

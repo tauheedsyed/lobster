@@ -1,142 +1,133 @@
-# Omics Plugin Architecture
+# Plugin Architecture — Lobster AI 1.2
 
-How to extend Lobster AI with new omics types, database providers, and data adapters — without modifying core code.
+Plugins extend domain capabilities without editing a central catalog. Inspect
+current source and use scaffold for new agent packages; metadata declarations
+alone are not evidence that a plugin executes correctly.
 
-**Full documentation:** [docs.omics-os.com/docs/architecture/overview](https://docs.omics-os.com/docs/architecture/overview) (Omics Plugin Architecture section)
-**Entry point guide:** [docs.omics-os.com/docs/extending/entry-points](https://docs.omics-os.com/docs/extending/entry-points)
-**Plugin contract:** [docs.omics-os.com/docs/extending/plugin-contract](https://docs.omics-os.com/docs/extending/plugin-contract)
+## Discovery Boundaries
 
-## Quick Reference
+| Mechanism | Discovers |
+|---|---|
+| `ComponentRegistry`: `lobster.agents` | Agent configuration objects |
+| `ComponentRegistry`: `lobster.services` | Service classes |
+| `ComponentRegistry`: `lobster.adapters` | Adapter factories/classes |
+| `ComponentRegistry`: `lobster.providers` | Database providers |
+| `ComponentRegistry`: `lobster.download_services` | Download services |
+| `ComponentRegistry`: `lobster.queue_preparers` | Queue preparers |
+| Separate `lobster.omics_types` discovery | OmicsTypeConfig |
+| `lobster.figure_template_providers` namespace scanning | Cheap TEMPLATE_MANIFEST descriptors and drawing callables |
 
-**Two registries:**
-- `OmicsTypeRegistry` (`core/omics_registry.py`) — type metadata: detection config, preferred databases, QC thresholds
-- `ComponentRegistry` (`core/component_registry.py`) — component instances: adapters, providers, download services, queue preparers
+Do not invent a ComponentRegistry `lobster.agent_configs` group. State entry
+points in agent packages and template namespace discovery are distinct from this
+registry's component groups. Preserve PEP 420 namespaces so independently
+installed packages can contribute modules.
 
-**7 entry point groups:**
+`ComponentRegistry` exposes get/list/has APIs such as `get_agent`, `list_agents`,
+`has_agent`, `get_adapter`, `list_adapters` and `list_providers`. Do not assume
+configs are dictionaries or use an old `get_available_agents` example.
 
-| Group | Discovers | Factory Contract |
-|-------|-----------|-----------------|
-| `lobster.agents` | Agent configs | `AGENT_CONFIG` object |
-| `lobster.services` | Service classes | Class reference |
-| `lobster.agent_configs` | Custom LLM configs | Config object |
-| `lobster.adapters` | Adapter factories | **Callable returning configured instance** |
-| `lobster.providers` | Provider classes | Class (instantiated with `data_manager`) |
-| `lobster.download_services` | Download service classes | Class (instantiated with `data_manager`) |
-| `lobster.queue_preparers` | Queue preparer classes | Class (instantiated with `data_manager`) |
-
-**Built-in omics types (5):** transcriptomics, proteomics, genomics, metabolomics, metagenomics
-
-## Adding a New Omics Type (6 Steps)
-
-1. Define `OmicsTypeConfig` with detection keywords, preferred databases, QC thresholds
-2. Create adapter factory → `lobster.adapters` entry point
-3. Create provider (if new database) → `lobster.providers` entry point
-4. Create download service → `lobster.download_services` entry point
-5. Create queue preparer → `lobster.queue_preparers` entry point
-6. Register config → `lobster.omics_types` entry point
-
-**Full walkthrough with code:** [docs.omics-os.com/docs/extending/entry-points#adding-a-new-omics-type-via-plugins](https://docs.omics-os.com/docs/extending/entry-points)
-
-### Minimal pyproject.toml
+## Agent and Omics Registration
 
 ```toml
+[project.entry-points."lobster.agents"]
+domain_expert = "lobster.agents.domain.domain_expert:AGENT_CONFIG"
+
 [project.entry-points."lobster.omics_types"]
-epigenomics = "my_package.config:EPIGENOMICS_CONFIG"
+domain = "my_package.config:DOMAIN_CONFIG"
 
 [project.entry-points."lobster.adapters"]
-epigenomics_chip_seq = "my_package.adapter:create_chip_seq_adapter"
+domain_matrix = "my_package.adapter:create_domain_adapter"
 
 [project.entry-points."lobster.providers"]
-encode = "my_package.provider:ENCODEProvider"
+domain_database = "my_package.provider:DomainProvider"
 
 [project.entry-points."lobster.download_services"]
-encode = "my_package.download_service:ENCODEDownloadService"
+domain_database = "my_package.download_service:DomainDownloadService"
 
 [project.entry-points."lobster.queue_preparers"]
-encode = "my_package.queue_preparer:ENCODEQueuePreparer"
+domain_database = "my_package.queue_preparer:DomainQueuePreparer"
 ```
 
-### OmicsTypeConfig Template
+The named modules/classes must exist and satisfy the actual interfaces. An adapter
+factory returns a configured adapter; providers/download services/queue preparers
+must honor their data-manager construction contract. Study the existing source
+rather than copying a class stub with missing abstract methods.
+
+`OmicsTypeConfig` in `lobster/core/omics_registry.py` describes name/display label,
+schema class, adapter names, preferred databases, aliases, detection configuration
+and QC thresholds. `DataTypeDetector` uses metadata/data heuristics; a type score
+is not scientific validation of the dataset.
+
+Keep raw-count values and exact sample identity intact during import when the
+workflow requests `gene_counts`. A generic adapter's normalization or casting
+must not silently turn an accepted count candidate into a different matrix.
+
+## Figure Template Providers
+
+Ship a uniquely named module beneath `lobster.figure_template_providers`; do not
+add `__init__.py` at that shared namespace boundary. Keep heavy imports inside the
+drawing callable so discovery does not load a scientific stack.
 
 ```python
-from lobster.core.omics_registry import OmicsTypeConfig, OmicsDetectionConfig
+from lobster.figure_templates import figure_template
 
-MY_CONFIG = OmicsTypeConfig(
-    name="epigenomics",
-    display_name="Epigenomics",
-    schema_class="my_package.schema:EpigenomicsSchema",
-    adapter_names=["epigenomics_chip_seq"],
-    preferred_databases=["geo", "encode"],
-    data_type_aliases=["chip_seq", "atac_seq"],
-    detection=OmicsDetectionConfig(
-        keywords=["ChIP-seq", "ATAC-seq", "histone", "methylation", "chromatin"],
-        feature_count_range=(10_000, 500_000),
-        weight=10,
-    ),
-    qc_thresholds={"min_reads": 10_000_000},
-)
+TEMPLATE_MANIFEST = [
+    {
+        "name": "domain.scatter",
+        "version": "1",
+        "purpose": "Draw retained measurements without refitting",
+        "callable": "draw_scatter",
+    }
+]
+
+
+@figure_template("domain.scatter", version="1")
+def draw_scatter(data, *, x, y, title="Domain measurements"):
+    import pandas as pd
+    import plotly.express as px
+
+    rows = pd.DataFrame(data).copy(deep=True)
+    return px.scatter(rows, x=x, y=y, title=title)
 ```
 
-### Adapter Factory Pattern
+This is an illustrative provider, not a scientifically qualified chart. Implement
+stable entity/trace identities where the chart supports individual selections;
+do not manufacture IDs from row position or claim single-entity binding for
+aggregate/matrix marks.
 
-```python
-from lobster.core.adapters.base import BaseAdapter
+The decorator records declared template name/version and resolved data-free
+arguments. Additional input arrays must be declared through `data_args=(...)`
+rather than accidentally recorded as settings. Settings must be finite JSON and
+fit the template recipe limit; data belongs in explicit source payloads.
 
-class EpigenomicsAdapter(BaseAdapter):
-    def __init__(self, data_type="chip_seq"):
-        super().__init__(name="EpigenomicsAdapter")
-        self.data_type = data_type
-    # Implement: from_source, validate, get_schema, preprocess_data
+Use `list_templates()`, `get_template(name)` and `show_template_source(name)` to
+discover/edit drawings. Templates return editable Plotly figures and do not save,
+mutate modalities or rerun statistical analyses. Custom-code callers explicitly
+submit a figure; supplied source data is needed for retained regeneration input.
+Template recipe metadata is a declaration, not proof of execution.
 
-def create_chip_seq_adapter():
-    return EpigenomicsAdapter(data_type="chip_seq")
+Scientific tools may declare `suggests_templates` with installed names. The
+figure contract checks those names and actual tool behavior; a suggestion does
+not save a plot or qualify the science.
+
+## Compatibility and Tests
+
+The 1.2 scaffold generates `lobster-ai~=1.2`. Keep the plugin's dependency range aligned with the engine version used for validation and execution.
+
+Use the installed engine's canonical validator, not the superseded bundled script:
+
+```bash
+lobster validate-plugin ./lobster-domain/
+uv run pytest ./lobster-domain/tests/ -m contract -v
 ```
 
-## DataTypeDetector
+Agent contracts check source/schema/metadata and real IR. Figure contracts execute
+representative valid tool cases against a real DataManagerV2. Templates also need
+fixture tests for input immutability, Plotly validity, explicit transformations,
+style and identities where applicable. Skips and placeholders are not execution
+coverage. See [scaffold.md](scaffold.md), [testing.md](testing.md) and
+[aquadif-contract.md](aquadif-contract.md).
 
-Unified detection — replaces scattered `_is_single_cell_dataset()`, `_is_proteomics_dataset()`, etc.
-
-```python
-from lobster.core.omics_registry import DataTypeDetector
-
-detector = DataTypeDetector()
-results = detector.detect_from_metadata({"title": "ChIP-seq of histone marks"})
-# => [("epigenomics", 0.85), ("genomics", 0.12), ...]
-
-results = detector.detect_from_data(adata)        # Feature count + column signatures
-results = detector.detect(metadata=meta, adata=adata)  # Combined (60% metadata, 40% data)
-```
-
-## Registration Flow
-
-All 4 registration sites (adapters, providers, download services, queue preparers):
-
-```
-Phase 1: Entry-point discovery → ComponentRegistry
-Phase 2: Hardcoded fallback (only if name not already registered)
-```
-
-Faulty plugins get logged and skipped — never crash the system.
-
-## Reference Implementation
-
-Study the metabolomics stack for canonical patterns:
-
-| Component | File |
-|-----------|------|
-| OmicsTypeConfig | `core/omics_registry.py` (metabolomics section) |
-| MetabolomicsAdapter | `core/adapters/metabolomics_adapter.py` |
-| MetaboLightsProvider | `tools/providers/metabolights_provider.py` |
-| MetaboLightsDownloadService | `services/data_access/metabolights_download_service.py` |
-| MetaboLightsQueuePreparer | `services/data_access/metabolights_queue_preparer.py` |
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `core/omics_registry.py` | `OmicsTypeConfig`, `OMICS_TYPE_REGISTRY`, `DataTypeDetector` |
-| `core/component_registry.py` | All 7 entry point groups + get/list/has APIs |
-| `core/adapters/base.py` | `BaseAdapter` (inherit for new adapters) |
-| `core/interfaces/download_service.py` | `IDownloadService` interface |
-| `core/interfaces/queue_preparer.py` | `IQueuePreparer` interface |
-| `tools/providers/base_provider.py` | `BasePublicationProvider` + enums |
+**Source:** `lobster/core/component_registry.py`, `lobster/core/omics_registry.py`,
+`lobster/core/interfaces/`, `lobster/figure_templates/_api.py` and
+`lobster/testing/contract_mixins.py`.

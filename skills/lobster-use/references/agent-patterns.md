@@ -1,234 +1,185 @@
-# Agent Orchestration Patterns
+# Orchestration Patterns — Lobster AI 1.2
 
-How coding agents (Claude Code, Gemini CLI, Codex, OpenClaw) use Lobster AI programmatically
-to offload bioinformatics analysis.
+Use the local Python engine to offload biological workflows, not to hide a failed
+analysis behind plausible prose. Cloud workflows use the supported npm client;
+the two clients have different setup and authentication contracts.
 
-## Local vs Cloud
+## Local Setup and Session Continuity
 
-| Factor | Local (`lobster query`) | Cloud (`lobster cloud chat`) |
-|--------|------------------------|-------------------------------|
-| Setup | `lobster init` + LLM key | `lobster cloud login` (one-time) |
-| Sessions | `--session-id <name>` (disk) | Interactive TUI (server-side sessions) |
-| Workspace | `-w <path>` (local files) | Cloud workspace (server-side) |
-| Inspection | `lobster command --json` | Inside TUI |
-| Offline | Yes | No |
-
-**Decision rule**: If user has Omics-OS Cloud credentials at `~/.config/omics-os/credentials.json`,
-prefer cloud. Otherwise use local.
-
-**Note**: Cloud mode is interactive only (`lobster cloud chat`). For programmatic cloud
-queries, use the `@omicsos/lobster` npm CLI directly.
-
-## Core Pattern — Local
-
-The agent calls `lobster query --json --session-id` and parses structured output:
+Assume `lobster` resolves to the Python engine, or replace it with
+`uv run python -m lobster` in an environment containing the engine.
 
 ```bash
-RESULT=$(lobster query --session-id "proj" --json "Your analysis request")
-echo "$RESULT" | jq -r '.response'
-```
-
-**Key flags for agents**:
-- `--json` -- structured JSON on stdout (Rich UI goes to stderr)
-- `--session-id <id>` -- data persists across queries (REQUIRED for multi-step)
-- `-w <path>` -- explicit workspace path
-- `--no-stream` -- default for `query`, returns complete result
-
-## JSON Output Schema
-
-### Local Success
-
-```json
-{
-  "success": true,
-  "response": "Analysis complete. Found 15,234 cells...",
-  "session_id": "proj",
-  "last_agent": "transcriptomics_expert",
-  "token_usage": { ... }
-}
-```
-
-### Error
-
-```json
-{
-  "success": false,
-  "error": "Not authenticated. Run 'lobster cloud login' first.",
-  "session_id": null
-}
-```
-
-**Parse with**: `jq -r 'if .success then .response else (.error // .response // "Unknown error") end'`
-
-**Note**: Not all failures include `.error` — some set `.success: false` with the error in `.response`. Always check `.success` first, then fall through `.error // .response // .finish_reason`.
-
-## Workspace Inspection
-
-### Local (No Tokens, ~300ms)
-
-Use `lobster command --json` for fast inspection:
-
-```bash
-lobster command data --json -w .lobster_workspace | jq '.data'
-lobster command files --json -w .lobster_workspace | jq '.data.tables'
-lobster command "workspace list" --json | jq '.data.tables[0].rows'
-lobster command modalities --json | jq '.data'
 lobster config-test --json
+lobster agents list
 ```
 
-**Rule**: Always use `lobster command` for inspection. Only use `lobster query` for
-analysis that requires the agent system.
+Do not install packages or write provider credentials automatically when these
+checks fail. Ask the user to approve setup; see [CLI reference](cli-reference.md).
+Keep the same workspace and session on every query and inspection command:
 
-### Cloud
-
-Cloud workspace files are managed within the interactive TUI (`lobster cloud chat`).
 ```bash
-lobster cloud status          # Tier, budget, usage
+WORKSPACE="./analysis"
+SESSION="study"
+lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
+  "Inspect sample metadata and propose a QC plan before making changes"
+lobster command "workspace list" -w "$WORKSPACE" --session-id "$SESSION" --json
 ```
 
-## Multi-Step Analysis — Local
+`$WORKSPACE` is the actual root, not the parent of a nested hidden workspace.
+
+## Capture Both Failure Signals
+
+A local JSON response can be present even when the process exits nonzero. Capture
+that response without allowing shell `set -e` to discard it:
 
 ```bash
-SESSION="liver_study"
-WORKSPACE="./liver_analysis"
+status=0
+RESULT=$(lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
+  "Run the approved QC workflow" 2>"$WORKSPACE/query.stderr.log") || status=$?
 
-# Step 1: Search (Research Agent -- online)
-lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
-  "Search PubMed for liver fibrosis scRNA-seq datasets from 2023-2024"
-
-# Step 2: Download (Data Expert)
-lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
-  "Download the top dataset"
-
-# Step 3: Verify data loaded
-DATA=$(lobster command data --json -w "$WORKSPACE")
-if ! echo "$DATA" | jq -e '.success' > /dev/null 2>&1; then
-  echo "No data loaded yet"
-  lobster command "queue list" --json -w "$WORKSPACE"
+if [ "$status" -ne 0 ] || ! printf '%s\n' "$RESULT" | jq -e '.success == true' >/dev/null; then
+  printf '%s\n' "$RESULT" | jq -r '.error // .response // "No structured result"'
+  # Keep stderr for private diagnosis; review/redact it before sharing.
   exit 1
 fi
+printf '%s\n' "$RESULT" | jq -r '.response'
+```
 
-# Step 4: Analyze
+The workspace must exist before redirecting stderr there. Do not infer success
+from parseable JSON, reassuring prose or exit status alone. Missing/invalid JSON
+is a failure to obtain a structured result, not permission to fabricate one.
+
+## Inspect Without Inference
+
+```bash
+lobster command data -w "$WORKSPACE" --session-id "$SESSION" --json
+lobster command modalities -w "$WORKSPACE" --session-id "$SESSION" --json
+lobster command files -w "$WORKSPACE" --session-id "$SESSION" --json
+lobster command plots -w "$WORKSPACE" --session-id "$SESSION" --json
+lobster command "queue list" -w "$WORKSPACE" --session-id "$SESSION" --json
+```
+
+These are supported local commands without an LLM call. A successful inspection
+command can still report an empty workspace. An inventory-read error is not an
+empty or complete inventory. Inspect the returned tables, warnings and messages
+before scheduling an analysis.
+
+## Count-Safe Bulk RNA Workflow
+
+1. Discover a dataset; inspect its metadata and data representations before
+   downloading. Do not assume an accession contains a raw count matrix.
+2. Request GEO download through
+   `execute_download_from_queue(..., data_requirement="gene_counts")`. This
+   tool option requires a suitable complete series-level bulk gene-count matrix
+   with exact sample identity; it is not a CLI flag.
+3. Read any `Requirement not met` refusal and candidate reasons. Ambiguity,
+   missing counts, sample mismatch or changed numeric values require a new choice,
+   not repeated unchanged downloads or substituting TPM/CPM.
+4. Confirm biological replicate metadata and the contrast before DESeq2.
+5. Preserve raw counts through QC/aggregation. Valid `layers['counts']` is
+   preferred; absent that layer, `X` must pass count validation. An invalid counts
+   layer is refused. Do not round normalized values to circumvent the check.
+6. Inspect returned tables, count-source report and paths. Numeric whole-number
+   values alone are not proof that an upstream pipeline produced raw counts.
+
+Example requests, after choosing appropriate data and receiving approval:
+
+```bash
 lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
-  "Run QC, filter low-quality cells, normalize, and cluster"
-
-# Step 5: Annotate
+  "Download the selected GEO series with data_requirement='gene_counts'; report any refusal"
 lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
-  "Identify cell types in each cluster"
-
-# Step 6: DE
+  "Assess sample QC and raw-count availability; show replicate and condition metadata"
 lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
-  "Find DE genes between hepatocytes and stellate cells"
-
-# Step 7: Visualize
-lobster query -w "$WORKSPACE" --session-id "$SESSION" --json \
-  "Create UMAP colored by cell type and export markers to CSV"
-
-# Step 8: Check outputs
-lobster command files --json -w "$WORKSPACE"
+  "Run the agreed DESeq2 contrast using raw counts, then export the result table"
 ```
 
-## Non-Interactive Setup
+A natural-language request does not itself establish that the expected tool ran.
+Check the response and resulting data/files before proceeding.
 
-### Local
+## Figure Workflow — Local Engine
+
+Use retained analysis results to draw; do not recompute DE, clustering or chemistry
+just to change a figure. Ready-made templates return editable Plotly figures and
+never implicitly save them. Run `assess_data_quality` before `create_qc_plots` and
+draw the full QC-assessed modality; drawing does not repair missing metrics or
+accept DE/small-gene subsets as QC inputs.
+
+A custom-code figure is retained only by explicit `submit_figure`. Creating
+`fig`, calling a template or using Plotly display is not auto-capture. Check the
+submission/save outcome, then inspect `lobster command plots --json` with the same
+workspace/session. Preview-only results are not saved revisions.
+
+For an edit request, use the exact saved `<figure_id>@<revision_id>`:
+
+```python
+# Inside execute_custom_code; replace the placeholder with a literal saved ref.
+fig = load_figure("<figure_id>@<revision_id>")
+fig.update_layout(title="Updated title")
+submit_figure(fig, parent="<figure_id>@<revision_id>", intent="Change the title")
+```
+
+Filtering/restyling an existing figure is still an edit. Preserve its original
+revision and check that the reply reports a newly saved revision. To retain
+regeneration data for a new figure, supply `source` explicitly. Omitted config on
+an edit inherits the parent's config; explicit `{}` clears it.
+
+Interactive `/plots` and `/plot <identifier>` provide saved listing/opening.
+Template discovery occurs through `list_templates()`, `get_template(name)` and
+`show_template_source(name)` inside custom code, not an invented slash command.
+These local figure behaviors do not assert Cloud feature availability.
+
+## Outputs and Notebook Export
 
 ```bash
-if ! lobster config-test --json 2>/dev/null | jq -e '.success' > /dev/null 2>&1; then
-  lobster init --non-interactive --anthropic-key "$ANTHROPIC_API_KEY" --profile production
-fi
+lobster command files -w "$WORKSPACE" --session-id "$SESSION" --json
+lobster command "pipeline export" -w "$WORKSPACE" --session-id "$SESSION" --json
+find "$WORKSPACE/exports" -type f
 ```
 
-### Cloud
+Default/relative DE and annotation outputs use the workspace `exports/` directory.
+Read returned paths for notebooks and other outputs; do not assume a root glob.
+Default notebook export curates recorded steps; replay mode selects those marked
+replayable and can refuse failed or unreplayable data-changing steps. Custom code
+using attempt-only figure helpers is excluded from executable export. Inspect the
+omission summary and any record-only steps. Export alone does not mean the notebook
+was run or its scientific outputs checked.
+
+## Cost, Privacy and Recovery
+
+Bedrock cache points are opt-in (`LOBSTER_BEDROCK_PROMPT_CACHE=1`), intended for
+direct own-AWS Anthropic inference, and off by default. No hit-rate or saving
+follows merely from enabling them. The local price snapshot is offline list-price
+data; exact provider/model keys and unknown rates matter.
+
+`/tokens` shows aggregate and per-agent values, not completeness or pricing
+snapshots. Detailed callback summaries expose `cost_complete`, `usage_complete`,
+`unpriced_invocations`, `unpriced_models`, and `attempt_coverage="callback_only"`.
+If pricing is incomplete, the priced sum is a lower bound; withhold derived cost
+metrics. Check usage completeness separately. Callback-only coverage is not a
+complete provider bill. See [cli-reference.md](cli-reference.md#code-tool-and-token-evidence)
+for code access and detailed configuration; execution runs as Lobster's own OS user.
+
+Do not recover a terminal inference refusal by silently switching credentials,
+providers or authority. Auth/policy/budget/context/accounting failures need an
+authorized resolution. Preserve diagnostic logs privately; fixed-category
+provider refusals are not a guarantee that every log is safe to share.
+
+## npm Cloud Orchestration
+
+Use npm `@omicsos/lobster`, not Python/Go Cloud compatibility:
 
 ```bash
-# Check if already authenticated
-if ! lobster cloud status 2>/dev/null | grep -q "Tier"; then
-  echo "Not authenticated. User must run: lobster cloud login"
-  exit 1
-fi
+lobster cloud login
+lobster cloud status
+lobster cloud query --json "Describe the available session data"
+lobster cloud query --json --session-id latest "Continue the approved workflow"
+lobster cloud chat
 ```
 
-Cloud login requires a browser (OAuth flow) or interactive API key paste.
-Coding agents cannot perform initial cloud login — tell the user to run it manually.
-
-## Output File Discovery
-
-### Local
-
-```bash
-lobster command files --json -w "$WORKSPACE"
-lobster command plots --json -w "$WORKSPACE"
-
-WS_DIR="${WORKSPACE}/.lobster_workspace"
-find "$WS_DIR" -name "*.h5ad"   # Processed AnnData objects
-find "$WS_DIR" -name "*.html"   # Interactive Plotly visualizations
-find "$WS_DIR" -name "*.png"    # Publication-ready plots
-find "$WS_DIR" -name "*.csv"    # Exported tables
-find "$WS_DIR" -name "*.ipynb"  # Reproducible notebooks
-```
-
-## Pipeline Export (Local Only)
-
-```bash
-lobster command "pipeline export" --session-id "$SESSION"
-ls "$WORKSPACE"/*.ipynb
-```
-
-## Error Handling
-
-Check the `success` field. **Do NOT redirect stderr** — it contains diagnostics.
-
-```bash
-RESULT=$(lobster query -w "$WORKSPACE" --session-id "$SESSION" --json "Run clustering" 2>lobster_stderr.log)
-
-SUCCESS=$(echo "$RESULT" | jq -r '.success // false')
-if [ "$SUCCESS" != "true" ]; then
-  echo "Failed"
-  echo "$RESULT" | jq -r '.error // .response // "Unknown error"'
-  cat lobster_stderr.log
-  exit 1
-fi
-```
-
-**If `jq` is not available**:
-```bash
-echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('response',''))"
-```
-
-Common failure patterns:
-
-| Error | Mode | Cause | Fix |
-|-------|------|-------|-----|
-| No data loaded | Local | Analysis before loading | `lobster command data --json` to verify |
-| Session not found | Local | Missing `--session-id` | Always pass `--session-id` for multi-step |
-| Workspace mismatch | Local | Omitting `-w` on follow-up | Always pass `-w` |
-| Not authenticated | Cloud | No stored credentials | `lobster cloud login` |
-| Cloud TUI not installed | Cloud | npm binary missing | `npm install -g @omicsos/lobster` |
-| Agent not available | Both | Package not installed | `lobster agents list` |
-| Config error | Local | Provider misconfigured | `lobster config-test --json` |
-
-## Agent Routing
-
-Describe the task in natural language — Lobster routes automatically:
-
-- **Literature/dataset search** -> Research Agent (ONLY agent with internet)
-- **File loading/downloading** -> Data Expert (offline only)
-- **scRNA-seq / bulk RNA-seq** -> Transcriptomics Expert
-- **Proteomics (any platform)** -> Proteomics Expert
-- **Metabolomics** -> Metabolomics Expert
-- **VCF / PLINK / GWAS** -> Genomics Expert
-- **Plots and figures** -> Visualization Expert
-- **ML, feature selection** -> ML Expert
-- **Drug targets, compounds** -> Drug Discovery Expert
-
-## Session Continuity Best Practices
-
-### Local
-1. **Always name sessions**: `--session-id "descriptive_name"` not random IDs
-2. **One session per analysis**: Don't mix unrelated analyses
-3. **Check before continuing**: `lobster command data --json` after resuming
-4. **Workspace + session together**: `-w ./project --session-id "run_01"`
-
-### Cloud
-1. **Use `lobster cloud chat`** for interactive sessions — managed in the npm TUI
-2. **Sessions are cross-device**: Same session accessible from CLI and web app
+For headless API-key access, supply `OMICSOS_API_KEY` from an approved secret
+source. Browser/device login requires the user's participation. Preserve returned
+session UUIDs; prefer an explicit UUID over `latest` when coordinating multiple
+sessions. Check JSON `success` and error/finish information as well as process
+status. The npm query path is programmatic, not interactive-only. Do not use a
+stored credential's existence or a grep for account text as an authentication test.
