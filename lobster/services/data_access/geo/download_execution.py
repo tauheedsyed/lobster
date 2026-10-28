@@ -6,8 +6,12 @@ Contains 10 methods that coordinate download strategies, execute pipeline
 steps, and manage the layered download approach.
 """
 
+import json
+import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List
+from urllib.parse import urlsplit
 
 import anndata
 import pandas as pd
@@ -22,6 +26,10 @@ from lobster.core.exceptions import (
     UnsupportedPlatformError,
     reraise_inference_refusal,
 )
+from lobster.core.utils.count_matrix import (
+    has_equal_sample_totals,
+    is_whole_number_matrix,
+)
 from lobster.services.data_access.geo.constants import (
     GEODataSource,
     GEOResult,
@@ -29,6 +37,15 @@ from lobster.services.data_access.geo.constants import (
 )
 from lobster.services.data_access.geo.helpers import (
     _is_data_valid,
+)
+from lobster.services.data_access.geo.import_requirements import (
+    CandidateEvidence,
+    CountValueFidelityError,
+    ImportRequirement,
+    ImportRequirementNotMet,
+    SampleIdentityError,
+    check_required_count_fidelity,
+    orient_by_sample_identity,
 )
 from lobster.services.data_access.geo.parser import (
     ParseResult,
@@ -43,6 +60,17 @@ from lobster.services.data_access.geo.strategy import (
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_MAX_REQUIRED_CANDIDATES = 8
+_MATRIX_SUFFIXES = (".txt", ".tsv", ".csv", ".txt.gz", ".tsv.gz", ".csv.gz")
+
+
+def _level_from_name(name):
+    if re.search(r"(?:^|[._ -])transcripts?(?:[._ -]|$)", name, re.I):
+        return "transcript"
+    if re.search(r"(?:^|[._ -])genes?(?:[._ -]|$)", name, re.I):
+        return "gene"
+    return "unknown"
 
 
 class DownloadExecutor:
@@ -74,6 +102,11 @@ class DownloadExecutor:
         Returns:
             str: Status message with detailed information
         """
+        requirement = ImportRequirement.parse(kwargs.get("data_requirement", ""))
+        if requirement.active:
+            return self._download_required_dataset(
+                geo_id, requirement, adapter, **kwargs
+            )
         try:
             logger.info(f"Processing GEO query with modular strategy: {geo_id}")
             caller_data_manager = kwargs.pop("data_manager", None)
@@ -455,11 +488,141 @@ Multi-Modal Dataset Detected:
                 f"Error downloading dataset {geo_id}: {str(e)}"
             ) from e
 
+    def _download_required_dataset(self, geo_id, requirement, adapter=None, **kwargs):
+        """Accept and stage one required matrix completely before registration."""
+        clean_geo_id = geo_id.strip().upper()
+        manager = self.service.data_manager
+
+        def refuse(reason, *, problem="identity", candidates=None):
+            facts = (
+                candidates
+                if candidates is not None
+                else [
+                    CandidateEvidence(
+                        "series", level="unknown", verdict="rejected", reason=reason
+                    )
+                ]
+            )
+            if candidates is not None:
+                for candidate in facts:
+                    if candidate.verdict == "accepted":
+                        candidate.verdict, candidate.reason = "rejected", reason
+            raise ImportRequirementNotMet(
+                clean_geo_id, requirement, facts, problem=problem
+            )
+
+        if re.fullmatch(r"GSE[0-9]+", clean_geo_id) is None:
+            refuse("series identity requires a GSE accession")
+        if adapter not in (None, "transcriptomics_bulk"):
+            refuse("gene_counts requires the bulk transcriptomics adapter")
+        for name in manager.list_modalities():
+            cached = manager.get_modality(name)
+            belongs = (
+                name.lower() == f"geo_{clean_geo_id.lower()}"
+                or name.lower().startswith(f"geo_{clean_geo_id.lower()}_")
+                or cached.uns.get("dataset_id") == clean_geo_id
+            )
+            if belongs:
+                refuse(
+                    "existing modality is not re-proven; cached import not reused or re-imported"
+                )
+        if clean_geo_id not in manager.metadata_store:
+            metadata, _ = self.service.fetch_metadata_only(clean_geo_id)
+            if metadata is None:
+                refuse("series metadata could not be obtained")
+        stored = manager.metadata_store[clean_geo_id]
+        if "platform_error" in stored:
+            raise UnsupportedPlatformError(
+                message=stored["platform_error"], details=stored["platform_details"]
+            )
+        metadata = stored["metadata"]
+        self.service._check_platform_compatibility(clean_geo_id, metadata)
+        result = self.download_with_strategy(geo_id=clean_geo_id, **kwargs)
+        table = result.data
+        candidates = [
+            CandidateEvidence(**fact) for fact in result.processing_info["candidates"]
+        ]
+        try:
+            check_required_count_fidelity(table)
+        except CountValueFidelityError as error:
+            refuse(str(error), problem="value_fidelity", candidates=candidates)
+        mapping = table.attrs.get("source_sample_id", {})
+        if not isinstance(mapping, dict) or set(mapping) != set(table.index):
+            refuse(
+                "accepted source sample mapping is missing or incomplete",
+                candidates=candidates,
+            )
+        enhanced = {
+            "dataset_id": clean_geo_id,
+            "dataset_type": "GEO",
+            "source_metadata": metadata,
+            "processing_date": pd.Timestamp.now().isoformat(),
+            "download_source": result.source.value,
+            "processing_method": "required_counts_matrix",
+            "data_type": "bulk_rna_seq",
+        }
+        bulk_adapter = manager.adapters["transcriptomics_bulk"]
+        staged = bulk_adapter.from_source(table, transpose=False, **enhanced)
+        try:
+            check_required_count_fidelity(table, staged)
+            ids = [mapping[label] for label in table.index]
+            if any(type(gsm) is not str for gsm in ids):
+                raise SampleIdentityError(
+                    "source_sample_id must contain plain GSM strings"
+                )
+            staged.obs["source_sample_id"] = ids
+            staged.obs["sample_id"] = ids
+            self.service._inject_required_clinical_metadata(staged, metadata)
+        except CountValueFidelityError as error:
+            refuse(str(error), problem="value_fidelity", candidates=candidates)
+        except SampleIdentityError as error:
+            refuse(str(error), candidates=candidates)
+        staged.uns["geo_import"] = {
+            "schema_version": 1,
+            "data_requirement": "gene_counts",
+            "representation": "counts",
+            "level": "gene",
+            # This is the exact remote basename, never the sanitized local cache name.
+            "accepted_file": result.processing_info["file"],
+            "sample_rule": result.processing_info["sample_rule"],
+            "candidates_json": json.dumps(
+                [asdict(fact) for fact in candidates], sort_keys=True
+            ),
+            "numeric_check": "whole-number counts (numeric check)",
+        }
+        # Validation can still refuse without registering; conversion is deliberately bypassed.
+        modality_name = f"geo_{clean_geo_id.lower()}_transcriptomics_bulk"
+        manager.load_modality(
+            name=modality_name,
+            source=staged,
+            adapter="transcriptomics_bulk",
+            validate=True,
+        )
+        save_path = f"{modality_name}_raw.h5ad"
+        manager.save_modality(modality_name, save_path)
+        manager.log_tool_usage(
+            tool_name="download_geo_dataset_strategic",
+            parameters={
+                "geo_id": clean_geo_id,
+                "data_requirement": "gene_counts",
+                "accepted_file": result.processing_info["file"],
+            },
+            description="Imported whole-number counts (numeric check), not verification of raw-count provenance",
+        )
+        manager.auto_save_state()
+        return (
+            f"Successfully downloaded and loaded GEO dataset {clean_geo_id}!\n"
+            f"Modality: '{modality_name}' ({staged.n_obs} obs x {staged.n_vars} vars)\n"
+            f"Saved to: {save_path}\n"
+            "whole-number counts (numeric check); not verification of raw-count provenance."
+        )
+
     def download_with_strategy(
         self,
         geo_id: str,
         manual_strategy_override: PipelineType = None,
         use_intersecting_genes_only: bool = None,
+        data_requirement: str = "",
     ) -> GEOResult:
         """
         Master function implementing layered download approach using dynamic pipeline strategy.
@@ -468,10 +631,13 @@ Multi-Modal Dataset Detected:
             geo_id: GEO accession ID
             manual_strategy_override: Optional manual pipeline override
             use_intersecting_genes_only: Concatenation strategy (None=auto, True=inner, False=outer)
+            data_requirement: '' keeps the legacy pipeline; 'gene_counts' selects
+                one complete gene-level matrix using numeric/identity evidence.
 
         Returns:
             GEOResult: Comprehensive result with data and metadata
         """
+        requirement = ImportRequirement.parse(data_requirement)
         # Store concatenation strategy for use in pipeline functions
         # Also store on service for backward compat with cross-module access
         self.service._use_intersecting_genes_only = use_intersecting_genes_only
@@ -502,6 +668,10 @@ Multi-Modal Dataset Detected:
                     f"This indicates a storage/retrieval bug."
                 )
             cached_metadata = stored_metadata_info["metadata"]
+            if requirement.active:
+                return self._try_required_counts_matrix(
+                    clean_geo_id, cached_metadata, requirement
+                )
             strategy_config = stored_metadata_info.get("strategy_config", {})
 
             if not strategy_config:
@@ -541,7 +711,7 @@ Multi-Modal Dataset Detected:
                         return result
                     else:
                         logger.debug(f"Step failed: {result.error_message}")
-                except InferenceRefused:
+                except (InferenceRefused, ImportRequirementNotMet):
                     raise
                 except Exception as e:
                     reraise_inference_refusal(e)
@@ -555,14 +725,132 @@ Multi-Modal Dataset Detected:
                 source=GEODataSource.GEOPARSE,
             )
 
-        except InferenceRefused:
+        except (InferenceRefused, ImportRequirementNotMet):
             raise
         except Exception as e:
+            if requirement.active:
+                raise
             reraise_inference_refusal(e)
             logger.exception(f"Error in strategic download: {e}")
             return GEOResult(
                 success=False, error_message=str(e), source=GEODataSource.GEOPARSE
             )
+
+    def _try_required_counts_matrix(self, geo_id, metadata, requirement) -> GEOResult:
+        """The only active chooser; values and identity, never raw provenance."""
+        inventory = metadata.get("supplementary_file", [])
+        if isinstance(inventory, str):
+            inventory = [inventory]
+        if not isinstance(inventory, (list, tuple)) or not all(
+            isinstance(url, str) for url in inventory
+        ):
+            raise ValueError("Series supplementary_file must be a URL or list of URLs")
+
+        evidence, eligible = [], []
+        for url in sorted(set(inventory)):
+            parts = urlsplit(url)
+            name = parts.path.rsplit("/", 1)[-1]
+            ev = CandidateEvidence(name, level=_level_from_name(name))
+            evidence.append(ev)
+            if ev.level == "transcript":
+                reason = "transcript-level filename"
+            elif name.lower().endswith(
+                (".tar", ".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz")
+            ):
+                reason = "archives are not supported by this requirement"
+            elif (
+                not name.lower().endswith(_MATRIX_SUFFIXES)
+                or re.search(
+                    r"(?:^|[._ -])(?:metadata|annotation|readme|barcodes|features|phenotype|clinical|design)(?:[._ -]|$)",
+                    name,
+                    re.I,
+                )
+                or parts.scheme.lower() not in {"http", "https", "ftp"}
+                or not parts.hostname
+                or parts.username is not None
+                or parts.password is not None
+            ):
+                reason = "not a supported series text matrix URL"
+            else:
+                eligible.append((url, ev))
+                continue
+            ev.verdict, ev.reason = "rejected", reason
+
+        if len(eligible) > _MAX_REQUIRED_CANDIDATES:
+            for _, ev in eligible:
+                ev.reason = "not checked: eligible inventory exceeds candidate limit"
+            raise ImportRequirementNotMet(
+                geo_id, requirement, evidence, problem="too_many_candidates"
+            )
+
+        accepted = []
+        for url, ev in eligible:
+            parsed = self.service._download_and_parse_result(url, geo_id)
+            ev.complete_parse = isinstance(parsed, ParseResult) and parsed.is_complete
+            if ev.complete_parse and not isinstance(parsed.original_tokens_valid, bool):
+                ev.complete_parse = False
+            ev.verdict = "rejected"
+            if not ev.complete_parse:
+                ev.reason = "file could not be read completely"
+                continue
+            try:
+                table, ev.sample_rule = orient_by_sample_identity(
+                    parsed.data, metadata.get("samples", {})
+                )
+            except SampleIdentityError as error:
+                ev.reason = f"sample identity: {error}"
+                continue
+            features = list(table.columns)
+            if any(
+                isinstance(feature, str)
+                and re.fullmatch(r"ENS[A-Z]*T[0-9]+(?:\.[0-9]+)?", feature, re.I)
+                for feature in features
+            ):
+                ev.level, ev.reason = "transcript", "transcript-level feature IDs"
+                continue
+            if ev.level == "unknown" and all(
+                isinstance(feature, str)
+                and re.fullmatch(r"ENS[A-Z]*G[0-9]+(?:\.[0-9]+)?", feature)
+                for feature in features
+            ):
+                ev.level = "gene"
+            if ev.level != "gene":
+                ev.reason = "gene level not established"
+                continue
+            ev.whole_numbers = parsed.original_tokens_valid and is_whole_number_matrix(
+                table.to_numpy()
+            )
+            if not ev.whole_numbers:
+                ev.reason = "values are not finite non-negative whole-number counts"
+                continue
+            ev.equal_sample_totals = has_equal_sample_totals(table.sum(axis=1))
+            if ev.equal_sample_totals:
+                ev.reason = "constant sample totals (numeric signature, not proof of normalization)"
+                continue
+            ev.verdict, ev.reason = "accepted", "whole-number counts (numeric check)"
+            accepted.append((ev, table))
+
+        if len(accepted) != 1:
+            raise ImportRequirementNotMet(
+                geo_id,
+                requirement,
+                evidence,
+                problem="ambiguous" if accepted else "no_candidate",
+            )
+        ev, table = accepted[0]
+        return GEOResult(
+            data=table,
+            metadata=metadata,
+            source=GEODataSource.SUPPLEMENTARY,
+            success=True,
+            processing_info={
+                "method": "required_counts_matrix",
+                "file": ev.file_name,
+                "sample_rule": ev.sample_rule,
+                "data_requirement": "gene_counts",
+                "candidates": [asdict(candidate) for candidate in evidence],
+            },
+        )
 
     def _get_processing_pipeline(
         self, geo_id: str, metadata: Dict[str, Any], strategy_config: Dict[str, Any]

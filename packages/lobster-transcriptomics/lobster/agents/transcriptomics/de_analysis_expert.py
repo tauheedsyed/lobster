@@ -720,28 +720,7 @@ def de_analysis_expert(
         (count_layer, None), where count_layer None means adata.X, or
         (None, refusal) when the available matrix fails validation.
         """
-        from scipy import sparse
-
-        def is_counts(matrix) -> bool:
-            if sparse.issparse(matrix):
-                values = matrix.data
-                blocks = (
-                    values[start : start + 2**20]
-                    for start in range(0, values.size, 2**20)
-                )
-            else:
-                # Bound validation temporaries instead of copying the full matrix.
-                step = max(1, 2**20 // max(1, matrix.shape[1]))
-                blocks = (
-                    np.asarray(matrix[start : start + step])
-                    for start in range(0, matrix.shape[0], step)
-                )
-            return all(
-                np.all(np.isfinite(values))
-                and np.all(values >= 0)
-                and np.all(np.mod(values, 1) == 0)
-                for values in blocks
-            )
+        from lobster.core.utils.count_matrix import is_whole_number_matrix as is_counts
 
         hint = (
             "DESeq2 needs raw integer counts. Was this pseudobulk matrix "

@@ -62,6 +62,10 @@ from lobster.core.runtime.workspace import WORKSPACE_FOLDER_NAME
 from lobster.core.schemas.download_queue import DownloadStatus, ValidationStatus
 
 # Service imports
+from lobster.services.data_access.geo.import_requirements import (
+    ImportRequirement,
+    ImportRequirementNotMet,
+)
 from lobster.services.execution.registry import (
     CustomCodeExecutionService,
     SDKDelegationError,
@@ -234,6 +238,7 @@ def data_expert(
         concatenation_strategy: str = "auto",
         force_download: bool = False,
         strategy_override: str = "",
+        data_requirement: str = "",
     ) -> str:
         """Execute download from a queue entry prepared by research_agent.
 
@@ -244,8 +249,16 @@ def data_expert(
             concatenation_strategy: "auto" (recommended), "union", or "intersection"
             force_download: Proceed despite validation warnings (default: False)
             strategy_override: Override strategy for retries: "MATRIX_FIRST", "SUPPLEMENTARY_FIRST", "H5_FIRST", "RAW_FIRST"
+            data_requirement: '' (default) keeps current file selection and import behavior.
+                'gene_counts' requires exactly one complete series-level bulk RNA gene-count
+                text matrix with finite non-negative whole-number counts, non-constant sample
+                totals and exact GSM/title identity. Returns per-file evidence; no match or
+                ambiguity refuses the import. This is a numeric check, not verification of
+                raw-count provenance. If the import is refused, choose another dataset or
+                report it; do not retry the same entry unchanged.
         """
         try:
+            requirement = ImportRequirement.parse(data_requirement)
             # 1. RETRIEVE QUEUE ENTRY
             if entry_id not in [
                 e.entry_id for e in data_manager.download_queue.list_entries()
@@ -258,6 +271,32 @@ def data_expert(
                 )
 
             entry = data_manager.download_queue.get_entry(entry_id)
+
+            if requirement.active:
+                if entry.database.lower() != "geo":
+                    raise ValueError(
+                        "data_requirement='gene_counts' is supported only for GEO queue entries."
+                    )
+                if entry.status == DownloadStatus.COMPLETED:
+                    stored = data_manager.modalities.get(entry.modality_name)
+                    evidence = (
+                        stored.uns.get("geo_import") if stored is not None else None
+                    )
+                    if (
+                        isinstance(evidence, dict)
+                        and evidence.get("data_requirement") == data_requirement
+                    ):
+                        return (
+                            f"Entry '{entry_id}' already imported as '{entry.modality_name}' "
+                            f"with data_requirement='{data_requirement}'.\n"
+                            f"Import evidence: {evidence}"
+                        )
+                    return (
+                        f"Entry '{entry_id}': this entry was already imported without the "
+                        "gene_counts requirement; not re-imported.\n"
+                        "Report it, or queue a new entry if the available tools allow it. "
+                        "The existing queue status has not been reset."
+                    )
 
             # Check validation status and warn if issues detected
             if (
@@ -280,6 +319,9 @@ def data_expert(
 - Concatenation: {entry.recommended_strategy.concatenation_strategy}
 """
 
+                requirement_arg = (
+                    ', data_requirement="gene_counts"' if requirement.active else ""
+                )
                 warning_msg = f"""
 ⚠️ **Dataset has validation warnings but is downloadable**
 
@@ -292,7 +334,7 @@ Dataset: {entry.dataset_id}
 {strategy_info}
 
 **Options:**
-1. **Proceed with download**: execute_download_from_queue(entry_id="{entry_id}", force_download=True)
+1. **Proceed with download**: execute_download_from_queue(entry_id="{entry_id}", force_download=True{requirement_arg})
 2. **Skip dataset**: Look for alternative datasets with cleaner validation
 
 **Recommendation:** Review warnings above. If warnings are acceptable (e.g., missing optional metadata fields), proceed with force_download=True.
@@ -315,6 +357,7 @@ Dataset: {entry.dataset_id}
                 entry.recommended_strategy
                 or concatenation_strategy != "auto"
                 or strategy_override
+                or requirement.active
             ):
                 strategy_override_dict = {}
                 if entry.recommended_strategy:
@@ -338,6 +381,10 @@ Dataset: {entry.dataset_id}
                     )
                     if explicit_strategy_name:
                         strategy_override_dict["strategy_name"] = explicit_strategy_name
+                if requirement.active:
+                    strategy_override_dict.setdefault("strategy_params", {})[
+                        "data_requirement"
+                    ] = data_requirement
                 if not strategy_override_dict:
                     strategy_override_dict = None
 
@@ -469,8 +516,19 @@ Concatenation: {concatenation_used}
 You can now analyze this dataset using the appropriate analysis tools.
 """
 
+                if requirement.active:
+                    evidence = result_adata.uns.get("geo_import")
+                    if isinstance(evidence, dict):
+                        response += f"\nImport evidence: {evidence}\n"
                 return response
 
+            except ImportRequirementNotMet as download_error:
+                logger.error(f"Import refused for {entry.dataset_id}: {download_error}")
+                return (
+                    f"## Import Refused: {entry.dataset_id}\n\n"
+                    f"- **Queue entry**: `{entry_id}` (FAILED)\n\n"
+                    f"{download_error.to_message()}"
+                )
             except Exception as download_error:
                 reraise_inference_refusal(download_error)
                 logger.error(

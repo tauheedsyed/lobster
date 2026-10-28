@@ -17,7 +17,9 @@ import csv
 import gzip
 import io
 import re
+import zlib
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -213,6 +215,7 @@ class ParseResult:
     truncation_reason: Optional[str] = None
     source_format: Optional[str] = None
     orientation: Optional[str] = None
+    original_tokens_valid: Optional[bool] = None
 
     def __post_init__(self):
         # The archive producer returns the DataFrame for compatibility. Carry
@@ -600,6 +603,184 @@ class GEOParser:
                 f"Could not calculate adaptive chunk size: {e}, using default"
             )
             return 10000  # Default chunk size
+
+    def _required_text_shape(self, file_path: Path, delimiter: str) -> Tuple:
+        """Validate every logical CSV record before loading a required matrix.
+
+        Match pandas C skip_blank_lines=True: only empty or ASCII space/tab
+        physical lines skip, never quoted fields or delimiter-separated cells.
+        R row names are permitted only when ALL rows have header width + 1.
+        """
+        from pandas._libs.parsers import STR_NA_VALUES
+
+        opener = gzip.open if file_path.name.endswith(".gz") else open
+        header_width = width = rows = 0
+        header = []
+        tokens_valid = True
+        with opener(file_path, "rt", encoding="utf-8-sig", newline="") as stream:
+            last_line = ""
+
+            def lines():
+                nonlocal last_line
+                for line in stream:
+                    if "\x00" in line:
+                        raise GEOFormatError("Required matrix contains NUL")
+                    last_line = line
+                    yield line
+
+            reader = csv.reader(
+                lines(),
+                delimiter=delimiter,
+                quotechar='"',
+                doublequote=True,
+                escapechar=None,
+                strict=True,
+            )
+            for record in reader:
+                if not record or (len(record) == 1 and not last_line.strip(" \t\r\n")):
+                    continue
+                if not header_width:
+                    header = record
+                    header_width = len(record)
+                    if header_width < 2 or len(set(header)) != header_width:
+                        raise GEOFormatError("Required matrix header is invalid")
+                    continue
+                if not width:
+                    width = len(record)
+                    if width not in (header_width, header_width + 1):
+                        raise GEOFormatError("Required matrix record width mismatch")
+                if len(record) != width:
+                    raise GEOFormatError("Required matrix record width mismatch")
+                rows += 1
+                for token in record[1:]:
+                    if token in STR_NA_VALUES or (token.isascii() and token.isdigit()):
+                        continue
+                    try:
+                        number = Decimal(token)
+                        if (
+                            not number.is_finite()
+                            or number < 0
+                            or number != number.to_integral_value()
+                        ):
+                            tokens_valid = False
+                    except InvalidOperation:
+                        tokens_valid = False
+        columns = (
+            [header[0] or None, *header[1:]]
+            if header and width == header_width
+            else [None, *header]
+        )
+        return rows, width - 1, tokens_valid, columns
+
+    def _required_delimiter(self, file_path: Path) -> str:
+        """Never infer an identifier character as a separator for R row names."""
+        opener = gzip.open if file_path.name.endswith(".gz") else open
+        with opener(file_path, "rt", encoding="utf-8-sig") as stream:
+            sample = stream.read(8192)
+        choices = "\t,;| "
+        try:
+            return csv.Sniffer().sniff(sample, delimiters=choices).delimiter
+        except csv.Error:
+            return max(choices, key=sample.count)
+
+    def parse_required_expression_file(self, file_path: Path) -> ParseResult:
+        """Strict, active-only text import; ordinary/tolerant readers are unchanged."""
+        total_rows = 0
+        try:
+            from pandas._libs.parsers import STR_NA_VALUES
+
+            delimiter = self._required_delimiter(file_path)
+            rows, columns, tokens_valid, names = self._required_text_shape(
+                file_path, delimiter
+            )
+            if rows == 0 or columns < 1:
+                return ParseResult()
+            index_name = names[0]
+            if index_name is None:
+                names[0] = 0  # Distinct from every raw CSV (str) header label.
+            options = dict(
+                sep=delimiter,
+                index_col=0,
+                compression="infer",
+                encoding="utf-8-sig",
+                engine="c",
+                low_memory=False,
+                on_bad_lines="error",
+                names=names,
+                header=0,
+                dtype={names[0]: str},
+                na_values={name: STR_NA_VALUES for name in names[1:]},
+                keep_default_na=False,
+                skip_blank_lines=True,
+            )
+            use_chunks = (
+                not self.check_memory_for_dimensions(rows, columns)["can_load"]
+                or file_path.stat().st_size > 100_000_000
+            )
+            if not use_chunks:
+                try:
+                    data = pd.read_csv(file_path, **options)
+                except MemoryError:
+                    use_chunks = True
+            partial = False
+            reason = None
+            if use_chunks:
+                chunks = []
+                chunk_size = self._get_adaptive_chunk_size(file_path)
+                with pd.read_csv(file_path, chunksize=chunk_size, **options) as reader:
+                    for chunk in reader:
+                        memory = chunk.memory_usage(deep=True).sum()
+                        if not self._check_memory_availability(
+                            memory, safety_factor=1.2
+                        ):
+                            partial = True
+                            reason = (
+                                "Memory limit reached while reading required matrix"
+                            )
+                            break
+                        chunks.append(chunk)
+                        total_rows += len(chunk)
+                        if psutil.virtual_memory().percent > 80 and len(chunks) > 1:
+                            import gc
+
+                            chunks = [pd.concat(chunks, axis=0)]
+                            gc.collect()
+                data = pd.concat(chunks, axis=0) if chunks else None
+            if data is not None:
+                data.index.name = index_name
+                total_rows = len(data)
+                if not partial and data.shape != (rows, columns):
+                    raise GEOFormatError("Required matrix parsed shape mismatch")
+            return ParseResult(
+                data=data,
+                is_partial=partial,
+                rows_read=total_rows,
+                truncation_reason=reason,
+                source_format="tabular",
+                orientation="unoriented",
+                original_tokens_valid=tokens_valid,
+            )
+        except MemoryError:
+            return ParseResult(
+                is_partial=True,
+                rows_read=total_rows,
+                truncation_reason="MemoryError while reading required matrix",
+            )
+        except (
+            GEOFormatError,
+            csv.Error,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+            OSError,
+            EOFError,
+            UnicodeError,
+            zlib.error,
+        ) as error:
+            logger.warning(
+                "Required GEO matrix could not be read completely (%s)",
+                type(error).__name__,
+            )
+            return ParseResult()
 
     def parse_expression_file(self, file_path: Path) -> ParseResult:
         """

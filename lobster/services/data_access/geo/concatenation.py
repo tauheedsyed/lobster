@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
+from lobster.services.data_access.geo.import_requirements import SampleIdentityError
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -547,6 +548,57 @@ Ready for single-cell analysis!"""
             reraise_inference_refusal(e)
             logger.error(f"Error storing sample {gsm_id}: {e}")
             return f"Error storing sample {gsm_id}: {str(e)}"
+
+    def _inject_required_clinical_metadata(self, adata, metadata) -> None:
+        """Stage optional clinical fields using only a proven complete GSM bijection."""
+        samples = metadata.get("samples")
+        if not isinstance(samples, dict) or not samples:
+            raise SampleIdentityError(
+                "clinical sample metadata must be a nonempty mapping"
+            )
+        if "source_sample_id" not in adata.obs:
+            raise SampleIdentityError(
+                "source_sample_id is missing before clinical injection"
+            )
+        ids = list(adata.obs["source_sample_id"])
+        if (
+            any(type(gsm) is not str for gsm in ids)
+            or len(set(ids)) != len(ids)
+            or set(ids) != set(samples)
+        ):
+            raise SampleIdentityError(
+                "clinical metadata requires the complete exact GSM bijection"
+            )
+        parsed_samples, keys = {}, set()
+        for gsm, sample in samples.items():
+            if not isinstance(sample, dict):
+                raise SampleIdentityError("clinical sample payload must be a mapping")
+            chars = sample.get("characteristics_ch1", [])
+            if not isinstance(chars, list):
+                raise SampleIdentityError("provided characteristics_ch1 must be a list")
+            parsed = {}
+            for characteristic in chars:
+                if not isinstance(characteristic, str) or ":" not in characteristic:
+                    raise SampleIdentityError(
+                        "provided clinical characteristic must be a key: value string"
+                    )
+                key, value = characteristic.split(":", 1)
+                key = key.strip().lower().replace(" ", "_").replace("-", "_")
+                value = value.strip()
+                if not key:
+                    raise SampleIdentityError("clinical characteristic key is empty")
+                if key in {"sample_id", "source_sample_id"}:
+                    continue
+                if key in parsed and parsed[key] != value:
+                    raise SampleIdentityError(
+                        "conflicting duplicate clinical characteristic"
+                    )
+                parsed[key] = value
+            parsed_samples[gsm] = parsed
+            keys.update(parsed)
+        # Existing adapter metrics are not clinical identity and are not overwritten.
+        for key in sorted(keys - set(adata.obs.columns)):
+            adata.obs[key] = [parsed_samples[gsm].get(key, "") for gsm in ids]
 
     def _inject_clinical_metadata(self, adata, geo_id: str) -> None:
         """

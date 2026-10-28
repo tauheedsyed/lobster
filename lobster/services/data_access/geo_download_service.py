@@ -37,6 +37,10 @@ from lobster.core.interfaces.download_service import IDownloadService
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.schemas.download_queue import DownloadQueueEntry
 from lobster.services.data_access.geo.constants import GEOServiceError
+from lobster.services.data_access.geo.import_requirements import (
+    ImportRequirement,
+    ImportRequirementNotMet,
+)
 from lobster.services.data_access.geo_service import GEOService
 from lobster.utils.logger import get_logger
 
@@ -196,6 +200,7 @@ class GEODownloadService(IDownloadService):
                 - strategy_name: One of GEO strategies (see get_supported_strategies)
                 - strategy_params: Dict with optional:
                     - use_intersecting_genes_only: bool (concatenation strategy)
+                    - data_requirement: '' (legacy) or 'gene_counts' (opt-in acceptance)
 
         Returns:
             Tuple containing:
@@ -261,6 +266,8 @@ class GEODownloadService(IDownloadService):
         explicit_strategy_params = (
             strategy_override.get("strategy_params", {}) if strategy_override else {}
         )
+        data_requirement = explicit_strategy_params.get("data_requirement", "")
+        requirement = ImportRequirement.parse(data_requirement)
 
         if "use_intersecting_genes_only" in explicit_strategy_params:
             use_intersecting_genes_only = explicit_strategy_params.get(
@@ -313,12 +320,18 @@ class GEODownloadService(IDownloadService):
         # GEOService raises GEOServiceError on failure, returns success message string
         try:
             logger.info(f"Calling GEOService.download_dataset for {geo_id}...")
+            requirement_kwargs = (
+                {"data_requirement": data_requirement} if requirement.active else {}
+            )
             download_message = self.geo_service.download_dataset(
                 geo_id=geo_id,
                 manual_strategy_override=strategy_name,
                 use_intersecting_genes_only=use_intersecting_genes_only,
+                **requirement_kwargs,
             )
             logger.info(f"GEOService completed: {download_message[:200]}...")
+        except ImportRequirementNotMet:
+            raise
         except GEOServiceError as e:
             reraise_inference_refusal(e)
             # GEOServiceError indicates download failed - propagate with context
@@ -368,6 +381,8 @@ class GEODownloadService(IDownloadService):
             "download_message": download_message,
         }
 
+        if requirement.active:
+            stats["data_requirement"] = data_requirement
         logger.debug(f"Built stats dict: {stats}")
 
         # Step 7: Create AnalysisStep IR for provenance
@@ -378,6 +393,8 @@ class GEODownloadService(IDownloadService):
             use_intersecting_genes_only=use_intersecting_genes_only,
             queue_entry_id=queue_entry.entry_id,
         )
+        if requirement.active:
+            ir.execution_context["data_requirement"] = data_requirement
 
         logger.info(f"Successfully completed GEO download for {geo_id}")
         return adata, stats, ir
@@ -518,6 +535,7 @@ print(f"Loaded { {{ dataset_id | repr }} }: {adata.n_obs} observations × {adata
             strategy_params: Dictionary of strategy-specific parameters.
                 Recognized parameters:
                 - use_intersecting_genes_only: bool (concatenation strategy)
+                - data_requirement: '' (legacy) or 'gene_counts' (opt-in acceptance)
 
         Returns:
             Tuple containing:
@@ -557,6 +575,12 @@ print(f"Loaded { {{ dataset_id | repr }} }: {adata.n_obs} observations × {adata
                 return False, error_msg
 
             logger.debug(f"Valid: use_intersecting_genes_only={value}")
+
+        if "data_requirement" in strategy_params:
+            try:
+                ImportRequirement.parse(strategy_params["data_requirement"])
+            except ValueError as error:
+                return False, str(error)
 
         # All known parameters are valid (unknown parameters ignored for forward compatibility)
         logger.debug("Strategy parameters validation passed")

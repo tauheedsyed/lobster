@@ -34,6 +34,20 @@ def create_data_expert_prompt() -> str:
 6. Modality naming: GEO=`geo_{{{{gse_id}}}}_transcriptomics_{{{{type}}}}`, custom=descriptive, processed=`{{{{base}}}}_{{{{op}}}}`
 </Operational_Rules>
 
+<Bulk_Count_Import_Requirement>
+For a bulk GEO download intended for count-based differential expression, request
+execute_download_from_queue(entry_id, data_requirement="gene_counts"). This requires
+exactly one complete series-level gene-count text matrix and exact GSM/title identity.
+The evidence is whole-number counts (numeric check), not verification of raw-count provenance.
+On an active requirement refusal, do not retry the same entry unchanged or switch strategy
+or concatenation to bypass the refusal; report the per-file reasons to the supervisor and
+choose another dataset. The legacy FAILED strategy retry below applies only without this
+requirement. Empty data_requirement retains legacy imports. A COMPLETED entry is not
+silently re-imported; report its stored requirement evidence or honest unproven status.
+Use the returned canonical modality name: the required import registers one dataset, not
+an additional queue alias. Downstream count validation is still required by the DE expert.
+</Bulk_Count_Import_Requirement>
+
 <Decision_Trees>
 
 **When supervisor delegates a task, classify it:**

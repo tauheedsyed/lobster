@@ -1,16 +1,23 @@
 """The existing ML CSV export is a session-path control."""
 
+from importlib.util import find_spec
 from pathlib import Path
 
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
 
-from lobster.agents.machine_learning.machine_learning_expert import (
-    machine_learning_expert,
-)
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.testing.provenance_replay import factory_tools
+
+# ML is optional: skip an absent package, not broken imports in a present one.
+if find_spec("lobster.agents.machine_learning") is None:
+    pytest.skip("Optional ML agent package is not installed", allow_module_level=True)
+
+from lobster.agents.machine_learning.machine_learning_expert import (  # noqa: E402
+    machine_learning_expert,
+)
 
 
 def test_ml_csv_export_already_uses_session_exports(tmp_path, monkeypatch):

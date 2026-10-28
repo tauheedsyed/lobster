@@ -6,11 +6,14 @@ Contains 8 methods that handle supplementary file processing, TAR extraction,
 nested archive handling, Kallisto/Salmon quantification files, and 10X data.
 """
 
+import hashlib
 import os
+import re
 import shutil
 import tarfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 import anndata
 import pandas as pd
@@ -512,6 +515,38 @@ class ArchiveProcessor:
         except Exception as e:
             logger.error(f"Error downloading and parsing file: {e}")
             return None
+
+    def _download_and_parse_result(
+        self, file_url: str, gse_id: str
+    ) -> Optional[ParseResult]:
+        """Retain explicit parse integrity through the download boundary, cache included.
+
+        Unlike the legacy sibling, never infer completeness from a bare table,
+        bypass acquisition for cached files, or swallow boundary/parser errors.
+        The URL/series hash isolates same-name resources without path injection.
+        """
+        parts = urlsplit(file_url)
+        if (
+            parts.scheme.lower() not in {"http", "https", "ftp"}
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+        ):
+            raise ValueError("A remote matrix URL without userinfo is required")
+        filename = parts.path.rsplit("/", 1)[-1]
+        suffixes = (".txt.gz", ".tsv.gz", ".csv.gz", ".txt", ".tsv", ".csv")
+        suffix = next((s for s in suffixes if filename.lower().endswith(s)), None)
+        if suffix is None:
+            raise ValueError(
+                "Only supported text matrix files can be parsed completely"
+            )
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", filename[: -len(suffix)])[:80]
+        digest = hashlib.sha256(f"{gse_id}\0{file_url}".encode()).hexdigest()
+        local_file = self.service.cache_dir / f"required_{digest}_{stem}{suffix}"
+        if not self.service.geo_downloader.download_file(file_url, local_file):
+            return None
+        parsed = self.service.geo_parser.parse_required_expression_file(local_file)
+        return parsed if isinstance(parsed, ParseResult) else None
 
     def _detect_kallisto_salmon_files(
         self,

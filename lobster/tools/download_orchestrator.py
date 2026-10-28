@@ -48,6 +48,11 @@ from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.exceptions import reraise_inference_refusal
 from lobster.core.interfaces.download_service import IDownloadService
 from lobster.core.schemas.download_queue import DownloadStatus
+from lobster.services.data_access.geo.import_requirements import (
+    CandidateEvidence,
+    ImportRequirement,
+    ImportRequirementNotMet,
+)
 from lobster.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -368,10 +373,42 @@ class DownloadOrchestrator:
                 self.progress_callback(entry_id, 1, 1, True)
 
             # Step 6: Store result in DataManagerV2
-            modality_name = (
-                entry.modality_name or f"{entry.database.lower()}_{entry.dataset_id}"
+            requested = (strategy_override or {}).get("strategy_params", {})
+            required_geo = (
+                entry.database.lower() == "geo"
+                and requested.get("data_requirement") == "gene_counts"
             )
-            self.data_manager.modalities[modality_name] = adata
+            if required_geo:
+                # The service has already accepted and registered this exact object.
+                modality_name = stats.get("modality_name")
+                evidence = adata.uns.get("geo_import")
+                if (
+                    stats.get("data_requirement") != "gene_counts"
+                    or not isinstance(evidence, dict)
+                    or evidence.get("data_requirement") != "gene_counts"
+                    or not isinstance(modality_name, str)
+                    or modality_name not in self.data_manager.modalities
+                    or self.data_manager.get_modality(modality_name) is not adata
+                ):
+                    raise ImportRequirementNotMet(
+                        entry.dataset_id,
+                        ImportRequirement.parse("gene_counts"),
+                        [
+                            CandidateEvidence(
+                                "series",
+                                level="unknown",
+                                verdict="rejected",
+                                reason="required import lacks a consistent canonical registered result",
+                            )
+                        ],
+                        problem="identity",
+                    )
+            else:
+                modality_name = (
+                    entry.modality_name
+                    or f"{entry.database.lower()}_{entry.dataset_id}"
+                )
+                self.data_manager.modalities[modality_name] = adata
             logger.info(
                 f"Stored downloaded data as modality '{modality_name}' "
                 f"({adata.n_obs} obs × {adata.n_vars} vars)"
