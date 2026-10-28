@@ -154,6 +154,8 @@ offer the tool. Override with `LOBSTER_CODE_TOOL_<AGENT_NAME_UPPER>=1|0` or glob
 global environment, then workspace settings, then the declared default;
 `default` defers. Per-agent `1` overrides global `none`.
 
+The switch controls only the `execute_custom_code` tool; it does not disable other tools, including tools that run shell commands or write files.
+
 Custom code runs as your own OS user, not within a confinement boundary.
 Run only code you trust. Its serialized result envelope is limited to **16 MiB**;
 larger envelopes are unreadable and submitted figures are not saved. Write large

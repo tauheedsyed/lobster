@@ -220,6 +220,8 @@ The supervisor, `data_expert_agent`, `metadata_assistant`, and
 `visualization_expert_agent` default to custom code enabled; other participating
 built-in experts default to disabled. `research_agent` does not offer the tool.
 
+The switch controls only the `execute_custom_code` tool; it does not disable other tools, including tools that run shell commands or write files.
+
 For participating factories, precedence is per-agent environment, global
 environment, workspace `config.toml`, then the declared default (otherwise off):
 

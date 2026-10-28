@@ -65,6 +65,8 @@ The supervisor, `data_expert_agent`, `metadata_assistant`, and
 `visualization_expert_agent` default to enabled. Other participating built-in
 experts default to disabled; `research_agent` does not offer the tool.
 
+The switch controls only the `execute_custom_code` tool; it does not disable other tools, including tools that run shell commands or write files.
+
 For an agent whose factory calls `attach_code_tool`, precedence is:
 
 1. `LOBSTER_CODE_TOOL_<AGENT_NAME_UPPER>=1|0` (canonical registry name).
