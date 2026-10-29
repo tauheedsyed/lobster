@@ -14,6 +14,8 @@ import anndata
 import numpy as np
 import pandas as pd
 
+from lobster.core.exceptions import HdfReadRefusal, InferenceRefused
+from lobster.core.figures.errors import ManagedPathError
 from lobster.core.interfaces.adapter import IModalityAdapter
 from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.utils.h5ad_utils import repair_log1p_base
@@ -215,6 +217,8 @@ class BaseAdapter(IModalityAdapter):
                 f"Loaded H5AD data from {path}: {adata.n_obs} obs × {adata.n_vars} vars"
             )
             return adata
+        except (HdfReadRefusal, InferenceRefused, ManagedPathError):
+            raise
         except Exception as e:
             raise ValueError(f"Failed to load H5AD data from {path}: {e}") from e
 
@@ -730,6 +734,8 @@ class BaseAdapter(IModalityAdapter):
             )
             return adata
 
+        except (HdfReadRefusal, InferenceRefused, ManagedPathError):
+            raise
         except Exception as e:
             self.logger.error(f"Failed to load data from {source}: {e}")
             raise

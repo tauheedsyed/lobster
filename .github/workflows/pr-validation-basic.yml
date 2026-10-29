@@ -8,6 +8,10 @@ on:
 env:
   PYTHONPATH: ${{ github.workspace }}
   PYTEST_ADDOPTS: "--color=yes --tb=short"
+  # Fresh resolves stay on the uv.lock versions listed there (pytest 9.2.0 vs
+  # pytest-benchmark 5.3.0).
+  PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
+  UV_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
 
 jobs:
   # =====================================================================

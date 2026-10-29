@@ -16,6 +16,12 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 from langchain_core.tools import tool
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import (
+    MANAGED_EXPORT_MESSAGE,
+    assert_export_allowed,
+)
 from lobster.core.queue_storage import atomic_write_jsonl
 from lobster.core.schemas.export_schemas import (
     get_ordered_export_columns,
@@ -46,6 +52,13 @@ MAX_LIST_ITEMS = 50
 
 # Maximum chars for single-item metadata retrieval (prevents context bombing)
 MAX_SINGLE_ITEM_LENGTH = 8000
+
+
+def _assert_export_targets(workspace_path: Path, *targets: Optional[Path]) -> None:
+    """Refuse (typed error) any target inside the managed figure folder."""
+    for target in targets:
+        if target is not None:
+            assert_export_allowed(workspace_path, target)
 
 
 def _get_exports_directory(workspace_path: Path, create: bool = True) -> Path:
@@ -1352,7 +1365,10 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
         add_timestamp: bool = True,
     ) -> str:
         try:
-            workspace_service = WorkspaceContentService(data_manager=data_manager)
+            # Directories are created only once this call's targets are checked.
+            workspace_service = WorkspaceContentService(
+                data_manager=data_manager, create_dirs=False
+            )
 
             workspace_to_content_type = {
                 "literature": ContentType.PUBLICATION,
@@ -1573,7 +1589,7 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
                         # v2.0: Dual-file export (ALWAYS export both strict + rich)
                         workspace_path = Path(data_manager.workspace_path)
                         exports_dir = _get_exports_directory(
-                            workspace_path, create=True
+                            workspace_path, create=False
                         )
                         base_filename = workspace_service._sanitize_filename(identifier)
 
@@ -1595,6 +1611,33 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
                             else f"{base_filename}_rich.csv"
                         )
                         rich_file_path = exports_dir / rich_filename
+                        strict_filename = (
+                            f"{base_filename}_strict_{timestamp}.csv"
+                            if timestamp
+                            else f"{base_filename}_strict.csv"
+                        )
+                        strict_file_path = exports_dir / strict_filename
+                        prov_log_path = None
+                        if provenance_log:
+                            prov_filename = (
+                                f"{base_filename}_harmonization_log_{timestamp}.tsv"
+                                if timestamp
+                                else f"{base_filename}_harmonization_log.tsv"
+                            )
+                            prov_log_path = exports_dir / prov_filename
+
+                        # Every file of this export is checked before anything
+                        # is created or written.
+                        _assert_export_targets(
+                            workspace_path,
+                            rich_file_path,
+                            strict_file_path,
+                            prov_log_path,
+                        )
+                        workspace_service.ensure_content_dirs()
+                        _get_exports_directory(workspace_path, create=True)
+
+                        _assert_export_targets(workspace_path, rich_file_path)
                         df.to_csv(rich_file_path, index=False, encoding="utf-8")
                         logger.info(
                             f"CSV export (rich): {len(df)} rows, {len(df.columns)} columns → {rich_file_path.name}"
@@ -1608,12 +1651,7 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
                         )
                         available_strict = [c for c in strict_cols if c in df.columns]
                         df_strict = df[available_strict]
-                        strict_filename = (
-                            f"{base_filename}_strict_{timestamp}.csv"
-                            if timestamp
-                            else f"{base_filename}_strict.csv"
-                        )
-                        strict_file_path = exports_dir / strict_filename
+                        _assert_export_targets(workspace_path, strict_file_path)
                         df_strict.to_csv(
                             strict_file_path, index=False, encoding="utf-8"
                         )
@@ -1623,13 +1661,8 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
 
                         # Export 3: Provenance log (harmonization audit trail)
                         if provenance_log:
-                            prov_filename = (
-                                f"{base_filename}_harmonization_log_{timestamp}.tsv"
-                                if timestamp
-                                else f"{base_filename}_harmonization_log.tsv"
-                            )
-                            prov_log_path = exports_dir / prov_filename
                             prov_df = pd.DataFrame(provenance_log)
+                            _assert_export_targets(workspace_path, prov_log_path)
                             prov_df.to_csv(
                                 prov_log_path, sep="\t", index=False, encoding="utf-8"
                             )
@@ -1700,7 +1733,7 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
 
                         workspace_path = Path(data_manager.workspace_path)
                         exports_dir = _get_exports_directory(
-                            workspace_path, create=True
+                            workspace_path, create=False
                         )
                         filename = workspace_service._sanitize_filename(identifier)
 
@@ -1719,9 +1752,15 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
                         )
                         cache_file_path = exports_dir / final_filename
 
+                        # The file is checked before anything is created or written.
+                        _assert_export_targets(workspace_path, cache_file_path)
+                        workspace_service.ensure_content_dirs()
+                        _get_exports_directory(workspace_path, create=True)
+
                         # Check for deprecated location
                         _check_deprecated_export_location(workspace_path)
 
+                        _assert_export_targets(workspace_path, cache_file_path)
                         df.to_csv(cache_file_path, index=False, encoding="utf-8")
                         logger.info(
                             f"CSV export (simple): {samples_count} rows, {len(df.columns)} columns → {cache_file_path}"
@@ -1795,6 +1834,15 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
                         cached_at=datetime.now().isoformat(),
                     )
 
+                # The file is checked before anything is created; write_content
+                # checks it again right before the write.
+                _assert_export_targets(
+                    Path(data_manager.workspace_path),
+                    workspace_service.content_target(
+                        content_model, target_content_type, output_format
+                    ),
+                )
+                workspace_service.ensure_content_dirs()
                 cache_file_path = workspace_service.write_content(
                     content=content_model,
                     content_type=target_content_type,
@@ -1827,6 +1875,9 @@ def create_write_to_workspace_tool(data_manager: DataManagerV2):
 
             return response
 
+        except ManagedPathError:
+            # A target is inside the managed figure folder: nothing was written.
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             logger.error(f"Error caching to workspace: {e}")
             return f"Error caching content to workspace: {str(e)}"
@@ -2226,6 +2277,16 @@ def create_delete_from_workspace_tool(
                             lock_file = queue_file.parent / f".{queue_file.name}.lock"
 
                             if queue_file.exists():
+                                # The lock file is opened (created) and the queue is
+                                # rewritten through a new temporary file in its folder:
+                                # none of them may be inside the managed figure folder.
+                                _assert_export_targets(
+                                    data_manager.workspace_path, lock_file, queue_file
+                                )
+                                assert_dirs_allowed(
+                                    data_manager.workspace_path, queue_file.parent
+                                )
+
                                 # Use InterProcessFileLock to prevent concurrent access
                                 from lobster.core.queue_storage import (
                                     InterProcessFileLock,
@@ -2294,6 +2355,9 @@ def create_delete_from_workspace_tool(
                                 )
                                 response += f"✗ File not found: {file_path}\n"
 
+                    except ManagedPathError:
+                        # Nothing was deleted or logged for this entry.
+                        return MANAGED_EXPORT_MESSAGE
                     except Exception as e:
                         deletion_summary["errors"].append(str(e))
                         response += f"✗ Error deleting {item['identifier']}: {str(e)}\n"

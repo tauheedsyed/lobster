@@ -158,7 +158,7 @@ def test_plots_after_restart_is_not_a_false_no_plots(dm, tmp_path):
     V.plots_list(SimpleNamespace(data_manager=fresh), output)
     text = "\n".join(printed)
     assert "No plots generated yet" not in text
-    assert "1 saved figure(s) in this workspace" in text
+    assert "1 saved figure(s), 1 revision(s) in this workspace" in text
     assert "1 legacy plot file(s) in plots/" in text
 
 

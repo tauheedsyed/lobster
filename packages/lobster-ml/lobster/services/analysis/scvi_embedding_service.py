@@ -8,14 +8,24 @@ embeddings for single-cell RNA-seq data.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import assert_export_allowed
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 
 # Import GPU detector without ML dependencies
 from lobster.tools.gpu_detector import GPUDetector, format_installation_message
 
 logger = logging.getLogger(__name__)
+
+#: The files ``model.save(save_path, overwrite=True)`` writes in its folder: scvi-tools
+#: (>= 0.15, the 1.x layout) writes ``{prefix}model.pt``, plus ``adata.h5ad`` /
+#: ``mdata.h5mu`` only with ``save_anndata=True``. This service passes no prefix and
+#: does not save the AnnData, so ``model.pt`` is the one file.
+SCVI_SAVED_FILES = ("model.pt",)
 
 # scvi imported conditionally in methods (optional dependency)
 
@@ -384,6 +394,8 @@ print(f"  - Embedding shape: {embeddings.shape}")
         early_stopping_patience: int = 5,
         save_path: Optional[str] = None,
         force_cpu: bool = False,
+        *,
+        workspace_path: Optional[Union[str, Path]] = None,
         **model_kwargs,
     ) -> Tuple[Any, Dict[str, Any], AnalysisStep]:
         """
@@ -400,12 +412,26 @@ print(f"  - Embedding shape: {embeddings.shape}")
             early_stopping: Whether to use early stopping
             save_path: Path to save trained model
             force_cpu: Force CPU usage
+            workspace_path: Workspace that owns ``save_path``; when given, a model
+                folder inside the managed figure folder is refused
             train_kwargs: Dictionary of advanced training parameters (learning_rate, batch_size, etc.)
             **model_kwargs: Additional arguments for scVI model (architecture parameters)
 
         Returns:
             Tuple of (adata, stats_dict, AnalysisStep)
         """
+
+        def check_save_path() -> None:
+            # The model folder, its recursive creation and every file the native save
+            # writes in it are refused inside the managed figure folder (typed error).
+            if workspace_path is not None and save_path:
+                assert_export_allowed(workspace_path, save_path)
+                assert_dirs_allowed(workspace_path, save_path)
+                for name in SCVI_SAVED_FILES:
+                    assert_export_allowed(workspace_path, Path(save_path) / name)
+
+        check_save_path()  # before any device, data or model work
+
         torch = self._import_scvi_dependencies()
 
         # Setup device
@@ -458,6 +484,7 @@ print(f"  - Embedding shape: {embeddings.shape}")
         try:
             print(training_config)
             model.train(**training_config)
+            check_save_path()  # again, before the model or embeddings are kept
 
             # Training completed successfully - store model and extract embeddings
             self.model = model
@@ -487,10 +514,13 @@ print(f"  - Embedding shape: {embeddings.shape}")
             # Save model if path provided
             if save_path:
                 try:
+                    check_save_path()  # right before the write
                     model.save(save_path, overwrite=True)
                     training_info["model_saved"] = True
                     training_info["model_path"] = save_path
                     logger.info(f"Model saved to: {save_path}")
+                except ManagedPathError:
+                    raise
                 except Exception as save_error:
                     logger.warning(f"Failed to save model: {save_error}")
                     training_info["model_saved"] = False
@@ -508,6 +538,8 @@ print(f"  - Embedding shape: {embeddings.shape}")
             )
 
             return adata, training_info, ir
+        except ManagedPathError:
+            raise
         except RuntimeError as e:
             error_msg = str(e).lower()
 
@@ -522,6 +554,7 @@ print(f"  - Embedding shape: {embeddings.shape}")
                         training_config["accelerator"] = "cpu"
                         training_config["devices"] = "auto"
                         model.train(**training_config)
+                        check_save_path()  # again, before anything is kept
                         device = "cpu"
                         logger.info(
                             "Successfully completed training on CPU after device error"
@@ -551,9 +584,12 @@ print(f"  - Embedding shape: {embeddings.shape}")
 
                         if save_path:
                             try:
+                                check_save_path()  # right before the write
                                 model.save(save_path, overwrite=True)
                                 training_info["model_saved"] = True
                                 training_info["model_path"] = save_path
+                            except ManagedPathError:
+                                raise
                             except Exception as save_error:
                                 logger.warning(f"Failed to save model: {save_error}")
                                 training_info["model_saved"] = False
@@ -572,6 +608,8 @@ print(f"  - Embedding shape: {embeddings.shape}")
 
                         return adata, training_info, ir
 
+                    except ManagedPathError:
+                        raise
                     except Exception as cpu_error:
                         error_info = {
                             "device": "failed",

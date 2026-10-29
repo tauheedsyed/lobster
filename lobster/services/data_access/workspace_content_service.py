@@ -22,6 +22,7 @@ import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.figures.export_guard import assert_export_allowed
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -295,12 +296,15 @@ class WorkspaceContentService:
         >>> publications = service.list_content(ContentType.PUBLICATION)
     """
 
-    def __init__(self, data_manager: DataManagerV2):
+    def __init__(self, data_manager: DataManagerV2, *, create_dirs: bool = True):
         """
         Initialize WorkspaceContentService.
 
         Args:
             data_manager: DataManagerV2 instance for workspace access
+            create_dirs: Create the content directories now (default). With False the
+                caller creates them with :meth:`ensure_content_dirs` once its targets
+                are checked.
         """
         self.data_manager = data_manager
         # Use workspace_path directly for backward compatibility with existing tools
@@ -316,14 +320,45 @@ class WorkspaceContentService:
         # Actual files: download_queue.jsonl, publication_queue.jsonl
         self.queues_dir = self.workspace_base / ".lobster" / "queues"
 
-        # Create directories if they don't exist (queues_dir is created by DataManagerV2)
+        if create_dirs:
+            self.ensure_content_dirs()
+
+    def ensure_content_dirs(self) -> None:
+        """Create the content directories if they don't exist."""
+        # queues_dir is created by DataManagerV2
         # Note: exports_dir is not created here since get_exports_directory() has a create parameter
         self.publications_dir.mkdir(parents=True, exist_ok=True)
         self.datasets_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
-
+        # Named only once the folders exist (a deferring caller checked its targets).
         logger.debug(
             f"WorkspaceContentService initialized with workspace at {self.workspace_base}"
+        )
+
+    def content_target(
+        self,
+        content: Union[PublicationContent, DatasetContent, MetadataContent],
+        content_type: ContentType,
+        output_format: str = "json",
+    ) -> Path:
+        """The file :meth:`write_content` writes for ``content`` (same name rules)."""
+        return self._content_file(content.identifier, content_type, output_format)
+
+    def _content_file(
+        self, identifier: str, content_type: ContentType, output_format: str = "json"
+    ) -> Path:
+        extension = "csv" if output_format == "csv" else "json"
+        filename = self._sanitize_filename(identifier)
+        return self._get_content_dir(content_type) / f"{filename}.{extension}"
+
+    def check_content_allowed(
+        self, identifier: str, content_type: ContentType, output_format: str = "json"
+    ) -> None:
+        """Raise :class:`ManagedPathError` (fixed reason) when :meth:`write_content`
+        would write ``identifier`` inside the managed figure folder; writes nothing."""
+        assert_export_allowed(
+            self.workspace_base,
+            self._content_file(identifier, content_type, output_format),
         )
 
     def _get_content_dir(self, content_type: ContentType) -> Path:
@@ -456,21 +491,19 @@ class WorkspaceContentService:
         ):
             raise ValueError("Content type METADATA requires MetadataContent model")
 
-        # Get content directory
-        content_dir = self._get_content_dir(content_type)
-
-        # Sanitize filename
-        filename = self._sanitize_filename(content.identifier)
+        # Target file (content directory + sanitized identifier + format extension)
+        file_path = self.content_target(content, content_type, output_format)
 
         # Convert content to dict
         content_dict = content.model_dump()
 
+        # A file inside the managed figure folder is refused (typed error).
+        assert_export_allowed(self.workspace_base, file_path)
+
         # Handle different output formats
         if output_format == "csv":
-            file_path = content_dir / f"{filename}.csv"
             self._write_csv(content, content_dict, file_path)
         else:  # json (default)
-            file_path = content_dir / f"{filename}.json"
             with open(file_path, "w") as f:
                 json.dump(content_dict, f, indent=2, default=str)
 
@@ -541,7 +574,8 @@ class WorkspaceContentService:
 
             df = pd.DataFrame([flattened_dict])
 
-        # Write CSV with proper formatting
+        # Write CSV with proper formatting (checked again right before the write)
+        assert_export_allowed(self.workspace_base, file_path)
         df.to_csv(file_path, index=False, encoding="utf-8")
 
         logger.debug(f"Wrote DataFrame with shape {df.shape} to {file_path}")

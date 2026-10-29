@@ -45,6 +45,8 @@ from lobster.config.settings import get_settings
 # Premium feature - graceful fallback if unavailable
 from lobster.core.component_registry import component_registry
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_guard import MANAGED_EXPORT_MESSAGE
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.schemas.download_queue import (
     DownloadStatus,
@@ -225,6 +227,21 @@ def research_agent(
             _queue_preparation_service = QueuePreparationService(data_manager)
             logger.debug("Lazy-loaded QueuePreparationService")
         return _queue_preparation_service
+
+    def _assert_download_queue_writable() -> None:
+        """Raise ManagedPathError (fixed reason) when adding to the download queue would
+        write in the managed figure folder: its lock and queue files, the folder its
+        temporary file is created in, and its backup folder. Checked before any change.
+        """
+        from lobster.core.figures.export_dirs import assert_dirs_allowed
+        from lobster.core.figures.export_guard import assert_export_allowed
+
+        queue = data_manager.download_queue
+        workspace = data_manager.workspace_path
+        for leaf in (queue._file_lock_path, queue.queue_file):
+            assert_export_allowed(workspace, leaf)
+        for folder in (Path(queue.queue_file).parent, queue.backup_dir):
+            assert_dirs_allowed(workspace, folder)
 
     _uniprot_service = None
     _ensembl_service = None
@@ -1171,6 +1188,7 @@ def research_agent(
                             f"Adding cached dataset {identifier} to download queue"
                         )
 
+                        _assert_download_queue_writable()
                         service = get_queue_preparation_service()
                         result = service.prepare(identifier)
                         data_manager.download_queue.add_entry(result.queue_entry)
@@ -1183,6 +1201,8 @@ def research_agent(
                         # Update queue_entries list for response building
                         queue_entries = [result.queue_entry]
 
+                    except ManagedPathError:
+                        raise  # refused: the tool returns the fixed message
                     except Exception as e:
                         reraise_inference_refusal(e)
                         logger.error(
@@ -1308,6 +1328,7 @@ def research_agent(
                                 )
 
                             try:
+                                _assert_download_queue_writable()
                                 service = get_queue_preparation_service()
                                 result = service.prepare(identifier)
                                 queue_entry = result.queue_entry
@@ -1355,6 +1376,8 @@ def research_agent(
                                 report += "1. Supervisor can query queue: `get_content_from_workspace(workspace='download_queue')`\n"
                                 report += f"2. Hand off to data_expert with entry_id: `{entry_id}`\n"
 
+                            except ManagedPathError:
+                                raise  # refused: the tool returns the fixed message
                             except Exception as e:
                                 reraise_inference_refusal(e)
                                 logger.error(
@@ -1383,7 +1406,7 @@ def research_agent(
                         f"For '{identifier}', use `prepare_dataset_download(accession='{identifier}')` instead."
                     )
 
-            except InferenceRefused:
+            except (InferenceRefused, ManagedPathError):
                 raise
             except Exception as e:
                 reraise_inference_refusal(e)
@@ -1392,6 +1415,9 @@ def research_agent(
 
         except InferenceRefused:
             raise
+        except ManagedPathError:
+            # Refused at the download queue: nothing was added.
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             reraise_inference_refusal(e)
             logger.error(f"Error in metadata validation: {e}")
@@ -1462,7 +1488,9 @@ def research_agent(
                     f"Check the accession format."
                 )
 
-            # Prepare queue entry
+            # Prepare queue entry (the queue is checked first: nothing is fetched or
+            # changed when it would write in the managed figure folder)
+            _assert_download_queue_writable()
             result = service.prepare(accession, database=database, priority=priority)
 
             # Add to download queue
@@ -1515,6 +1543,9 @@ def research_agent(
             )
             return "\n".join(report_parts)
 
+        except ManagedPathError:
+            # Refused at the queue's write (its backup file): nothing was added.
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             reraise_inference_refusal(e)
             logger.error(f"Failed to prepare download for {accession}: {e}")
@@ -2138,6 +2169,8 @@ Could not extract content for: {identifier}
             logger.info(f"Created queue entry: {entry_id}")
             return entry_id
 
+        except ManagedPathError:
+            raise  # refused at the queue's write: not a metadata failure
         except Exception as e:
             reraise_inference_refusal(e)
             logger.error(f"Failed to create queue entry for {identifier}: {e}")
@@ -2226,6 +2259,15 @@ Could not extract content for: {identifier}
         if not HAS_PUBLICATION_PROCESSING:
             return "Publication processing requires a premium subscription. Visit https://omics-os.com/pricing"
 
+        from lobster.services.orchestration.publication_processing_service import (
+            publication_queue_refused,
+        )
+
+        # The queue's lock file, queue file, temporary sibling or backups inside the
+        # managed figure folder: nothing is created, fetched, changed or logged.
+        if publication_queue_refused(data_manager):
+            return MANAGED_EXPORT_MESSAGE
+
         # STATUS OVERRIDE MODE: Manual status update without processing
         if status_override:
             try:
@@ -2253,6 +2295,8 @@ Could not extract content for: {identifier}
 
                 # Update status
                 old_status = str(entry.status)
+                if publication_queue_refused(data_manager):  # at the write
+                    return MANAGED_EXPORT_MESSAGE
                 data_manager.publication_queue.update_status(
                     entry_id=entry_id,
                     status=(
@@ -2301,18 +2345,31 @@ Could not extract content for: {identifier}
 
                 return response
 
+            except ManagedPathError:
+                # Refused at the queue's write (its backup file): nothing changed.
+                return MANAGED_EXPORT_MESSAGE
             except Exception as e:
                 logger.error(f"Failed to update publication status: {e}")
                 return f"Error updating publication status: {str(e)}"
 
         # PROCESSING MODE: Full content extraction workflow
         # Resolve identifier: entry_id, PMID, or DOI → entry_id
-        resolved_entry_id = _find_or_create_queue_entry(entry_id, data_manager)
+        try:
+            resolved_entry_id = _find_or_create_queue_entry(entry_id, data_manager)
+        except ManagedPathError:
+            # Refused at the queue's write (its backup file): nothing was added.
+            return MANAGED_EXPORT_MESSAGE
 
         # Process the entry (returns structured outcome)
         outcome = publication_processing_service.process_entry(
             entry_id=resolved_entry_id, extraction_tasks=extraction_tasks
         )
+        from lobster.services.orchestration.publication_processing_service import (
+            entry_refused,
+        )
+
+        if entry_refused(outcome):
+            return outcome.response_markdown  # refused: nothing processed or logged
         data_manager.log_tool_usage(
             tool_name="process_publication_entry",
             parameters={

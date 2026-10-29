@@ -14,6 +14,7 @@ import anndata as ad
 from scipy import sparse
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.exceptions import HdfReadRefusal
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.utils.layer_keys import layer_names
 from lobster.utils.logger import get_logger
@@ -494,6 +495,8 @@ class ModalityManagementService:
 
             return adata, stats, ir
 
+        except HdfReadRefusal:
+            raise
         except Exception as e:
             logger.error(f"Error loading modality '{modality_name}': {e}")
             raise

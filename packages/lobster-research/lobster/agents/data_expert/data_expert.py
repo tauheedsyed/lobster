@@ -57,7 +57,7 @@ from lobster.config.inference_context import (
 from lobster.config.inference_runtime import capture_inference_binding
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
-from lobster.core.exceptions import reraise_inference_refusal
+from lobster.core.exceptions import HdfReadRefusal, reraise_inference_refusal
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.runtime.workspace import WORKSPACE_FOLDER_NAME
 from lobster.core.schemas.download_queue import DownloadStatus, ValidationStatus
@@ -78,6 +78,10 @@ from lobster.tools.download_orchestrator import DownloadOrchestrator
 from lobster.tools.filesystem_tools import create_filesystem_tools
 from lobster.tools.workspace_tool import create_list_modalities_tool
 from lobster.utils.logger import get_logger
+
+# A queue write refused in the managed figure folder (fixed reason and message)
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_guard import MANAGED_EXPORT_MESSAGE
 
 logger = get_logger(__name__)
 
@@ -518,6 +522,8 @@ You can now analyze this dataset using the appropriate analysis tools.
                         response += f"\nImport evidence: {evidence}\n"
                 return response
 
+            except ManagedPathError:
+                return MANAGED_EXPORT_MESSAGE  # nothing downloaded; not a failure
             except ImportRequirementNotMet as download_error:
                 logger.error(f"Import refused for {entry.dataset_id}: {download_error}")
                 return (
@@ -556,6 +562,8 @@ You can now analyze this dataset using the appropriate analysis tools.
 
                 return response
 
+        except ManagedPathError:
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             reraise_inference_refusal(e)
             logger.error(f"Error in execute_download_from_queue: {e}")
@@ -818,6 +826,8 @@ You can now analyze this dataset using the appropriate analysis tools.
 
             return response
 
+        except HdfReadRefusal:
+            raise
         except Exception as e:
             logger.error(f"Error loading modality {modality_name}: {e}", exc_info=True)
             try:

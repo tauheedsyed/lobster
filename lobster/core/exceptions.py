@@ -12,6 +12,20 @@ RefusalCategory = Literal[
 ]
 
 
+class HdfReadRefusal(Exception):
+    """Terminal refusal of the built-in pandas-HDF alternative, not HDF admission.
+
+    Propagating callers must preserve this type without logging raw chains or
+    source paths. Earlier unrelated successful loads may remain; this does not
+    promise whole-operation rollback or confinement of ordinary HDF readers.
+    """
+
+    def __init__(self):
+        self.reason = "pandas_hdf_not_admitted"
+        self.retryable = False
+        super().__init__("Pandas HDF loading is not supported.")
+
+
 class InferenceRefused(Exception):
     """A terminal inference refusal that must not become a scientific fallback.
 

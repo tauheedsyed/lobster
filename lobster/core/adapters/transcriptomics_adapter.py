@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 
 from lobster.core.adapters.base import BaseAdapter
+from lobster.core.exceptions import HdfReadRefusal, InferenceRefused
+from lobster.core.figures.errors import ManagedPathError
 from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.schemas.transcriptomics import TranscriptomicsSchema
 from lobster.core.utils.h5ad_utils import repair_log1p_base, sanitize_value
@@ -172,6 +174,8 @@ class TranscriptomicsAdapter(BaseAdapter):
             )
             return adata
 
+        except (HdfReadRefusal, InferenceRefused, ManagedPathError):
+            raise
         except Exception as e:
             self.logger.error(f"Failed to load transcriptomics data from {source}: {e}")
             raise
@@ -282,6 +286,8 @@ class TranscriptomicsAdapter(BaseAdapter):
                 return self._load_mtx_data(path, **kwargs)
             else:
                 raise ValueError(f"Unsupported file format: {format_type}")
+        except (HdfReadRefusal, InferenceRefused, ManagedPathError):
+            raise
         except Exception as e:
             logger.error(
                 f"Transcriptomics adapter failed to load from file with path {path}: {e}"
@@ -359,21 +365,19 @@ class TranscriptomicsAdapter(BaseAdapter):
             adata = anndata.read_h5ad(path)
             repair_log1p_base(adata)
             return adata
+        except (HdfReadRefusal, InferenceRefused, ManagedPathError):
+            raise
         except Exception:
-            # Fallback to pandas HDF5 (requires PyTables)
-            try:
-                key = kwargs.get("key", "expression_data")
-                df = pd.read_hdf(path, key=key)
-            except ImportError:
-                from lobster.core.component_registry import get_install_command
+            pass
 
-                cmd = get_install_command("tables")
-                raise ImportError(
-                    f"This HDF5 file requires PyTables for pandas.read_hdf(). "
-                    f"Install with: {cmd}"
-                )
-            transpose = kwargs.get("transpose", True)
-            return self._create_anndata_from_dataframe(df, transpose=transpose)
+        # The alternative is excluded, not a verdict about the native failure.
+        # Clear both native and caller-ambient chains on this new fixed refusal.
+        try:
+            raise HdfReadRefusal()
+        except HdfReadRefusal as refusal:
+            refusal.__context__ = None
+            refusal.__cause__ = None
+            raise
 
     def _load_loom_data(self, path: Union[str, Path], **kwargs) -> anndata.AnnData:
         """Load transcriptomics data from Loom format.

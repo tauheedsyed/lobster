@@ -2784,8 +2784,21 @@ class AgentClient(BaseClient):
 
             # Auto-save loaded modalities to workspace (consistent with GEO dataset behavior)
             try:
-                self.data_manager.auto_save_state()
-                logger.info(f"Auto-saved {len(results)} loaded modalities to workspace")
+                saved_items = self.data_manager.auto_save_state()
+                from lobster.core.runtime.data_manager import AUTOSAVE_NOT_SAVED_PREFIX
+
+                not_saved = [
+                    item
+                    for item in (saved_items if isinstance(saved_items, list) else [])
+                    if isinstance(item, str)
+                    and item.startswith(AUTOSAVE_NOT_SAVED_PREFIX)
+                ]
+                if not_saved:  # some modalities were not saved: never "Auto-saved"
+                    logger.warning("Auto-save incomplete: %s", not_saved[0])
+                else:
+                    logger.info(
+                        f"Auto-saved {len(results)} loaded modalities to workspace"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to auto-save modalities: {e}")
 

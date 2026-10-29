@@ -6,11 +6,14 @@ functionality shared across all data storage backends, including
 path validation, logging, and error handling.
 """
 
+import datetime
 import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from lobster.core.figures.errors import ManagedPathError
 from lobster.core.interfaces.backend import IDataBackend
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,10 @@ class BaseBackend(IDataBackend):
     Subclasses need only implement the storage-specific methods.
     """
 
+    #: Set by the data manager on its own instances only: a backup is then never
+    #: written into that workspace's managed figure folder (None: not checked).
+    guard_workspace: Optional[Path] = None
+
     def __init__(self, base_path: Optional[Union[str, Path]] = None):
         """
         Initialize the base backend.
@@ -34,6 +41,7 @@ class BaseBackend(IDataBackend):
         """
         self.base_path = Path(base_path) if base_path else None
         self.logger = logger
+        self.guard_workspace = None
 
     def _resolve_path(self, path: Union[str, Path]) -> Path:
         """
@@ -267,28 +275,64 @@ class BaseBackend(IDataBackend):
         supported_formats = {"h5ad", "h5", "csv", "tsv", "txt", "excel", "xlsx", "xls"}
         return format_name.lower() in supported_formats
 
-    def create_backup(self, path: Union[str, Path]) -> Optional[Path]:
+    @staticmethod
+    def backup_stamp() -> str:
+        """The backup timestamp: one clock read, in the format backups always used."""
+        return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    @staticmethod
+    def backup_sibling(resolved_path: Path, stamp: str) -> Path:
+        """The backup file name of ``resolved_path`` for ``stamp`` (pure)."""
+        return resolved_path.with_suffix(f".{stamp}.backup{resolved_path.suffix}")
+
+    def backup_source(self, path: Union[str, Path]) -> Path:
+        """The file a backup of ``path`` copies, resolved exactly as
+        :meth:`create_backup` resolves it (no effect; an absolute path follows links).
+        Planning and the backup itself both use it, so they name the same sibling."""
+        return self._resolve_path(path)
+
+    def _assert_backup_allowed(self, backup_path: Path) -> None:
+        """Raise ManagedPathError (fixed reason) when this instance guards a workspace
+        and the backup would land in its managed figure folder, or would be copied
+        into an existing folder standing at the backup file name."""
+        if self.guard_workspace is None:
+            return
+        from lobster.core.figures.export_guard import (
+            MANAGED_EXPORT_REASON,
+            assert_export_allowed,
+        )
+
+        assert_export_allowed(self.guard_workspace, backup_path)
+        if os.path.isdir(backup_path):  # a copy would land on an unchecked child name
+            raise ManagedPathError(MANAGED_EXPORT_REASON) from None
+
+    def create_backup(
+        self, path: Union[str, Path], *, stamp: Optional[str] = None
+    ) -> Optional[Path]:
         """
         Create a backup of an existing file.
 
         Args:
             path: Path to backup
+            stamp: Timestamp of the backup name (default: read the clock now)
 
         Returns:
             Optional[Path]: Path to backup file, None if backup failed
+
+        Raises:
+            ManagedPathError: The backup would land in the guarded workspace's
+                managed figure folder (nothing is copied).
         """
         try:
-            resolved_path = self._resolve_path(path)
+            resolved_path = self.backup_source(path)
             if not resolved_path.exists():
                 return None
 
             # Create backup with timestamp
-            import datetime
-
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = resolved_path.with_suffix(
-                f".{timestamp}.backup{resolved_path.suffix}"
+            backup_path = self.backup_sibling(
+                resolved_path, stamp if stamp is not None else self.backup_stamp()
             )
+            self._assert_backup_allowed(backup_path)
 
             import shutil
 
@@ -296,6 +340,8 @@ class BaseBackend(IDataBackend):
 
             self.logger.debug(f"Created backup: {backup_path}")
             return backup_path
+        except ManagedPathError:
+            raise  # refused before anything was copied (fixed reason)
         except Exception as e:
             self.logger.warning(f"Failed to create backup for {path}: {e}")
             return None

@@ -6,11 +6,15 @@ structure visualizations using PyMOL open-source, following the Lobster
 3-tuple pattern (Dict, stats, IR).
 """
 
+import re
 import subprocess  # nosec B404 - subprocess used with fixed argument lists
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import assert_export_allowed
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.utils.logger import get_logger
 
@@ -21,6 +25,44 @@ class PyMOLVisualizationError(Exception):
     """Base exception for PyMOL visualization operations."""
 
     pass
+
+
+# Caller values written into the PyMOL command script are allow-listed: none of them
+# may add a command (newline, ";", "#", "@", python) or change an argument boundary
+# ("," "=" quotes, parentheses), and PyMOL's own path expansion ("~", "$") is excluded.
+_PML_TOKEN = re.compile(r"[A-Za-z0-9_.+\-]{1,64}")
+_PML_RESIDUES = re.compile(r"[A-Za-z0-9,:+\- ]{1,512}")
+_PML_PATH = re.compile(r"[\w./\\:+\- ]{1,4096}")
+_PML_SIZE = re.compile(r"[0-9]{1,5}")
+
+
+def _pml_token(value: Any, label: str) -> None:
+    if not isinstance(value, str) or not _PML_TOKEN.fullmatch(value):
+        raise PyMOLVisualizationError(
+            f"Invalid {label}: use letters, digits and _ . + - only"
+        )
+
+
+def _pml_residues(value: Any) -> None:
+    if not isinstance(value, str) or not _PML_RESIDUES.fullmatch(value):
+        raise PyMOLVisualizationError(
+            "Invalid highlight residues: use residue numbers, ranges and chain "
+            "prefixes only (for example 15,42 or A:15-20)"
+        )
+
+
+def _pml_path(value: Path, label: str) -> None:
+    text = str(value)
+    if text != text.strip() or not _PML_PATH.fullmatch(text):
+        raise PyMOLVisualizationError(
+            f"Invalid {label} path: it contains characters a PyMOL script cannot "
+            "carry (allowed: letters, digits, spaces and _ . / \\ : + -)"
+        )
+
+
+def _pml_size(value: Any, label: str) -> None:
+    if isinstance(value, bool) or not _PML_SIZE.fullmatch(str(value)):
+        raise PyMOLVisualizationError(f"Invalid {label}: use a whole number of pixels")
 
 
 class PyMOLVisualizationService:
@@ -62,6 +104,8 @@ class PyMOLVisualizationService:
         highlight_color: str = "red",
         highlight_style: str = "sticks",
         highlight_groups: Optional[str] = None,
+        *,
+        workspace_path: Optional[Path] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any], AnalysisStep]:
         """
         Create 3D visualization of protein structure using PyMOL.
@@ -88,16 +132,59 @@ class PyMOLVisualizationService:
             PyMOLVisualizationError: If visualization fails
         """
         try:
-            logger.info(
-                f"Creating PyMOL visualization: {structure_file} (style: {style}, color: {color_by})"
-            )
-
             # Validate structure file
             structure_file = Path(structure_file)
             if not structure_file.exists():
                 raise PyMOLVisualizationError(
                     f"Structure file not found: {structure_file}"
                 )
+
+            def check(*targets: Path) -> None:
+                # Files inside the managed figure folder are refused (typed error).
+                if workspace_path is not None:
+                    for target in targets:
+                        assert_export_allowed(workspace_path, target)
+
+            # Every planned target (as named, never renamed) is checked before
+            # anything is created.
+            if output_image is None:
+                auto_dir = structure_file.parent / "visualizations"
+                planned_image = (
+                    auto_dir / f"{structure_file.stem}_{style}_{color_by}.png"
+                )
+                check(auto_dir)
+            else:
+                planned_image = Path(output_image)
+            check(
+                planned_image.parent,
+                planned_image,
+                planned_image.parent / f"{planned_image.stem}_commands.pml",
+            )
+            if workspace_path is not None:
+                # Recursive creation must not pass through the managed folder.
+                assert_dirs_allowed(workspace_path, planned_image.parent)
+
+            # Every caller value written into the command script is allow-listed
+            # before anything is created or logged: it cannot add commands or change
+            # arguments. Highlight values are checked while they are parsed, before
+            # they are converted.
+            _pml_path(structure_file, "structure file")
+            _pml_path(planned_image, "output image")
+            _pml_size(width, "image width")
+            _pml_size(height, "image height")
+            _pml_token(background, "background color")
+
+            # Parse highlight groups
+            highlight_groups_parsed = self._parse_highlight_groups(
+                highlight_residues=highlight_residues,
+                highlight_color=highlight_color,
+                highlight_style=highlight_style,
+                highlight_groups=highlight_groups,
+            )
+
+            logger.info(
+                f"Creating PyMOL visualization: {structure_file} (style: {style}, color: {color_by})"
+            )
 
             # Set output image path
             if output_image is None:
@@ -108,14 +195,6 @@ class PyMOLVisualizationService:
                 )
             output_image = Path(output_image)
             output_image.parent.mkdir(parents=True, exist_ok=True)
-
-            # Parse highlight groups
-            highlight_groups_parsed = self._parse_highlight_groups(
-                highlight_residues=highlight_residues,
-                highlight_color=highlight_color,
-                highlight_style=highlight_style,
-                highlight_groups=highlight_groups,
-            )
 
             # Generate PyMOL command script
             commands = self._generate_pymol_commands(
@@ -132,6 +211,7 @@ class PyMOLVisualizationService:
 
             # Save command script
             script_file = output_image.parent / f"{output_image.stem}_commands.pml"
+            check(script_file)  # right before the write
             with open(script_file, "w") as f:
                 f.write("\n".join(commands))
 
@@ -145,6 +225,7 @@ class PyMOLVisualizationService:
             if execute_commands:
                 pymol_installed = self.check_pymol_installation()
                 if pymol_installed["installed"]:
+                    check(output_image)  # PyMOL writes the image
                     try:
                         if mode == "interactive":
                             # Launch PyMOL GUI in interactive mode (non-blocking)
@@ -228,6 +309,8 @@ class PyMOLVisualizationService:
 
             return visualization_data, stats, ir
 
+        except ManagedPathError:
+            raise
         except Exception as e:
             logger.exception(f"Error creating PyMOL visualization: {e}")
             raise PyMOLVisualizationError(f"Failed to create visualization: {str(e)}")
@@ -355,12 +438,16 @@ class PyMOLVisualizationService:
             for i, group_spec in enumerate(highlight_groups.split(";")):
                 parts = [p.strip() for p in group_spec.split("|")]
                 if len(parts) != 3:
+                    # Fixed text: the skipped value is not echoed.
                     logger.warning(
-                        f"Invalid highlight group format: {group_spec}. Expected 'residues|color|style'"
+                        "Skipped a highlight group: expected 'residues|color|style'"
                     )
                     continue
 
                 residues, color, style = parts
+                _pml_residues(residues)
+                _pml_token(color, "highlight color")
+                _pml_token(style, "highlight style")
                 pymol_selection = self._convert_to_pymol_selection(residues)
 
                 groups.append(
@@ -375,6 +462,9 @@ class PyMOLVisualizationService:
 
         elif highlight_residues:
             # Single group with specified color and style
+            _pml_residues(highlight_residues)
+            _pml_token(highlight_color, "highlight color")
+            _pml_token(highlight_style, "highlight style")
             pymol_selection = self._convert_to_pymol_selection(highlight_residues)
             groups.append(
                 {
@@ -411,8 +501,10 @@ class PyMOLVisualizationService:
             for part in residue_spec.split(","):
                 part = part.strip()
                 if ":" not in part:
+                    # Fixed text: the residue specification is not echoed.
                     logger.warning(
-                        f"Mixed chain-specific and non-chain-specific residues in: {residue_spec}"
+                        "Ignored residues without a chain in a chain-specific "
+                        "highlight"
                     )
                     continue
 

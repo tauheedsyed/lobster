@@ -10,7 +10,7 @@ PYTHON_VERSION_MIN := 3.11
 PROJECT_NAME := lobster-ai
 DEV_INSTALL_EXTRAS := dev,transcriptomics,genomics,proteomics,research,classic-tui,extended-data,hdf5
 DEV_INSTALL_SPEC := .[$(DEV_INSTALL_EXTRAS)]
-DEV_LOCAL_PACKAGES := packages/lobster-metadata packages/lobster-ml packages/lobster-structural-viz
+DEV_LOCAL_PACKAGES := packages/lobster-vector packages/lobster-metadata packages/lobster-ml packages/lobster-structural-viz
 
 # Smart Python Discovery
 # Check for conda environment first (avoid conflicts)

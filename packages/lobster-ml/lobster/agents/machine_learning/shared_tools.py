@@ -9,6 +9,8 @@ from typing import List, Optional
 
 from langchain_core.tools import tool
 
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_guard import MANAGED_EXPORT_MESSAGE
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.analysis.pathway_enrichment_bridge_service import (
     PathwayEnrichmentBridgeService,
@@ -302,6 +304,7 @@ def create_feature_selection_tools(
                 selection_method=selection_method,
                 sources=sources,
                 fdr_threshold=fdr_threshold,
+                workspace_path=data_manager.workspace_path,
             )
 
             # Store updated AnnData (same modality, enrichment added to uns)
@@ -351,6 +354,9 @@ def create_feature_selection_tools(
 """
             return response
 
+        except ManagedPathError:
+            # The CSV target is inside the managed figure folder: nothing was written.
+            return MANAGED_EXPORT_MESSAGE
         except ValueError as e:
             # User-facing errors (no selection, multiple selections without specifying)
             return f"Error: {str(e)}"

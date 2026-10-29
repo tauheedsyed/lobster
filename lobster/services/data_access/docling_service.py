@@ -26,6 +26,7 @@ Architecture:
 import gc
 import hashlib
 import json
+import os
 import re
 import tempfile
 import time
@@ -39,6 +40,9 @@ import requests
 import requests.exceptions
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import assert_export_allowed
 from lobster.utils.logger import get_logger
 
 # Cloudscraper for Cloudflare-protected publishers (OUP, Cell, Elsevier, etc.)
@@ -149,14 +153,48 @@ class DoclingService:
         if cache_dir is None:
             cache_dir = data_manager.cache_dir / "literature_cache" / "parsed_docs"
         self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # A cache folder inside the managed figure folder disables the cache only;
+        # the converter is unaffected.
+        self._cache_enabled = self._cache_dirs_allowed(self.cache_dir)
+        if self._cache_enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            logger.warning(
+                "Document cache disabled: its folder is inside the managed figure "
+                "folder (nothing is cached)."
+            )
 
         # Initialize Docling converter (lazy loading for optional dependency)
         self.converter = None
         self._docling_imports = None
         self._initialize_docling()
 
-        logger.debug(f"Initialized DoclingService with cache: {self.cache_dir}")
+        if self._cache_enabled:  # the folder is named only once it is allowed
+            logger.debug(f"Initialized DoclingService with cache: {self.cache_dir}")
+        else:
+            logger.debug("Initialized DoclingService (document cache disabled)")
+
+    def _assert_cache_target(self, target: Path) -> None:
+        """Refuse (typed error) a cache path inside the managed figure folder."""
+        workspace = getattr(self.data_manager, "workspace_path", None)
+        if isinstance(workspace, (str, os.PathLike)):  # else: no workspace to check
+            assert_export_allowed(workspace, target)
+
+    def _cache_dirs_allowed(self, directory: Path) -> bool:
+        """False when creating the cache folder ``directory`` (recursively) would
+        reach the managed figure folder of the workspace."""
+        workspace = getattr(self.data_manager, "workspace_path", None)
+        try:
+            self._assert_cache_target(directory)
+            if isinstance(workspace, (str, os.PathLike)):
+                assert_dirs_allowed(workspace, directory)
+        except ManagedPathError:
+            return False
+        return True
+
+    @property
+    def _cache_usable(self) -> bool:
+        return getattr(self, "_cache_enabled", True)
 
     def _initialize_docling(self):
         """
@@ -1002,6 +1040,8 @@ class DoclingService:
         """
         if not self.is_available():
             return None  # Docling not available
+        if not self._cache_usable:
+            return None  # Cache disabled: nothing is read
 
         try:
             cache_file = self._cache_path_for(source)
@@ -1091,12 +1131,15 @@ class DoclingService:
         """
         if not self.is_available() or not doc:
             return  # Nothing to cache
+        if not self._cache_usable:
+            return  # Cache disabled
 
         try:
             cache_file = self._cache_path_for(source)
 
             json_data = doc.model_dump()
 
+            self._assert_cache_target(cache_file)
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(json_data, f, indent=2, default=self._json_default)
 
@@ -1104,6 +1147,11 @@ class DoclingService:
                 f"Cached parsed document: {cache_file.name} ({len(json.dumps(json_data)):,} bytes)"
             )
 
+        except ManagedPathError:
+            logger.warning(
+                "Document cache write skipped: the cache file is inside the managed "
+                "figure folder."
+            )
         except Exception as e:
             logger.warning(f"Failed to cache document (non-fatal): {e}")
             # Don't raise - caching failure shouldn't block extraction
@@ -1130,6 +1178,8 @@ class DoclingService:
         """
         if not self.is_available():
             return  # No cache directory available
+        if not self._cache_usable:
+            return  # Cache disabled
 
         try:
             cache_file = self._cache_path_for(source)
@@ -1141,6 +1191,7 @@ class DoclingService:
                 "ttl_hours": ttl_hours,
             }
 
+            self._assert_cache_target(cache_file)
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(failure_data, f, indent=2, default=self._json_default)
 
@@ -1148,6 +1199,11 @@ class DoclingService:
                 f"Cached failure ({error_type}) for {source[:50]}... (TTL: {ttl_hours}h)"
             )
 
+        except ManagedPathError:
+            logger.warning(
+                "Document cache write skipped: the cache file is inside the managed "
+                "figure folder."
+            )
         except Exception as e:
             logger.debug(f"Failed to cache failure (non-fatal): {e}")
             # Don't raise - caching failure shouldn't block error propagation
@@ -1234,6 +1290,8 @@ class DoclingService:
             >>> service.purge_failed_cache("https://journals.sagepub.com/doi/...")
             True  # Cache file deleted, next request will retry
         """
+        if not self._cache_usable:
+            return False  # Cache disabled: nothing is touched
         try:
             cache_file = self._cache_path_for(source)
             if cache_file.exists():

@@ -9,6 +9,10 @@ on:
 env:
   PYTHONPATH: ${{ github.workspace }}
   PYTEST_ADDOPTS: "--color=yes --tb=short"
+  # Fresh resolves stay on the uv.lock versions listed there (pytest 9.2.0 vs
+  # pytest-benchmark 5.3.0).
+  PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
+  UV_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
 
 jobs:
   # =====================================================================
@@ -38,7 +42,10 @@ jobs:
       id: install
       run: |
         python -m pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir -e ".[dev]"
+        # lobster-ai-tui~=1.2 is a core dependency that is not on PyPI until the 1.2.0
+        # release, and pip ignores [tool.uv.sources]: install the in-repo package in
+        # the same resolve (pure setuptools, no Go needed).
+        pip install --no-cache-dir -e packages/lobster-ai-tui -e ".[dev]"
 
     - name: Run linting
       # A failed step skipped the rest, hiding steps 7-12 from 2026-07-23 to 2026-09-16,
@@ -223,7 +230,10 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir -e ".[dev]"
+        # lobster-ai-tui~=1.2 is a core dependency that is not on PyPI until the 1.2.0
+        # release, and pip ignores [tool.uv.sources]: install the in-repo package in
+        # the same resolve (pure setuptools, no Go needed).
+        pip install --no-cache-dir -e packages/lobster-ai-tui -e ".[dev]"
 
     - name: Python bridge smoke test
       env:
@@ -293,7 +303,11 @@ jobs:
         pip install --no-cache-dir build twine
         python -m build
         twine check dist/*
-        pip install --no-cache-dir dist/*.whl
+        # The wheel requires lobster-ai-tui~=1.2 (not on PyPI before the release):
+        # build that wheel from the repo and let pip find it locally.
+        python -m build --wheel --outdir dist-tui packages/lobster-ai-tui
+        twine check dist-tui/*
+        pip install --no-cache-dir --find-links dist-tui dist/*.whl
         python -c "from lobster.version import __version__; print(f'lobster-ai {__version__} installed')"
 
     - name: Upload build artifacts

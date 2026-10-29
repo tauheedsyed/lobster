@@ -1,0 +1,8 @@
+# CI install constraints (pip: PIP_CONSTRAINT, uv: UV_CONSTRAINT), set in
+# ci-basic.yml and pr-validation-basic.yml. Keep CI on the uv.lock versions where a
+# fresh PyPI resolve drifts into a known break. Remove a line once the break is fixed.
+#
+# pytest 9.2.0 (unlocked fresh resolve) removed Node._nodeid, which
+# pytest-benchmark 5.3.0 reads in its `benchmark` fixture -> setup ERROR on every
+# benchmark test (PR #79). uv.lock pins pytest 9.1.1.
+pytest==9.1.1

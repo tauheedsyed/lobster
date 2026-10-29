@@ -91,7 +91,9 @@ jobs:
         run: |
           PACKAGE_DIR="packages/${{ matrix.package }}"
           test -f "$PACKAGE_DIR/pyproject.toml"
-          uv pip install -e ".[dev]" -e "$PACKAGE_DIR"
+          # lobster-metadata needs lobster-vector~=1.2 (workspace-only until the
+          # 1.2.0 release): install it from the repo in the same resolve.
+          uv pip install -e ".[dev]" -e packages/lobster-vector -e "$PACKAGE_DIR"
 
       - name: Validate vector-only API then install legacy compatibility fixture
         if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.package == 'lobster-vector' }}

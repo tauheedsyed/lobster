@@ -26,6 +26,8 @@ import pandas as pd
 
 from lobster.core.adapters.base import BaseAdapter
 from lobster.core.adapters.factory import create_default_adapters
+from lobster.core.exceptions import HdfReadRefusal
+from lobster.core.figures.errors import ManagedPathError
 from lobster.core.plot_manager import PlotManager
 from lobster.core.provenance.analysis_ir import (
     create_adapter_loading_ir,
@@ -460,6 +462,120 @@ def _not_included_section(plots_index: List[Dict[str, Any]]) -> str:
     )
 
 
+#: Prefix of the auto-save result entry that counts modalities NOT saved because their
+#: target is inside the managed figure folder (callers must not report them as saved).
+AUTOSAVE_NOT_SAVED_PREFIX = "Not saved: "
+_AUTOSAVE_REFUSED_LOG = (
+    "Auto-save skipped: the target is inside the managed figure folder."
+)
+_SPILL_REFUSED_LOG = (
+    "Memory spill skipped: the spill file is inside the managed figure folder."
+)
+# A name only classified (never created) to ask "may a file be written in here?".
+_DIR_CHECK_CHILD = ".export-dir-check"
+
+
+def _managed_refusal() -> ManagedPathError:
+    from lobster.core.figures.export_guard import MANAGED_EXPORT_REASON
+
+    return ManagedPathError(MANAGED_EXPORT_REASON)
+
+
+def _assert_container_allowed(workspace: Path, directory: Path) -> None:
+    """Refuse unless files may be written in ``directory`` (an absolute spelling)."""
+    from lobster.core.figures.export_guard import assert_export_allowed
+
+    probe = directory / _DIR_CHECK_CHILD
+    try:
+        os.lstat(probe)
+    except (FileNotFoundError, NotADirectoryError):
+        pass  # absent: its classification resolves the folder itself
+    except Exception:  # cannot tell whether it exists: refuse (fail closed)
+        raise _managed_refusal() from None
+    else:  # an existing entry there could point the check elsewhere: refuse
+        raise _managed_refusal() from None
+    assert_export_allowed(workspace, probe)
+
+
+def _assert_dirs_allowed(workspace: Path, directory: Union[str, Path]) -> None:
+    """Raise ManagedPathError unless ``directory`` may be created recursively.
+
+    The final folder, existing or not, is checked as the place files are written in;
+    every lexical prefix of its UNnormalized absolute spelling (``..`` not collapsed)
+    that does not exist yet is checked both as a new entry and as such a folder. A
+    relative spelling is taken against the current directory, as mkdir takes it.
+    """
+    from lobster.core.figures.export_guard import assert_export_allowed
+
+    spelled = Path(directory)
+    absolute = spelled if spelled.is_absolute() else Path.cwd() / spelled
+    _assert_container_allowed(workspace, absolute)
+    parts = absolute.parts
+    for end in range(1, len(parts) + 1):
+        prefix = Path(*parts[:end])
+        if not os.path.exists(prefix):
+            assert_export_allowed(workspace, prefix)
+            _assert_container_allowed(workspace, prefix)
+
+
+def _package_staging_parent() -> str:
+    """The folder a data package is built in, chosen WITHOUT writing anywhere.
+
+    ``tempfile.gettempdir()`` creates and deletes a probe file in each candidate until
+    one is writable, so it is not used before the choice is checked. The choice is the
+    one already made by ``tempfile`` if any, else the first of its candidates (TMPDIR,
+    TEMP, TMP, the platform folders, the current directory) that is a writable folder.
+    """
+    if tempfile.tempdir is not None:
+        return tempfile.tempdir
+    candidates = [os.environ.get(n) for n in ("TMPDIR", "TEMP", "TMP")]
+    if os.name == "nt":
+        candidates += [
+            os.path.expanduser(r"~\AppData\Local\Temp"),
+            os.path.expandvars(r"%SYSTEMROOT%\Temp"),
+            r"c:\temp",
+            r"c:\tmp",
+            r"\temp",
+            r"\tmp",
+        ]
+    else:
+        # tempfile's own platform candidates. They only choose the parent: the
+        # package is staged in a new folder that tempfile creates in it (mkdtemp).
+        candidates += ["/tmp", "/var/tmp", "/usr/tmp"]  # nosec B108
+    candidates.append(os.getcwd())
+    for candidate in candidates:
+        if (
+            candidate
+            and os.path.isdir(candidate)
+            and os.access(candidate, os.W_OK | os.X_OK)
+        ):
+            return os.path.abspath(candidate)
+    return os.getcwd()
+
+
+def _assert_not_a_folder(path: Path) -> None:
+    """Refuse a copy destination that is an existing folder: ``shutil.copy2`` would
+    write an unchecked child name inside it."""
+    if os.path.isdir(path):
+        raise _managed_refusal() from None
+
+
+def _autosave_file_name(modality_name: str) -> str:
+    """The auto-save file of a modality, relative to data_dir (never double-suffixed)."""
+    if modality_name.endswith("_autosave"):
+        return f"{modality_name}.h5ad"
+    return f"{modality_name}_autosave.h5ad"
+
+
+def _package_payload_names(name: str) -> tuple:
+    return (f"{name}.h5ad", f"{name}_metadata.json")
+
+
+def _is_plain_file_name(name: str) -> bool:
+    separators = {"/", os.sep} | ({os.altsep} if os.altsep else set())
+    return name not in {"", ".", ".."} and not any(c in name for c in separators)
+
+
 def _safe_filename(name: str) -> str:
     """Reduce a modality name to a filesystem-safe stem."""
     safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in name)
@@ -714,6 +830,7 @@ class DataManagerV2:
     def _get_queues_dir(self) -> Path:
         """Ensure the queues directory exists before use."""
 
+        _assert_dirs_allowed(self.workspace_path, self._queues_dir)
         self._queues_dir.mkdir(parents=True, exist_ok=True)
         return self._queues_dir
 
@@ -892,11 +1009,16 @@ class DataManagerV2:
     def _register_default_backends(self) -> None:
         """Register default storage backends."""
         # H5AD backend
-        self.register_backend("h5ad", H5ADBackend(base_path=self.data_dir))
+        h5ad_backend = H5ADBackend(base_path=self.data_dir)
+        h5ad_backend.guard_workspace = self.workspace_path
+        self.register_backend("h5ad", h5ad_backend)
 
         # MuData backend if available
         if MUDATA_BACKEND_AVAILABLE:
-            self.register_backend("mudata", MuDataBackend(base_path=self.data_dir))
+            mudata_backend = MuDataBackend(base_path=self.data_dir)
+            # This data manager's own instance never backs up into plots/<figure>/
+            mudata_backend.guard_workspace = self.workspace_path
+            self.register_backend("mudata", mudata_backend)
 
     def _register_default_adapters(self) -> None:
         """Register default modality adapters.
@@ -1027,6 +1149,8 @@ class DataManagerV2:
                     f"Auto-loaded '{modality_name}': {adata.n_obs} obs × {adata.n_vars} vars"
                 )
 
+            except HdfReadRefusal:
+                raise
             except Exception:
                 is_autosave = h5ad_file.name.endswith("_autosave.h5ad")
                 if is_autosave:
@@ -1092,6 +1216,8 @@ class DataManagerV2:
                     f"{adata.n_obs} obs × {adata.n_vars} vars"
                 )
 
+            except HdfReadRefusal:
+                raise
             except Exception as e:
                 skipped_failed += 1
                 logger.warning(f"Could not auto-load {data_file.name}: {e}")
@@ -1126,6 +1252,8 @@ class DataManagerV2:
         ):
             try:
                 self.get_available_datasets(force_refresh=True)
+            except HdfReadRefusal:
+                raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.debug(f"Deferred workspace scan failed: {exc}")
         return self._available_datasets
@@ -1453,12 +1581,32 @@ class DataManagerV2:
 
         Raises:
             ValueError: If modality or backend not found
+            ManagedPathError: The destination (as spelled, or where the backend
+                writes it) or its backup is inside the managed figure folder
         """
+        # The backup name planned by auto-save reaches the backend only (it is not a
+        # save parameter, so it is not recorded with the save).
+        backup_stamp = kwargs.pop("backup_stamp", None)
         with self._measure_step("dm:save_modality"):
             if name not in self.modalities:
                 raise ValueError(f"Modality '{name}' not loaded")
+            # The destination is built from caller input (often a modality name):
+            # never write into the managed figure folder (raises ManagedPathError).
+            self._assert_save_allowed(path)
 
             adata = self.modalities[name]
+
+            if self._modality_backend is None:
+                # Materializing (below) can spill other modalities: first check where
+                # the selected native backend writes (checked again before the save).
+                selected = self.backends.get(backend or self.default_backend)
+                if selected is not None:
+                    requested = Path(path)
+                    if not requested.is_absolute():
+                        requested = self.data_dir / path
+                    self._assert_backend_destination_allowed(
+                        selected, self._backend_path(requested)
+                    )
 
             # Backed-mode AnnData must be materialized before save
             if getattr(adata, "isbacked", False):
@@ -1493,23 +1641,21 @@ class DataManagerV2:
             # Compute backend-relative path so remote backends (S3) get
             # clean keys instead of embedded absolute filesystem paths.
             # Local backends re-resolve via base_path in _resolve_path().
-            backend_path: Union[str, Path] = resolved_path
-            try:
-                backend_path = resolved_path.relative_to(self.data_dir)
-            except ValueError:
-                try:
-                    backend_path = resolved_path.relative_to(self.workspace_path)
-                except ValueError:
-                    backend_path = resolved_path
+            backend_path = self._backend_path(resolved_path)
+            self._assert_backend_destination_allowed(backend_instance, backend_path)
 
             # Validate data for H5AD serialization (optional pre-save check)
             if hasattr(adata, "uns"):
                 validation_issues = validate_for_h5ad(adata.uns, path="adata.uns")
                 if validation_issues:
+                    # The count only: the issues can quote names and values (DEBUG).
                     logger.warning(
-                        f"Pre-save validation found {len(validation_issues)} potential "
-                        f"serialization issues in modality '{name}'. These will be "
-                        f"sanitized automatically during save:\n"
+                        "Pre-save validation found %d potential serialization "
+                        "issues. These will be sanitized automatically during save.",
+                        len(validation_issues),
+                    )
+                    logger.debug(
+                        f"Pre-save validation issues in modality '{name}':\n"
                         + "\n".join(f"  - {issue}" for issue in validation_issues[:5])
                     )
                     if len(validation_issues) > 5:
@@ -1519,7 +1665,12 @@ class DataManagerV2:
                         )
 
             # Save data — pass relative path to backend
-            backend_instance.save(adata, backend_path, **kwargs)
+            if backup_stamp is None:
+                backend_instance.save(adata, backend_path, **kwargs)
+            else:
+                backend_instance.save(
+                    adata, backend_path, backup_stamp=backup_stamp, **kwargs
+                )
             path = resolved_path
 
             # Log provenance
@@ -1696,13 +1847,20 @@ class DataManagerV2:
             spill_path = Path(source)
         else:
             try:
-                self._modality_spill_dir.mkdir(parents=True, exist_ok=True)
                 spill_path = self._modality_spill_dir / f"{_safe_filename(name)}.h5ad"
+                # The folder and the file itself, before the folder is created.
+                _assert_dirs_allowed(self.workspace_path, self._modality_spill_dir)
+                self._assert_save_allowed(spill_path)
+                self._modality_spill_dir.mkdir(parents=True, exist_ok=True)
                 to_write = adata
                 if getattr(adata, "isbacked", False):
                     to_write = adata.to_memory()
                 validate_for_h5ad(to_write)
+                self._assert_save_allowed(spill_path)
                 to_write.write_h5ad(spill_path)
+            except ManagedPathError:
+                logger.warning(_SPILL_REFUSED_LOG)
+                return None
             except Exception as e:
                 logger.error(
                     f"Failed to spill modality '{name}' to disk: {e}. "
@@ -2131,6 +2289,53 @@ class DataManagerV2:
         )
         return mdata
 
+    def _assert_save_allowed(self, path: Union[str, Path]) -> None:
+        """Raise ManagedPathError when a save to ``path`` (relative to data_dir, or
+        absolute) would land in the managed figure folder. Checked on the unresolved
+        spelling, lexically and resolved, before anything is written."""
+        from lobster.core.figures.export_guard import assert_export_allowed
+
+        target = Path(path)
+        if not target.is_absolute():
+            target = self.data_dir / path
+        assert_export_allowed(self.workspace_path, target)
+
+    def _backend_path(self, resolved_path: Path) -> Union[str, Path]:
+        """The path handed to a backend: relative to data_dir, else to the
+        workspace, else absolute (a local backend re-roots a relative one)."""
+        try:
+            return resolved_path.relative_to(self.data_dir)
+        except ValueError:
+            try:
+                return resolved_path.relative_to(self.workspace_path)
+            except ValueError:
+                return resolved_path
+
+    def _assert_backend_destination_allowed(
+        self, backend: Any, backend_path: Union[str, Path]
+    ) -> None:
+        """Raise ManagedPathError when the local file a native backend writes for
+        ``backend_path`` (its own resolution: a re-rooted path lands under data/) or
+        a folder it creates for it is inside the managed figure folder."""
+        native = tuple(
+            cls
+            for cls in (
+                H5ADBackend,
+                MuDataBackend if MUDATA_BACKEND_AVAILABLE else None,
+            )
+            if isinstance(cls, type)  # None when unavailable (or replaced in tests)
+        )
+        if not isinstance(backend, native):
+            return  # other registered backends are not classified here
+        is_s3 = getattr(backend, "_is_s3_path", None)
+        if is_s3 is not None and is_s3(backend_path):
+            return  # handed to the remote writer before any local write
+        destination = Path(backend._resolve_path(backend_path))
+        if not destination.is_absolute():
+            destination = Path.cwd() / destination
+        self._assert_save_allowed(destination)
+        _assert_dirs_allowed(self.workspace_path, destination.parent)
+
     def save_mudata(
         self, path: Union[str, Path], modalities: Optional[List[str]] = None, **kwargs
     ) -> str:
@@ -2153,6 +2358,7 @@ class DataManagerV2:
         """
         if "mudata" not in self.backends:
             raise ValueError("MuData backend not available")
+        self._assert_save_allowed(path)  # never into the managed figure folder
 
         # Create MuData object
         mdata = self.to_mudata(modalities=modalities)
@@ -2163,17 +2369,11 @@ class DataManagerV2:
             resolved_path = self.data_dir / path
 
         # Compute backend-relative path (same logic as save_modality)
-        backend_path: Union[str, Path] = resolved_path
-        try:
-            backend_path = resolved_path.relative_to(self.data_dir)
-        except ValueError:
-            try:
-                backend_path = resolved_path.relative_to(self.workspace_path)
-            except ValueError:
-                backend_path = resolved_path
+        backend_path = self._backend_path(resolved_path)
 
         # Save using MuData backend
         mudata_backend = self.backends["mudata"]
+        self._assert_backend_destination_allowed(mudata_backend, backend_path)
         mudata_backend.save(mdata, backend_path, **kwargs)
 
         logger.info(f"Saved MuData to {resolved_path}")
@@ -2526,6 +2726,8 @@ class DataManagerV2:
                 logger.debug(
                     f"Loaded modality '{modality_name}' from {h5ad_file}{backed_tag}"
                 )
+            except HdfReadRefusal:
+                raise
             except Exception as e:
                 logger.error(f"Failed to load modality '{modality_name}': {e}")
                 errors.append({"modality": modality_name, "error": str(e)})
@@ -3065,6 +3267,12 @@ class DataManagerV2:
             self._save_processing_log_and_provenance()
             return saved_items
 
+        # Before the first write: targets inside the managed figure folder are not
+        # written (counted once in the result); one backup timestamp for this run.
+        refused_resident, refused_spilled, backup_stamp = self._autosave_plan()
+        save_kwargs = {} if backup_stamp is None else {"backup_stamp": backup_stamp}
+        refused_count = 0
+
         modality_names = list(self.modalities.keys())
         total = len(modality_names)
 
@@ -3135,11 +3343,17 @@ class DataManagerV2:
                     )
                     continue
 
+                if modality_name in refused_resident:  # stays dirty: not saved
+                    refused_count += 1
+                    if progress_callback:
+                        progress_callback(idx + 1, total, modality_name, "error")
+                    continue
+
                 # Report progress before saving
                 if progress_callback:
                     progress_callback(idx + 1, total, modality_name, "saving")
 
-                saved_path = self.save_modality(modality_name, save_path)
+                saved_path = self.save_modality(modality_name, save_path, **save_kwargs)
                 saved_items.append(
                     f"Modality '{modality_name}': {Path(saved_path).name}"
                 )
@@ -3150,6 +3364,11 @@ class DataManagerV2:
                 if progress_callback:
                     progress_callback(idx + 1, total, modality_name, "done")
 
+            except ManagedPathError:  # the target became managed after the plan
+                logger.warning(_AUTOSAVE_REFUSED_LOG)
+                refused_count += 1
+                if progress_callback:
+                    progress_callback(idx + 1, total, modality_name, "error")
             except Exception as e:
                 logger.error(f"Failed to auto-save modality {modality_name}: {e}")
                 if progress_callback:
@@ -3176,12 +3395,21 @@ class DataManagerV2:
                 if full_save_path.exists() and full_save_path.samefile(source):
                     skipped_items.append(f"Modality '{modality_name}': already saved")
                     continue
+                if modality_name in refused_spilled:  # stays spilled and dirty
+                    refused_count += 1
+                    continue
+                self._assert_spilled_autosave_allowed(full_save_path)
                 full_save_path.parent.mkdir(parents=True, exist_ok=True)
+                self._assert_save_allowed(full_save_path)
+                _assert_not_a_folder(full_save_path)
                 shutil.copy2(source, full_save_path)
                 self._modality_dirty.discard(modality_name)
                 saved_items.append(
                     f"Modality '{modality_name}': {full_save_path.name} (from spill)"
                 )
+            except ManagedPathError:  # the target became managed after the plan
+                logger.warning(_AUTOSAVE_REFUSED_LOG)
+                refused_count += 1
             except Exception as e:
                 logger.error(
                     f"Failed to auto-save spilled modality '{modality_name}': {e}"
@@ -3203,8 +3431,64 @@ class DataManagerV2:
         all_results = saved_items.copy()
         if skipped_items:
             all_results.append(f"Skipped {len(skipped_items)} unchanged modalities")
+        if refused_count:
+            all_results.append(
+                f"{AUTOSAVE_NOT_SAVED_PREFIX}{refused_count} modalities refused "
+                "(managed figure folder)"
+            )
 
         return all_results
+
+    def _assert_spilled_autosave_allowed(self, full_save_path: Path) -> None:
+        """The copy of a spill file to its auto-save target: its folder (created
+        recursively), the file, and no folder standing at the file name."""
+        _assert_dirs_allowed(self.workspace_path, full_save_path.parent)
+        self._assert_save_allowed(full_save_path)
+        _assert_not_a_folder(full_save_path)
+
+    def _autosave_plan(self) -> tuple:
+        """Classify every auto-save target before the first write (no effect).
+
+        Returns the resident and the spilled modalities whose target, a folder created
+        for it, or its planned MuData backup is inside the managed figure folder, and
+        the backup timestamp of this run (read once; None unless the default backend
+        is MuData). The skip rules still apply first when the run executes.
+        """
+        backend = self.backends.get(self.default_backend)
+        backup_stamp = None
+        if (
+            MUDATA_BACKEND_AVAILABLE
+            and isinstance(MuDataBackend, type)  # replaced in some tests
+            and isinstance(backend, MuDataBackend)
+        ):
+            backup_stamp = backend.backup_stamp()
+        refused_resident, refused_spilled = set(), set()
+        for name in self.modalities:
+            save_path = _autosave_file_name(name)
+            try:
+                self._assert_save_allowed(save_path)
+                if backend is None:
+                    continue
+                backend_path = self._backend_path(self.data_dir / save_path)
+                self._assert_backend_destination_allowed(backend, backend_path)
+                if backup_stamp is not None:
+                    destination = Path(backend._resolve_path(backend_path))
+                    if destination.exists():  # the backup is made only then
+                        backend._assert_backup_allowed(
+                            backend.backup_sibling(
+                                backend.backup_source(destination), backup_stamp
+                            )
+                        )
+            except ManagedPathError:
+                refused_resident.add(name)
+        for name in self._modality_spilled:
+            try:
+                self._assert_spilled_autosave_allowed(
+                    self.data_dir / _autosave_file_name(name)
+                )
+            except ManagedPathError:
+                refused_spilled.add(name)
+        return refused_resident, refused_spilled, backup_stamp
 
     def mark_modality_dirty(self, modality_name: str) -> None:
         """
@@ -3243,6 +3527,12 @@ class DataManagerV2:
             bool: True if modalities exist, False otherwise
         """
         return len(self.modalities) > 0
+
+    def has_saveable_modalities(self) -> bool:
+        """True when auto-save has a modality to write: resident, or spilled to disk
+        to stay within the memory budget (``has_data()`` counts resident ones only)."""
+        with self._state_lock:
+            return bool(self.modalities) or bool(self._modality_spilled)
 
     # ========================================
     # PLOT MANAGEMENT - Use data_manager.plot_manager directly
@@ -3931,6 +4221,11 @@ class DataManagerV2:
 
         Returns:
             str: Path to the created zip file
+
+        Raises:
+            ManagedPathError: The package, its folder, its staging folder or a payload
+                file is inside the managed figure folder (or a modality name would
+                place its payload file outside the package)
         """
         legacy_names = self._legacy_plot_names()
         if not self.has_data() and not self._saved_figure_records():
@@ -3950,19 +4245,76 @@ class DataManagerV2:
         if progress_callback:
             progress_callback("Preparing export package...")
 
+        # Create a timestamp for unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        package_dir = self.exports_dir if output_dir is None else Path(output_dir)
+        zip_filename = package_dir / f"lobster_analysis_package_{timestamp}.zip"
+
+        # Before anything is created: every payload name stays a plain file name, and
+        # the package, its folder and the staging folder are outside plots/<figure>/.
+        for name in self.modalities:
+            if not all(map(_is_plain_file_name, _package_payload_names(name))):
+                raise _managed_refusal() from None
+        staging = _package_staging_parent()
+        _assert_dirs_allowed(self.workspace_path, staging)
+        _assert_dirs_allowed(self.workspace_path, package_dir)
+        self._assert_save_allowed(Path.cwd() / zip_filename)
+
         # Use exports directory if not specified
+        owned_dir = None  # the folder this call created (removed if left empty)
         if output_dir is None:
             output_dir = str(self.exports_dir)
         else:
-            os.makedirs(output_dir, exist_ok=True)
+            os.makedirs(package_dir.parent, exist_ok=True)
+            try:
+                os.mkdir(package_dir)
+                owned_dir = package_dir
+            except FileExistsError:
+                if not package_dir.is_dir():
+                    raise
 
-        # Create a timestamp for unique filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_filename = Path(output_dir) / f"lobster_analysis_package_{timestamp}.zip"
+        try:
+            return self._write_data_package(
+                staging,
+                zip_filename,
+                legacy_names,
+                progress_callback,
+                include_png,
+                compression,
+                include_provenance,
+                reuse_autosave,
+            )
+        except ManagedPathError:
+            if owned_dir is not None:
+                try:
+                    os.rmdir(owned_dir)  # only when still empty
+                except OSError:
+                    pass
+            raise
 
+    def _assert_package_file_allowed(self, path: Path) -> None:
+        """Right before a payload file is written (or copied) into the package."""
+        self._assert_save_allowed(path)
+        _assert_not_a_folder(path)
+
+    def _write_data_package(
+        self,
+        staging: str,
+        zip_filename: Path,
+        legacy_names: Optional[List[str]],
+        progress_callback,
+        include_png: bool,
+        compression: str,
+        include_provenance: bool,
+        reuse_autosave: bool,
+    ) -> str:
+        """Build the package of :meth:`create_data_package` in a new staging folder."""
         # Create a temporary directory for files
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=staging) as temp_dir:
             temp_path = Path(temp_dir)
+            for name in self.modalities:  # every payload file, before the first write
+                for leaf in _package_payload_names(name):
+                    self._assert_package_file_allowed(temp_path / "modalities" / leaf)
 
             if progress_callback:
                 progress_callback("Creating technical summary...")
@@ -4016,6 +4368,7 @@ class DataManagerV2:
                                     # Copy existing file instead of re-serializing
                                     import shutil
 
+                                    self._assert_package_file_allowed(h5ad_path)
                                     shutil.copy2(autosave_path, h5ad_path)
                                     reused = True
                                     logger.debug(
@@ -4025,6 +4378,7 @@ class DataManagerV2:
 
                         # If not reused, save with proper H5AD backend sanitization
                         if not reused:
+                            self._assert_package_file_allowed(h5ad_path)
                             if h5ad_backend:
                                 # Use backend's save method for proper sanitization
                                 # (handles ArrowExtensionArray, None columns, mixed types, etc.)
@@ -4068,9 +4422,12 @@ class DataManagerV2:
                             ),
                             "reused_from_autosave": reused,
                         }
+                        self._assert_package_file_allowed(metadata_path)
                         with open(metadata_path, "w") as f:
                             json.dump(modality_metadata, f, indent=2, default=str)
 
+                    except ManagedPathError:
+                        raise  # the whole package is refused (fixed reason)
                     except Exception as e:
                         logger.error(f"Failed to save modality {name}: {e}")
                         if progress_callback:
@@ -4258,6 +4615,7 @@ https://github.com/OmicsOS/lobster
                 progress_callback("Creating final package...")
 
             # Create the zip file
+            self._assert_save_allowed(Path.cwd() / zip_filename)
             with zipfile.ZipFile(zip_filename, "w") as zipf:
                 for root, _, files in os.walk(temp_dir):
                     for file in files:
@@ -4383,6 +4741,8 @@ https://github.com/OmicsOS/lobster
                                 ).isoformat(),
                                 "type": "h5ad",
                             }
+                except HdfReadRefusal:
+                    raise
                 except Exception as e:
                     is_autosave = h5ad_file.name.endswith("_autosave.h5ad")
                     if is_autosave:
@@ -4591,6 +4951,8 @@ https://github.com/OmicsOS/lobster
 
                 logger.info(f"Loaded dataset '{name}' from workspace")
                 return True
+            except HdfReadRefusal:
+                raise
             except Exception as e:
                 logger.error(f"Failed to load dataset {name}: {e}")
                 return False
@@ -4875,6 +5237,10 @@ https://github.com/OmicsOS/lobster
         Returns:
             Path to cached file
 
+        Raises:
+            ManagedPathError: The cache file or its folder is inside the managed
+                figure folder (nothing is written, no provenance is recorded)
+
         Example:
             >>> content = {
             ...     'markdown': '# Methods\\nWe used Seurat...',
@@ -4893,7 +5259,6 @@ https://github.com/OmicsOS/lobster
         import hashlib
 
         publications_dir = self.literature_cache_dir / "publications"
-        publications_dir.mkdir(parents=True, exist_ok=True)
 
         # Sanitize identifier for filename
         safe_identifier = (
@@ -4903,7 +5268,21 @@ https://github.com/OmicsOS/lobster
         if format == "markdown":
             # Store as human-readable markdown
             cache_file = publications_dir / f"{safe_identifier}.md"
+        elif format == "json":
+            # Use MD5-based key for JSON (DoclingService format)
+            source = content.get("source", identifier)
+            cache_key = hashlib.md5(source.encode(), usedforsecurity=False).hexdigest()
+            cache_file = publications_dir / f"{cache_key}.json"
+        else:
+            cache_file = None  # its ValueError still comes after the folder
 
+        # The folder and the file itself, before the folder is created.
+        _assert_dirs_allowed(self.workspace_path, publications_dir)
+        if cache_file is not None:
+            self._assert_save_allowed(cache_file)
+        publications_dir.mkdir(parents=True, exist_ok=True)
+
+        if format == "markdown":
             # Format markdown document
             markdown_content = f"""# Publication: {identifier}
 
@@ -4932,17 +5311,14 @@ https://github.com/OmicsOS/lobster
 - **Timestamp**: {content.get("timestamp", "N/A")}
 """
 
+            self._assert_save_allowed(cache_file)
             cache_file.write_text(markdown_content, encoding="utf-8")
             logger.info(f"Cached publication as markdown: {cache_file.name}")
 
         elif format == "json":
-            # Use MD5-based key for JSON (DoclingService format)
-            source = content.get("source", identifier)
-            cache_key = hashlib.md5(source.encode(), usedforsecurity=False).hexdigest()
-            cache_file = publications_dir / f"{cache_key}.json"
-
             import json
 
+            self._assert_save_allowed(cache_file)
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(content, f, indent=2)
 

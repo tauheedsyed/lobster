@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+# GEO download imports geo/loaders/tenx.py -> scanpy (optional extra). Without it
+# the package-only CI env cannot even collect this module; the full env runs it.
+pytest.importorskip("scanpy")
+
 from lobster.agents.data_expert.data_expert import data_expert
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.core.schemas.download_queue import DownloadQueueEntry, DownloadStatus

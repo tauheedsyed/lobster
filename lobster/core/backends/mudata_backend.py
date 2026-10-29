@@ -140,7 +140,9 @@ class MuDataBackend(BaseBackend):
 
         # Create backup if file exists
         if resolved_path.exists():
-            backup_path = self.create_backup(resolved_path)
+            backup_path = self.create_backup(
+                resolved_path, stamp=kwargs.get("backup_stamp")
+            )
             if backup_path:
                 self.logger.info(f"Created backup: {backup_path}")
 

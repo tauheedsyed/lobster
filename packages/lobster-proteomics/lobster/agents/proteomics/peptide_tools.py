@@ -11,6 +11,7 @@ from typing import Callable, List, Optional
 
 from langchain_core.tools import tool
 
+from lobster.core.figures.export_guard import MANAGED_EXPORT_MESSAGE, export_refused
 from lobster.core.runtime.data_manager import DataManagerV2
 
 logger = logging.getLogger(__name__)
@@ -503,6 +504,8 @@ def create_peptide_tools(
             import re as _re
             safe_name = _re.sub(r'[^\w\-]', '_', modality_name)
             csv_path = data_manager.exports_dir / f"{safe_name}_report.csv"
+            if export_refused(data_manager.workspace_path, csv_path):
+                return MANAGED_EXPORT_MESSAGE  # e.g. the file is a link into a figure
             adata.obs.to_csv(csv_path)
 
             data_manager.log_tool_usage(

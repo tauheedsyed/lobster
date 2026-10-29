@@ -53,6 +53,13 @@ from lobster.core import (
     InsufficientCellsError,
     PseudobulkError,
 )
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import (
+    MANAGED_EXPORT_MESSAGE,
+    assert_export_allowed,
+    export_refused,
+)
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.analysis.bulk_rnaseq_service import (
@@ -80,6 +87,37 @@ _BULK_SERVICE_SETUP = (
     "\n"
     "bulk_service = BulkRNASeqService(results_dir='bulk_results')\n"
 )
+
+
+def _is_pseudobulk(adata) -> bool:
+    """True when the modality carries a pseudobulk or formula design (``uns`` only)."""
+    return (
+        "pseudobulk_design" in adata.uns
+        or "is_pseudobulk" in adata.uns
+        or "formula_design" in adata.uns
+    )
+
+
+def _empty_bulk_de_refusal(adata_de, de_stats):
+    """An empty filtered table is not a successful biological DE result."""
+    if adata_de.n_vars:
+        return None
+    filters = de_stats["filtering_params"]
+    before = de_stats["pre_filter_gene_count"]
+    after = de_stats["post_filter_gene_count"]
+    return (
+        "**DE refused: no genes remain after filtering.**\n\n"
+        f"Genes after marker-style post-hoc filters: {before} -> {after}. "
+        f"All {before} genes were removed by the combined filters: "
+        f"min_fold_change={filters['min_fold_change']}, "
+        f"min_pct_expressed={filters['min_pct_expressed']}, "
+        f"max_out_pct_expressed={filters['max_out_pct_expressed']}.\n"
+        "These require sufficient fold change and expression in group1, and cap "
+        "the fraction of group2 samples with expression > 1. The out-group cap "
+        "is a marker-style filter and can remove genes expressed across bulk samples.\n\n"
+        "This is not a zero-DE biological result. Use run_de_with_formula for "
+        "bulk DE without these marker-style post-hoc filters. No result modality was stored."
+    )
 
 
 def _plain(value: Any) -> Any:
@@ -1135,6 +1173,23 @@ def de_analysis_expert(
 
             # Get the modality
             adata = data_manager.get_modality(modality_name)
+
+            # Every save target of the branch that will run is checked before the
+            # data changes or any analysis runs.
+            if save_result:
+                if _is_pseudobulk(adata) and method == "deseq2":
+                    assert_export_allowed(
+                        data_manager.workspace_path,
+                        data_manager.exports_dir / f"{modality_name}_de_results.csv",
+                    )
+                    data_manager._assert_save_allowed(
+                        f"{modality_name}_with_de_results.h5ad"
+                    )
+                else:
+                    data_manager._assert_save_allowed(
+                        f"{modality_name}_de_{group1}_vs_{group2}.h5ad"
+                    )
+
             logger.info(
                 f"Running DE analysis on '{modality_name}': "
                 f"{adata.n_obs} samples x {adata.n_vars} genes"
@@ -1175,11 +1230,7 @@ def de_analysis_expert(
             group2_count = (adata.obs[groupby] == group2).sum()
 
             # Auto-detect pseudobulk vs direct bulk
-            is_pseudobulk = (
-                "pseudobulk_design" in adata.uns
-                or "is_pseudobulk" in adata.uns
-                or "formula_design" in adata.uns
-            )
+            is_pseudobulk = _is_pseudobulk(adata)
 
             if is_pseudobulk and method == "deseq2":
                 # Pseudobulk path: use pyDESeq2 via formula design
@@ -1232,6 +1283,7 @@ def de_analysis_expert(
                     results_path = (
                         data_manager.exports_dir / f"{modality_name}_de_results.csv"
                     )
+                    assert_export_allowed(data_manager.workspace_path, results_path)
                     results_df.to_csv(results_path)
                     save_path = f"{modality_name}_with_de_results.h5ad"
                     data_manager.save_modality(modality_name, save_path)
@@ -1343,6 +1395,9 @@ def de_analysis_expert(
                     )
                 )
 
+                refusal = _empty_bulk_de_refusal(adata_de, de_stats)
+                if refusal:
+                    return refusal
                 adata_de.uns["de_current_results_key"] = de_stats["de_results_key"]
                 ir = _with_current_de_ir(
                     ir,
@@ -1416,6 +1471,9 @@ def de_analysis_expert(
             analysis_results["details"]["differential_expression"] = response
             return response
 
+        except ManagedPathError:
+            # A save target is inside the managed figure folder: nothing was saved.
+            return MANAGED_EXPORT_MESSAGE
         except (BulkRNASeqError, PseudobulkError, ModalityNotFoundError) as e:
             logger.error(f"Error in differential expression analysis: {e}")
             return f"Error in differential expression analysis: {str(e)}"
@@ -1928,6 +1986,18 @@ def de_analysis_expert(
 
             # Get the pseudobulk data
             adata = data_manager.get_modality(pseudobulk_modality)
+
+            # Both save targets are checked before any analysis or store.
+            if save_results:
+                assert_export_allowed(
+                    data_manager.workspace_path,
+                    data_manager.exports_dir
+                    / f"{pseudobulk_modality}_formula_de_results.csv",
+                )
+                data_manager._assert_save_allowed(
+                    f"{pseudobulk_modality}_with_formula_results.h5ad"
+                )
+
             count_layer, refusal = _deseq2_count_source(adata)
             if refusal:
                 return refusal
@@ -2047,6 +2117,7 @@ def de_analysis_expert(
                     data_manager.exports_dir
                     / f"{pseudobulk_modality}_formula_de_results.csv"
                 )
+                assert_export_allowed(data_manager.workspace_path, results_path)
                 results_df.to_csv(results_path)
 
                 modality_path = f"{pseudobulk_modality}_with_formula_results.h5ad"
@@ -2121,6 +2192,9 @@ def de_analysis_expert(
 
             return response
 
+        except ManagedPathError:
+            # A save target is inside the managed figure folder: nothing was saved.
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             logger.error(f"Error in formula-based DE analysis: {e}")
             return f"Error running differential expression with formula: {str(e)}"
@@ -2960,8 +3034,21 @@ def de_analysis_expert(
             output_path_obj = Path(output_path)
             if not output_path_obj.is_absolute():
                 output_path_obj = data_manager.exports_dir / output_path_obj
+            # Figures are saved only through the trusted save step: check the
+            # caller's (unresolved) destination, and every folder its recursive
+            # creation can make, before anything is created.
+            if export_refused(data_manager.workspace_path, output_path_obj):
+                return MANAGED_EXPORT_MESSAGE
+            try:
+                assert_dirs_allowed(data_manager.workspace_path, output_path_obj.parent)
+            except ManagedPathError:
+                return MANAGED_EXPORT_MESSAGE
             output_path_obj.parent.mkdir(parents=True, exist_ok=True)
             output_path = str(output_path_obj.resolve())
+            if export_refused(
+                data_manager.workspace_path, output_path_obj, output_path
+            ):
+                return MANAGED_EXPORT_MESSAGE
 
             if output_format == "xlsx":
                 try:
@@ -3132,6 +3219,9 @@ def de_analysis_expert(
                 )
             )
 
+            refusal = _empty_bulk_de_refusal(adata_de, de_stats)
+            if refusal:
+                return refusal
             adata_de.uns["de_current_results_key"] = de_stats["de_results_key"]
             # Store result modality
             de_modality_name = f"{modality_name}_de_{group1}_vs_{group2}"
@@ -3467,6 +3557,15 @@ def de_analysis_expert(
             padj_threshold: Maximum adjusted p-value for filtering (default: 0.05)
             lfc_threshold: Minimum absolute log2 fold change for filtering (default: 0.0)
         """
+
+        def _resolved_csv_fallback(path: Path) -> Optional[Path]:
+            """The resolved CSV name the XLSX fallback writes, or None when the path
+            cannot be resolved (the caller refuses with the fixed message)."""
+            try:
+                return Path(str(path.resolve()).replace(".xlsx", ".csv"))
+            except (OSError, RuntimeError, ValueError):
+                return None
+
         try:
             # Validate modality exists
             if modality_name not in data_manager.list_modalities():
@@ -3583,8 +3682,31 @@ def de_analysis_expert(
             output_path_obj = Path(output_path)
             if not output_path_obj.is_absolute():
                 output_path_obj = data_manager.exports_dir / output_path_obj
+            # Figures are saved only through the trusted save step: check the
+            # caller's (unresolved) destination, and the CSV fallback name derived
+            # from it, before anything is created.
+            targets = [output_path_obj]
+            if output_format == "xlsx":
+                targets.append(Path(str(output_path_obj).replace(".xlsx", ".csv")))
+            if export_refused(data_manager.workspace_path, *targets):
+                return MANAGED_EXPORT_MESSAGE
+            if output_format == "xlsx":
+                # ...and the name exactly as the late fallback derives it; a path
+                # that cannot be resolved is refused with the same fixed message.
+                fallback = _resolved_csv_fallback(output_path_obj)
+                if fallback is None or export_refused(
+                    data_manager.workspace_path, fallback
+                ):
+                    return MANAGED_EXPORT_MESSAGE
+                targets.append(fallback)
+            try:
+                assert_dirs_allowed(data_manager.workspace_path, output_path_obj.parent)
+            except ManagedPathError:
+                return MANAGED_EXPORT_MESSAGE
             output_path_obj.parent.mkdir(parents=True, exist_ok=True)
             output_path = str(output_path_obj.resolve())
+            if export_refused(data_manager.workspace_path, *targets, output_path):
+                return MANAGED_EXPORT_MESSAGE
 
             if output_format == "xlsx":
                 try:
@@ -3592,6 +3714,8 @@ def de_analysis_expert(
                 except ImportError:
                     output_format = "csv"
                     output_path = output_path.replace(".xlsx", ".csv")
+                    if export_refused(data_manager.workspace_path, output_path):
+                        return MANAGED_EXPORT_MESSAGE
                     results_df.to_csv(output_path, index=True)
                     logger.warning("openpyxl not available, falling back to CSV.")
             else:

@@ -270,7 +270,10 @@ def plots_list(client: "AgentClient", output: OutputAdapter) -> Optional[str]:
             data_manager = client.data_manager
             legacy = _legacy_plot_names(data_manager)
             try:
-                saved = len(data_manager._saved_figure_records())
+                records = data_manager._saved_figure_records()
+                # One record per revision; a figure can have several revisions.
+                saved = len(records)
+                figures = len({r["figure_id"] for r in records})
             except Exception as e:
                 from lobster.core.figures.errors import safe_reason
 
@@ -285,13 +288,16 @@ def plots_list(client: "AgentClient", output: OutputAdapter) -> Optional[str]:
                 return "No plots available"
             if saved:
                 output.print(
-                    f"[grey50]No plots generated in this session; {saved} saved "
-                    "figure(s) in this workspace. Use /plot <figure ref or title> to "
-                    "open one.[/grey50]",
+                    f"[grey50]No plots generated in this session; {figures} saved "
+                    f"figure(s), {saved} revision(s) in this workspace. Use /plot "
+                    "<figure ref or title> to open one.[/grey50]",
                     style="info",
                 )
             _print_legacy_not_supported(legacy, output, "/plot or /export")
-            return f"No session plots; {saved} saved figure(s) in the workspace"
+            return (
+                f"No session plots; {figures} saved figure(s), {saved} revision(s) "
+                "in the workspace"
+            )
 
     except Exception as e:
         output.print(f"[red]Failed to retrieve plot history: {e}[/red]", style="error")

@@ -62,6 +62,10 @@ class RecordingCallback(TokenTrackingCallback):
 
 @pytest.fixture(params=["direct", "gateway"])
 def transport(request, monkeypatch):
+    # Every SDK replay consumer builds a ChatBedrockConverse (langchain_aws, an
+    # optional extra absent in Fast Validation): skip them there, run them in the
+    # full env. Tests that do not use this fixture stay unaffected.
+    pytest.importorskip("langchain_aws")
     if request.param == "direct":
         runtime = Runtime()
         return "direct", runtime, lambda model_id: model_for(runtime, model_id)

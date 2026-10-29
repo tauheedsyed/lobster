@@ -659,7 +659,18 @@ class LobsterCommands(Provider):
 
         try:
             saved_items = self.client.data_manager.auto_save_state()
-            if saved_items:
+            from lobster.core.runtime.data_manager import AUTOSAVE_NOT_SAVED_PREFIX
+
+            not_saved = [
+                item
+                for item in saved_items or []
+                if isinstance(item, str) and item.startswith(AUTOSAVE_NOT_SAVED_PREFIX)
+            ]
+            if not_saved:  # never reported as saved
+                self.app.notify(
+                    f"Session partly saved: {not_saved[0]}", severity="warning"
+                )
+            elif saved_items:
                 self.app.notify(f"Session saved ({len(saved_items)} items)", timeout=2)
             else:
                 self.app.notify("Nothing to save", severity="warning", timeout=2)

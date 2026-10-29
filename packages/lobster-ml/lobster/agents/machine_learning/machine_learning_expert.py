@@ -32,6 +32,13 @@ from lobster.config.inference_context import (
 )
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import (
+    MANAGED_EXPORT_MESSAGE,
+    assert_export_allowed,
+    export_refused,
+)
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.ml.ml_preparation_service import (
@@ -702,6 +709,36 @@ def machine_learning_expert(
             import os
 
             export_path = data_manager.exports_dir / output_dir
+            # Figures are saved only through the trusted save step: check the
+            # (unresolved) directory and every file this export can write before
+            # anything is created, and again at each write.
+            _ml_names = [
+                f"{modality_name}_{suffix}"
+                for suffix in (
+                    "label_mapping.json",
+                    "features.npy",
+                    "labels.npy",
+                    "feature_names.npy",
+                    "sample_names.npy",
+                    "ml_data.csv",
+                    "features.pt",
+                    "labels.pt",
+                    "metadata.pt",
+                    "tf_data.npz",
+                )
+            ]
+            if export_refused(
+                data_manager.workspace_path,
+                export_path,
+                *(export_path / name for name in _ml_names),
+            ):
+                return MANAGED_EXPORT_MESSAGE
+
+            def _ml_target(name):
+                target = export_path / name
+                assert_export_allowed(data_manager.workspace_path, target)
+                return target
+
             export_path.mkdir(exist_ok=True)
 
             # Get features (X matrix)
@@ -747,7 +784,7 @@ def machine_learning_expert(
                         import json
 
                         with open(
-                            export_path / f"{modality_name}_label_mapping.json", "w"
+                            _ml_target(f"{modality_name}_label_mapping.json"), "w"
                         ) as f:
                             json.dump(
                                 {str(k): int(v) for k, v in label_mapping.items()},
@@ -760,21 +797,21 @@ def machine_learning_expert(
             exported_files = []
 
             if format == "numpy":
-                np.save(export_path / f"{modality_name}_features.npy", X)
+                np.save(_ml_target(f"{modality_name}_features.npy"), X)
                 exported_files.append(f"{modality_name}_features.npy")
 
                 if y is not None:
-                    np.save(export_path / f"{modality_name}_labels.npy", y)
+                    np.save(_ml_target(f"{modality_name}_labels.npy"), y)
                     exported_files.append(f"{modality_name}_labels.npy")
 
                 np.save(
-                    export_path / f"{modality_name}_feature_names.npy",
+                    _ml_target(f"{modality_name}_feature_names.npy"),
                     adata.var_names.values,
                 )
                 exported_files.append(f"{modality_name}_feature_names.npy")
 
                 np.save(
-                    export_path / f"{modality_name}_sample_names.npy",
+                    _ml_target(f"{modality_name}_sample_names.npy"),
                     adata.obs_names.values,
                 )
                 exported_files.append(f"{modality_name}_sample_names.npy")
@@ -787,7 +824,7 @@ def machine_learning_expert(
                 if y is not None:
                     feature_df["_label"] = y
 
-                csv_path = export_path / f"{modality_name}_ml_data.csv"
+                csv_path = _ml_target(f"{modality_name}_ml_data.csv")
                 feature_df.to_csv(csv_path)
                 exported_files.append(f"{modality_name}_ml_data.csv")
 
@@ -796,12 +833,12 @@ def machine_learning_expert(
                     import torch
 
                     X_tensor = torch.FloatTensor(X)
-                    torch.save(X_tensor, export_path / f"{modality_name}_features.pt")
+                    torch.save(X_tensor, _ml_target(f"{modality_name}_features.pt"))
                     exported_files.append(f"{modality_name}_features.pt")
 
                     if y is not None:
                         y_tensor = torch.LongTensor(y)
-                        torch.save(y_tensor, export_path / f"{modality_name}_labels.pt")
+                        torch.save(y_tensor, _ml_target(f"{modality_name}_labels.pt"))
                         exported_files.append(f"{modality_name}_labels.pt")
 
                     metadata = {
@@ -810,7 +847,7 @@ def machine_learning_expert(
                         "sample_names": adata.obs_names.tolist(),
                         "label_column": label_column if y is not None else None,
                     }
-                    torch.save(metadata, export_path / f"{modality_name}_metadata.pt")
+                    torch.save(metadata, _ml_target(f"{modality_name}_metadata.pt"))
                     exported_files.append(f"{modality_name}_metadata.pt")
 
                 except ImportError:
@@ -825,10 +862,12 @@ def machine_learning_expert(
                     save_dict["sample_names"] = adata.obs_names.values
 
                     np.savez_compressed(
-                        export_path / f"{modality_name}_tf_data.npz", **save_dict
+                        _ml_target(f"{modality_name}_tf_data.npz"), **save_dict
                     )
                     exported_files.append(f"{modality_name}_tf_data.npz")
 
+                except ManagedPathError:
+                    raise  # the fixed refusal below, not the TensorFlow error text
                 except Exception as e:
                     return f"Error exporting for TensorFlow: {str(e)}"
 
@@ -867,6 +906,9 @@ def machine_learning_expert(
             ml_results["details"]["ml_export"] = response
             return response
 
+        except ManagedPathError:
+            # A late write-time refusal: the fixed message, no error log.
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             logger.error(f"Error exporting for ML framework: {e}")
             return f"Error exporting for ML framework: {str(e)}"
@@ -1038,6 +1080,7 @@ After installation, restart your session and run this tool again."""
         """
         try:
             from lobster.services.analysis.scvi_embedding_service import (
+                SCVI_SAVED_FILES,
                 ScviEmbeddingService,
             )
 
@@ -1050,7 +1093,6 @@ After installation, restart your session and run this tool again."""
                 return f"Modality '{modality_name}' not found.\n\nAvailable modalities: {', '.join(available)}"
 
             adata = data_manager.get_modality(modality_name)
-            logger.info(f"Training scVI embedding for '{modality_name}': {adata.shape}")
 
             if batch_key and batch_key not in adata.obs.columns:
                 available_cols = [
@@ -1066,11 +1108,23 @@ After installation, restart your session and run this tool again."""
             model_save_path = None
             if save_model:
                 if data_manager.workspace_path:
-                    models_dir = Path(data_manager.workspace_path) / "models"
+                    workspace = Path(data_manager.workspace_path)
+                    models_dir = workspace / "models"
+                    model_dir = models_dir / f"{modality_name}_scvi_model"
+                    # The model folder carries the modality name: refuse a managed
+                    # figure target (the folder, its creation and the files the native
+                    # save writes in it) before anything is created or trained.
+                    assert_export_allowed(workspace, models_dir)
+                    assert_export_allowed(workspace, model_dir)
+                    assert_dirs_allowed(workspace, model_dir)
+                    for name in SCVI_SAVED_FILES:
+                        assert_export_allowed(workspace, model_dir / name)
                     models_dir.mkdir(exist_ok=True)
-                    model_save_path = str(models_dir / f"{modality_name}_scvi_model")
+                    model_save_path = str(model_dir)
                 else:
                     model_save_path = f"{modality_name}_scvi_model"
+
+            logger.info(f"Training scVI embedding for '{modality_name}': {adata.shape}")
 
             model_kwargs = {
                 "n_layers": n_layers,
@@ -1087,6 +1141,7 @@ After installation, restart your session and run this tool again."""
                 batch_key=batch_key,
                 force_cpu=not use_gpu,
                 save_path=model_save_path,
+                workspace_path=data_manager.workspace_path,
                 **model_kwargs,
             )
 
@@ -1146,6 +1201,9 @@ The scVI embeddings are now available in modality.obsm['X_scvi'] and can be used
             ml_results["details"]["scvi_training"] = response
             return response
 
+        except ManagedPathError:
+            # The model folder is inside the managed figure folder: nothing was saved.
+            return MANAGED_EXPORT_MESSAGE
         except ImportError as e:
             return f"scVI dependencies not available: {str(e)}\n\nRun `check_scvi_availability()` for installation instructions."
         except Exception as e:

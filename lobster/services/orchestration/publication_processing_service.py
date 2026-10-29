@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -12,9 +13,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from lobster.core.data_manager_v2 import DataManagerV2
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import (
+    MANAGED_EXPORT_MESSAGE,
+    assert_export_allowed,
+    export_refused,
+)
 from lobster.core.schemas.publication_queue import (
     PublicationQueueEntry,
     PublicationStatus,
@@ -555,6 +564,61 @@ class PublicationProcessingService:
         ),  # Moved to end to combine E-Link + text-extracted BioProjects
     }
 
+    def _entry_file(self, metadata_dir: Path, entry_id: str, kind: str) -> Path:
+        """The workspace file for one extraction result of a queue entry.
+
+        The entry id becomes part of a file name: it must stay a single plain name
+        inside ``metadata/`` (an id carrying a path separator is declined), and the
+        file must not be in the managed figure folder. Raises before anything is
+        written; a managed-folder refusal ends the entry with the fixed refused
+        outcome.
+        """
+        from lobster.core.figures.export_guard import assert_export_allowed
+
+        name = f"{entry_id}_{kind}.json"
+        if Path(name).name != name or "\\" in name or "\x00" in name:
+            raise ValueError("the entry id is not a plain file name")
+        target = metadata_dir / name
+        assert_export_allowed(self.data_manager.workspace_path, target)
+        return target
+
+    def _entry_refusal(self, entry_id: str) -> Optional[str]:
+        """The fixed refusal for an entry whose files cannot be written, else None.
+
+        Pure: no I/O beyond the guard's own lookups. An id that is not one plain
+        name is refused; so is an entry whose metadata files, or the queue files its
+        status update writes, would be in the managed figure folder.
+        """
+        if (
+            not isinstance(entry_id, str)
+            or entry_id in ("", ".", "..")
+            or Path(entry_id).name != entry_id
+            or "/" in entry_id
+            or "\\" in entry_id
+            or "\x00" in entry_id
+        ):
+            return ENTRY_ID_REFUSED
+        workspace = self.data_manager.workspace_path
+        metadata_dir = Path(workspace) / "metadata"
+        targets = [metadata_dir / f"{entry_id}_{kind}.json" for kind in _ENTRY_KINDS]
+        if export_refused(workspace, *targets) or publication_queue_refused(
+            self.data_manager
+        ):
+            return MANAGED_EXPORT_MESSAGE
+        return None
+
+    @staticmethod
+    def _refused_outcome(entry_id: str, message: str) -> "EntryProcessingOutcome":
+        """The fixed refused outcome; logs one path-free warning."""
+        code = "entry_id_not_plain" if message == ENTRY_ID_REFUSED else "managed_path"
+        logger.warning("publication entry refused (reason=%s)", code)
+        return EntryProcessingOutcome(
+            entry_id=entry_id,
+            final_status="failed",
+            error=message,
+            response_markdown=message,
+        )
+
     def process_entry(
         self,
         entry_id: str,
@@ -615,6 +679,11 @@ class PublicationProcessingService:
                         f"**Error**: {str(e)}"
                     ),
                 )
+
+            # An entry whose files cannot be written is refused before any task.
+            refusal = self._entry_refusal(entry_id)
+            if refusal is not None:
+                return self._refused_outcome(entry_id, refusal)
 
             tasks = [task.strip().lower() for task in extraction_tasks.split(",")]
             if self._timing_enabled:
@@ -1205,6 +1274,8 @@ class PublicationProcessingService:
                                         )
                                         sra_fetch_failed += 1
 
+                                except ManagedPathError:
+                                    raise  # refused, never warn-and-continue
                                 except Exception as e:
                                     logger.warning(
                                         f"Failed to fetch SRA metadata for {bioproject_id}: {e}"
@@ -1233,6 +1304,8 @@ class PublicationProcessingService:
                                 "⚠ SRA metadata fetch skipped: No BioProject IDs found (E-Link or text extraction)"
                             )
 
+                    except ManagedPathError:
+                        raise  # refused, never warn-and-continue
                     except Exception as e:
                         response_parts.append(f"✗ SRA metadata fetch failed: {str(e)}")
                         logger.error(f"SRA metadata fetch error: {e}")
@@ -1245,7 +1318,7 @@ class PublicationProcessingService:
                 metadata_dir.mkdir(parents=True, exist_ok=True)
 
                 if extracted_data.get("metadata_extracted") and content_result:
-                    metadata_file = metadata_dir / f"{entry_id}_metadata.json"
+                    metadata_file = self._entry_file(metadata_dir, entry_id, "metadata")
                     metadata_content = {
                         "content": content_result.get("content", ""),
                         "summary": content_result.get("summary"),
@@ -1264,7 +1337,7 @@ class PublicationProcessingService:
                     extracted_data.get("methods_extracted")
                     and "methods_content" in locals()
                 ):
-                    methods_file = metadata_dir / f"{entry_id}_methods.json"
+                    methods_file = self._entry_file(metadata_dir, entry_id, "methods")
                     methods_data = {
                         "methods_text": methods_content,
                         "methods_dict": (
@@ -1279,7 +1352,9 @@ class PublicationProcessingService:
                     logger.debug("Saved methods to %s", methods_file)
 
                 if extracted_data.get("identifiers_extracted") and identifiers_found:
-                    identifiers_file = metadata_dir / f"{entry_id}_identifiers.json"
+                    identifiers_file = self._entry_file(
+                        metadata_dir, entry_id, "identifiers"
+                    )
                     identifiers_data = {
                         "identifiers": identifiers_found,
                         "source": entry.pmid or entry.doi or entry.pmc_id,
@@ -1298,6 +1373,8 @@ class PublicationProcessingService:
                         f"✓ Saved {len(workspace_keys)} files to workspace/metadata/"
                     )
 
+            except ManagedPathError:
+                raise  # refused, never warn-and-continue
             except Exception as e:  # pragma: no cover - workspace errors
                 logger.error("Failed to save extracted data to workspace: %s", e)
                 response_parts.append(
@@ -1387,6 +1464,7 @@ class PublicationProcessingService:
             # FIX: SINGLE update_status call with ALL collected data
             # This replaces 4 intermediate calls that caused O(n²) file rewrites
             # Phase B1: Persist PMC ID and PMID discovered during enrichment for reuse
+            _assert_publication_queue_writable(data_manager)  # at the write
             data_manager.publication_queue.update_status(
                 entry_id=entry_id,
                 status=final_status,
@@ -1450,6 +1528,9 @@ class PublicationProcessingService:
                 response_markdown="\n".join(response_parts),
             )
 
+        except ManagedPathError:
+            # A late refusal: no status update, no tool log, the fixed outcome.
+            return self._refused_outcome(entry_id, MANAGED_EXPORT_MESSAGE)
         except Exception as e:  # pragma: no cover - outer safety net
             logger.error("Failed to process publication entry %s: %s", entry_id, e)
             return EntryProcessingOutcome(
@@ -1502,8 +1583,12 @@ class PublicationProcessingService:
 
         status_counts: Dict[str, int] = {}
         for idx, entry in enumerate(entries, start=1):
-            summary.append(f"### Entry {idx}: {entry.title or entry.entry_id}")
-            summary.append(f"- Entry ID: {entry.entry_id}")
+            if self._entry_refusal(entry.entry_id) is not None:
+                summary.append(f"### Entry {idx}: {REFUSED_ENTRY_LABEL}")
+                summary.append(f"- Entry ID: {REFUSED_ENTRY_LABEL}")
+            else:
+                summary.append(f"### Entry {idx}: {entry.title or entry.entry_id}")
+                summary.append(f"- Entry ID: {entry.entry_id}")
             summary.append(f"- Current Status: {entry.status}")
             outcome = self.process_entry(
                 entry.entry_id, extraction_tasks=extraction_tasks
@@ -1594,6 +1679,13 @@ class PublicationProcessingService:
                 entries_per_minute=0.0,
             )
 
+        # Entries whose files cannot be written are refused before any preparation.
+        refused = {
+            entry_id: refusal
+            for entry_id in entry_ids
+            if (refusal := self._entry_refusal(entry_id)) is not None
+        }
+
         # Bound concurrency (Redis coordinates rate limits across workers)
         effective_workers = min(max_workers, len(entry_ids))
         logger.debug(
@@ -1608,6 +1700,8 @@ class PublicationProcessingService:
             entry_pmid_map = {}  # entry_id → pmid
 
             for entry_id in entry_ids:
+                if entry_id in refused:
+                    continue
                 try:
                     entry = self.data_manager.publication_queue.get_entry(entry_id)
                     if entry and entry.pmid:
@@ -1647,12 +1741,14 @@ class PublicationProcessingService:
                 extraction_tasks=extraction_tasks,
                 effective_workers=effective_workers,
                 debug=debug,
+                refused=refused,
             )
         else:
             return self._process_parallel_simple(
                 entry_ids=entry_ids,
                 extraction_tasks=extraction_tasks,
                 effective_workers=effective_workers,
+                refused=refused,
             )
 
     def _process_parallel_simple(
@@ -1660,13 +1756,19 @@ class PublicationProcessingService:
         entry_ids: List[str],
         extraction_tasks: str,
         effective_workers: int,
+        refused: Optional[Dict[str, str]] = None,
     ) -> "ParallelProcessingResult":
         """Process entries in parallel without progress UI (for programmatic use)."""
         results: List[EntryProcessingResult] = []
         results_lock = threading.Lock()
         start_time = time.time()
+        refused = refused or {}
 
         def process_single_entry(entry_id: str) -> EntryProcessingResult:
+            if entry_id in refused:
+                return EntryProcessingResult.from_outcome(
+                    self._refused_outcome(entry_id, refused[entry_id])
+                )
             try:
                 outcome = self.process_entry(
                     entry_id=entry_id,
@@ -1744,8 +1846,10 @@ class PublicationProcessingService:
         extraction_tasks: str,
         effective_workers: int,
         debug: bool = False,
+        refused: Optional[Dict[str, str]] = None,
     ) -> "ParallelProcessingResult":
         """Process entries in parallel with Rich progress bars (work-stealing pattern)."""
+        refused = refused or {}
         from lobster.ui.components.parallel_workers_progress import (
             parallel_workers_progress,
         )
@@ -1785,6 +1889,19 @@ class PublicationProcessingService:
                             break
 
                         idx, entry_id = next_item
+
+                        if entry_id in refused:
+                            # Refused before any work; the id is never shown.
+                            progress.worker_start(worker_id, REFUSED_ENTRY_LABEL)
+                            result = EntryProcessingResult.from_outcome(
+                                self._refused_outcome(entry_id, refused[entry_id])
+                            )
+                            progress.worker_complete(
+                                worker_id, result.status, result.elapsed_seconds
+                            )
+                            with results_lock:
+                                results.append(result)
+                            continue
 
                         # Get entry title for progress display
                         try:
@@ -1875,6 +1992,65 @@ class PublicationProcessingService:
             total_time=total_time,
             entries_per_minute=len(results) / total_time * 60 if total_time > 0 else 0,
         )
+
+
+ENTRY_ID_REFUSED = (
+    "Error: this publication entry id is not a plain file name; the entry was not "
+    "processed."
+)
+REFUSED_ENTRY_LABEL = "refused entry"
+_ENTRY_KINDS = ("metadata", "methods", "identifiers")
+_REFUSAL_MESSAGES = frozenset({ENTRY_ID_REFUSED, MANAGED_EXPORT_MESSAGE})
+
+
+def _publication_queue_paths(data_manager):
+    """What a publication queue update writes: its lock file and queue file, and
+    the folders it writes new files in (the queue folder, for the temporary file
+    that replaces the queue file, and the backup folder). Pure; attributes that are
+    not paths are skipped."""
+    queue = getattr(data_manager, "publication_queue", None)
+    files, folders = [], []
+    for name in ("_file_lock_path", "queue_file"):
+        value = getattr(queue, name, None)
+        if isinstance(value, (str, os.PathLike)):
+            files.append(Path(value))
+    queue_file = getattr(queue, "queue_file", None)
+    if isinstance(queue_file, (str, os.PathLike)):
+        folders.append(Path(queue_file).parent)
+    backup_dir = getattr(queue, "backup_dir", None)
+    if isinstance(backup_dir, (str, os.PathLike)):
+        folders.append(Path(backup_dir))
+    return files, folders
+
+
+def publication_queue_refused(data_manager) -> bool:
+    """True when updating the publication queue would write inside the managed
+    figure folder (its lock file, queue file, queue folder or backups)."""
+    try:
+        _assert_publication_queue_writable(data_manager)
+    except ManagedPathError:
+        return True
+    return False
+
+
+def _assert_publication_queue_writable(data_manager) -> None:
+    """Raise the typed refusal (fixed reason) right before a queue update."""
+    workspace = getattr(data_manager, "workspace_path", None)
+    if isinstance(workspace, (str, os.PathLike)):
+        files, folders = _publication_queue_paths(data_manager)
+        for target in files:
+            assert_export_allowed(workspace, target)
+        for folder in folders:
+            assert_dirs_allowed(workspace, folder)
+
+
+def entry_refused(outcome: "EntryProcessingOutcome") -> bool:
+    """True only for the fixed refused outcome (never for an ordinary failure)."""
+    return (
+        outcome.final_status == "failed"
+        and outcome.error in _REFUSAL_MESSAGES
+        and outcome.response_markdown == outcome.error
+    )
 
 
 @dataclass

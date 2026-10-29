@@ -36,6 +36,8 @@ from lobster.core.exceptions import InferenceRefused
 from lobster.core.interfaces.validator import ValidationResult
 from lobster.core.provenance.analysis_ir import AnalysisStep
 from lobster.core.runtime.data_manager import DataManagerV2
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_guard import MANAGED_EXPORT_MESSAGE
 
 # Graceful fallback: Import premium DiseaseOntologyService if available
 # Public version (lobster-local) will use hardcoded fallback
@@ -1899,6 +1901,16 @@ Which approach would you prefer?"""
             logger.error(error_msg, exc_info=True)
             return [], {}, error_msg
 
+    def _queue_refusal(dispatched: bool) -> str:
+        """The fixed refusal of a queue run. Once entries were dispatched, some of
+        their queue updates may already have been written; they are not undone."""
+        if not dispatched:
+            return MANAGED_EXPORT_MESSAGE
+        return (
+            MANAGED_EXPORT_MESSAGE
+            + "\nSome queue entries may already have been updated."
+        )
+
     def _process_queue_with_progress(
         entries,
         filter_criteria,
@@ -2054,6 +2066,8 @@ Which approach would you prefer?"""
                             future.result()
                         except InferenceRefused:
                             raise
+                        except ManagedPathError:  # a refused queue update
+                            raise
                         except Exception as e:
                             logger.error(f"Worker error: {e}")
                 finally:
@@ -2160,6 +2174,7 @@ Use `write_to_workspace(identifier="{output_key}", workspace="metadata", output_
         Example:
             process_metadata_queue(filter_criteria="16S V4 human fecal CRC")
         """
+        dispatched = False
         try:
             from lobster.services.data_access.workspace_content_service import (
                 ContentType,
@@ -2215,6 +2230,12 @@ Use `write_to_workspace(identifier="{output_key}", workspace="metadata", output_
                     )
                 logger.info(f"No entries found with status '{status_filter}'")
                 return f"No entries found with status '{status_filter}'"
+
+            # Before any entry is processed, the writes below must be allowed: the
+            # queue updates and the aggregated output file.
+            queue._assert_writable()
+            workspace_service.check_content_allowed(output_key, ContentType.METADATA)
+            dispatched = True  # entries are processed (and updated) from here on
 
             # Route to parallel processing if requested and available
             if parallel_workers and parallel_workers > 1 and PROGRESS_UI_AVAILABLE:
@@ -2449,6 +2470,8 @@ Should I proceed with automatic enrichment?"""
                         handoff_status=HandoffStatus.METADATA_COMPLETE,
                     )
 
+                except ManagedPathError:  # a refused queue update: no failure status
+                    raise
                 except Exception as e:
                     # Graceful degradation: log error but continue with other entries
                     error_msg = f"Failed to process entry {entry.entry_id}: {str(e)}"
@@ -2691,6 +2714,8 @@ Fix: Run without filter first to inspect data: `process_metadata_queue(status_fi
             response += f'\nUse `write_to_workspace(identifier="{output_key}", workspace="metadata", output_format="csv")` to export as CSV.\n'
 
             return response
+        except ManagedPathError:
+            return _queue_refusal(dispatched)
         except Exception as e:
             logger.error(f"Error processing queue: {e}")
             return f"❌ Error processing queue: {str(e)}"

@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lobster.core.data_manager_v2 import DataManagerV2
 from lobster.core.exceptions import InferenceRefused, reraise_inference_refusal
+from lobster.core.figures.errors import ManagedPathError
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.services.data_access.docling_service import DoclingService
 from lobster.tools.providers.abstract_provider import AbstractProvider
@@ -49,6 +50,11 @@ from lobster.tools.url_transforms import transform_publisher_url
 from lobster.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_CACHE_REFUSED_LOG = (
+    "Publication cache write skipped: the cache file is inside the managed figure "
+    "folder."
+)
 
 
 class ContentAccessService:
@@ -1140,11 +1146,7 @@ class ContentAccessService:
                     f"Detected non-scientific source, short-circuiting: {source}"
                 )
                 result = self._build_non_scientific_result(source)
-                self.data_manager.cache_publication_content(
-                    identifier=source,
-                    content=result,
-                    format="json",
-                )
+                self._cache_full_content(source, result)
                 return result
 
             # 2. For PMID/DOI identifiers: Try PMC Full Text XML (priority)
@@ -1177,11 +1179,7 @@ class ContentAccessService:
                         content_result["extraction_time"] = time.time() - start_time
 
                         # Cache result
-                        self.data_manager.cache_publication_content(
-                            identifier=source,
-                            content=content_result,
-                            format="json",
-                        )
+                        self._cache_full_content(source, content_result)
 
                         # Log to provenance
                         self.data_manager.log_tool_usage(
@@ -1316,11 +1314,7 @@ class ContentAccessService:
                 )
 
                 # Cache result
-                self.data_manager.cache_publication_content(
-                    identifier=source,
-                    content=content_result,
-                    format="json",
-                )
+                self._cache_full_content(source, content_result)
 
                 # Log to provenance
                 self.data_manager.log_tool_usage(
@@ -1888,16 +1882,25 @@ class ContentAccessService:
                 "conversion_seconds", 0.0
             )
 
-            self.data_manager.cache_publication_content(
-                identifier=source_identifier,
-                content=docling_result,
-                format="json",
-            )
+            self._cache_full_content(source_identifier, docling_result)
 
             return docling_result
         except Exception as e:
             logger.warning(f"PDF fallback failed: {e}")
             return None
+
+    def _cache_full_content(self, identifier: str, content: dict) -> None:
+        """Cache an extraction result (JSON). A cache file inside the managed figure
+        folder is not written; the result is still returned as extracted, with no
+        retry and no other route."""
+        try:
+            self.data_manager.cache_publication_content(
+                identifier=identifier,
+                content=content,
+                format="json",
+            )
+        except ManagedPathError:
+            logger.warning(_CACHE_REFUSED_LOG)
 
     def _looks_like_pdf(self, url: str) -> bool:
         if not url or not isinstance(url, str):
@@ -1972,11 +1975,7 @@ class ContentAccessService:
                 content["extraction_time"] = time.time() - start_time
 
                 if self.data_manager:
-                    self.data_manager.cache_publication_content(
-                        identifier=cache_identifier,
-                        content=content,
-                        format="json",
-                    )
+                    self._cache_full_content(cache_identifier, content)
 
                 return content
             except BioRxivNotFoundError:

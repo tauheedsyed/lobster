@@ -884,6 +884,9 @@ class TestDECurrentResultsAndPersistence:
         adata = dm.modalities["pb"]
         if path == "pseudobulk":
             adata.uns["is_pseudobulk"] = True
+        else:
+            # A success fixture must survive the marker-style out-group cap.
+            adata.X[adata.obs["condition"] == "treated", :10] = 1
         if path == "bulk_direct":
             name = "run_bulk_de_direct"
             args = {
@@ -907,6 +910,7 @@ class TestDECurrentResultsAndPersistence:
         output = dm.modalities[
             "pb" if path == "pseudobulk" else "pb_de_control_vs_treated"
         ]
+        assert output.n_vars > 0
         expected_key = (
             "de_results_condition_treated_vs_control"
             if path == "pseudobulk"

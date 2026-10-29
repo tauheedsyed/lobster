@@ -7,6 +7,7 @@ requests with atomic operations, automatic backups, and thread-safe access.
 
 import json
 import logging
+import os
 import shutil
 import threading
 from contextlib import contextmanager
@@ -14,6 +15,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import (
+    MANAGED_EXPORT_REASON,
+    assert_export_allowed,
+)
 from lobster.core.queues.queue_storage import (
     atomic_write_jsonl,
     backups_enabled,
@@ -26,6 +33,49 @@ from lobster.core.schemas.publication_queue import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _standard_workspace(queue_file: Path) -> Optional[Path]:
+    """The workspace of a queue at the data manager's fixed location
+    ``<workspace>/.lobster/queues/<file>`` (lexical; None for any other location).
+
+    A relative ``queue_file`` is first joined to the current directory (no link is
+    resolved), so a shortened spelling of that location is recognised too."""
+    spelled = queue_file if queue_file.is_absolute() else Path.cwd() / queue_file
+    folder = spelled.parent
+    if folder.name == "queues" and folder.parent.name == ".lobster":
+        return folder.parent.parent
+    return None
+
+
+def _copy_to_new_file(source: Path, target: Path) -> None:
+    """Copy ``source`` to ``target`` like ``shutil.copy2``, creating ``target`` as a NEW
+    file: an existing entry of any kind (a link, dangling included, is never followed)
+    is a typed refusal (fixed reason), so a backup never writes through a link."""
+    with open(source, "rb") as src:  # the source first: nothing created if unreadable
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            raise ManagedPathError(MANAGED_EXPORT_REASON) from None
+        try:
+            try:
+                dst = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)  # not handed over: close it here
+                raise
+            with dst:
+                shutil.copyfileobj(src, dst)
+            shutil.copystat(source, target)
+        except BaseException:
+            _remove_new_file(target)  # no partial backup is left behind
+            raise
+
+
+def _remove_new_file(path: Path) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 class PublicationQueueError(Exception):
@@ -61,18 +111,31 @@ class PublicationQueue:
         backup_dir: Directory for backup files
     """
 
-    def __init__(self, queue_file: Path):
+    def __init__(self, queue_file: Path, *, guard_workspace: Optional[Path] = None):
         """
         Initialize publication queue with JSON Lines file.
 
         Args:
             queue_file: Path to queue file (will be created if doesn't exist)
+            guard_workspace: Workspace whose managed figure folder the queue never
+                writes into (default: the workspace of a queue at the data manager's
+                location ``<workspace>/.lobster/queues/``; elsewhere: not checked)
+
+        Raises:
+            ManagedPathError: The queue, its lock or one of its folders is inside
+                the managed figure folder (nothing is created)
         """
         self.queue_file = Path(queue_file)
         # Use shared backup directory in queues folder
         self.backup_dir = self.queue_file.parent / "backups"
         self._lock = threading.Lock()
         self._file_lock_path = self.queue_file.with_suffix(".lock")
+        self.guard_workspace = (
+            Path(guard_workspace)
+            if guard_workspace is not None
+            else _standard_workspace(self.queue_file)
+        )
+        self._assert_writable()
 
         # Create directories if they don't exist
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
@@ -84,8 +147,22 @@ class PublicationQueue:
 
         logger.debug(f"Initialized PublicationQueue at {self.queue_file}")
 
+    def _assert_writable(self) -> None:
+        """Raise ManagedPathError (fixed reason) before a queue write when the queue
+        file, its lock, its folder or its backup folder is inside the guarded
+        workspace's managed figure folder."""
+        if self.guard_workspace is None:
+            return
+        for leaf in (self._file_lock_path, self.queue_file):
+            assert_export_allowed(self.guard_workspace, leaf)
+        for folder in (self.queue_file.parent, self.backup_dir):
+            assert_dirs_allowed(self.guard_workspace, folder)
+
     @contextmanager
     def _locked(self):
+        # Every queue write (lock file, backup, temp file, replace, clear) is made
+        # under this lock: checked first.
+        self._assert_writable()
         with queue_file_lock(self._lock, self._file_lock_path):
             yield
 
@@ -502,12 +579,16 @@ class PublicationQueue:
         backup_file = self.backup_dir / f"publication_queue_backup_{timestamp}.jsonl"
 
         try:
-            shutil.copy2(self.queue_file, backup_file)
-            logger.debug(f"Created publication queue backup: {backup_file}")
+            # A new file only: never written through an existing entry or link.
+            _copy_to_new_file(self.queue_file, backup_file)
+            logger.debug("Created publication queue backup")
             return backup_file
 
+        except ManagedPathError:
+            raise  # the update is refused before it writes (fixed reason)
         except Exception as e:
-            logger.warning(f"Failed to create backup: {e}")
+            # Fixed text (the error can name the backup path): the kind only.
+            logger.warning("Failed to create backup (%s)", type(e).__name__)
             # Don't raise - backup failure shouldn't stop operations
             return None
 

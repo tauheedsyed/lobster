@@ -38,6 +38,8 @@ from lobster.config.inference_context import (
 )
 from lobster.config.llm_factory import create_llm
 from lobster.config.settings import get_settings
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_guard import MANAGED_EXPORT_MESSAGE
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.services.analysis.structure_analysis_service import (
     StructureAnalysisError,
@@ -374,8 +376,6 @@ You can now fetch and visualize structures for specific genes:
             - visualize_with_pymol("1AKE", highlight_groups="15,42|red|sticks;100-120|blue|surface")  # Multiple highlight groups
         """
         try:
-            logger.info(f"Creating PyMOL visualization for {pdb_id} (style: {style})")
-
             # Check if structure has been fetched
             modality_name = f"structure_{pdb_id}"
             if modality_name not in data_manager.modalities:
@@ -397,7 +397,10 @@ You can now fetch and visualize structures for specific genes:
                 highlight_color=highlight_color,
                 highlight_style=highlight_style,
                 highlight_groups=highlight_groups,
+                workspace_path=data_manager.workspace_path,
             )
+            # Named only once the visualization's files were allowed and written.
+            logger.info(f"Created PyMOL visualization for {pdb_id} (style: {style})")
 
             # Store visualization data in DataManager
             viz_modality_name = f"viz_{pdb_id}_{style}_{color_by}"
@@ -564,6 +567,9 @@ that can be customized and re-executed as needed.
 
             return response
 
+        except ManagedPathError:
+            # A visualization file is inside the managed figure folder: nothing written.
+            return MANAGED_EXPORT_MESSAGE
         except PyMOLVisualizationError as e:
             logger.error(f"Error creating visualization: {e}")
             return f"Error creating visualization: {str(e)}"

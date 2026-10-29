@@ -22,6 +22,14 @@ from typing import Callable, List
 
 from langchain_core.tools import tool
 
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_dirs import assert_dirs_allowed
+from lobster.core.figures.export_guard import (
+    MANAGED_EXPORT_MESSAGE,
+    MANAGED_EXPORT_REASON,
+    assert_export_allowed,
+    export_refused,
+)
 from lobster.core.runtime.data_manager import DataManagerV2
 from lobster.utils.logger import get_logger
 
@@ -80,12 +88,17 @@ def _persist_similarity_result(
         source=agent_name,
         cached_at=datetime.now(timezone.utc).isoformat(),
     )
-    path = Path(
-        WorkspaceContentService(data_manager).write_content(
-            content, ContentType.METADATA
-        )
+    # Folders are created only once this result's file is allowed: a refusal
+    # (typed) leaves the workspace unchanged.
+    workspace = Path(data_manager.workspace_path)
+    service = WorkspaceContentService(data_manager, create_dirs=False)
+    assert_export_allowed(
+        workspace, service.content_target(content, ContentType.METADATA)
     )
-    return key, path.relative_to(Path(data_manager.workspace_path)).as_posix()
+    assert_dirs_allowed(workspace, service.metadata_dir)
+    service.ensure_content_dirs()
+    path = Path(service.write_content(content, ContentType.METADATA))
+    return key, path.relative_to(workspace).as_posix()
 
 
 def create_cheminformatics_tools(
@@ -235,6 +248,9 @@ def create_cheminformatics_tools(
                 f"  Result: {result_ref} (workspace_key={result_key})\n"
                 "  Standard figure (on request): `chem.similarity_heatmap`"
             )
+        except ManagedPathError:
+            # The result file is inside the managed figure folder: nothing written.
+            return MANAGED_EXPORT_MESSAGE
         except Exception as e:
             return f"Error computing fingerprint similarity: {e}"
 
@@ -356,11 +372,23 @@ def create_cheminformatics_tools(
                     safe_name = f"molecule_{smiles_hash}"
                     sdf_filename = f"{safe_name}.sdf"
                     data_dir = Path(ws_path) / "data"
-                    data_dir.mkdir(parents=True, exist_ok=True)
                     sdf_path = data_dir / sdf_filename
-                    sdf_path.write_text(mol_block)
-                    sdf_file_info = f"\n  Structure file: data/{sdf_filename}"
-                    logger.info(f"Wrote 3D structure to {sdf_path}")
+                    # A side file: inside the managed figure folder it is skipped.
+                    if export_refused(ws_path, data_dir, sdf_path):
+                        sdf_file_info = (
+                            f"\n  Structure file: not written ({MANAGED_EXPORT_REASON})"
+                        )
+                    else:
+                        data_dir.mkdir(parents=True, exist_ok=True)
+                        if export_refused(ws_path, sdf_path):
+                            sdf_file_info = (
+                                "\n  Structure file: not written "
+                                f"({MANAGED_EXPORT_REASON})"
+                            )
+                        else:
+                            sdf_path.write_text(mol_block)
+                            sdf_file_info = f"\n  Structure file: data/{sdf_filename}"
+                            logger.info(f"Wrote 3D structure to {sdf_path}")
                 except Exception as write_err:
                     logger.warning(f"Failed to write SDF file: {write_err}")
 

@@ -13,12 +13,15 @@ Key Features:
 """
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 from anndata import AnnData
 
+from lobster.core.figures.errors import ManagedPathError
+from lobster.core.figures.export_guard import assert_export_allowed
 from lobster.core.provenance.analysis_ir import AnalysisStep, ParameterSpec
 from lobster.core.workspace import resolve_workspace
 from lobster.utils.logger import get_logger
@@ -76,6 +79,8 @@ class PathwayEnrichmentBridgeService:
         sources: Optional[List[str]] = None,
         fdr_threshold: float = 0.05,
         organism: str = "human",
+        *,
+        workspace_path: Optional[Path] = None,
     ) -> Tuple[AnnData, Dict[str, Any], AnalysisStep]:
         """
         Perform pathway enrichment on selected features using INDRA Discovery API.
@@ -93,6 +98,8 @@ class PathwayEnrichmentBridgeService:
             sources: INDRA sources to query (default: ["go", "reactome"])
             fdr_threshold: FDR significance threshold (default: 0.05)
             organism: Species (default: "human"; also supports "mouse")
+            workspace_path: Workspace that receives the CSV (default: the current
+                workspace)
 
         Returns:
             Tuple of (updated_adata, stats_dict, analysis_step_ir)
@@ -112,6 +119,15 @@ class PathwayEnrichmentBridgeService:
             >>> print(f"Found {stats['n_pathways_significant']} significant pathways")
         """
         try:
+            # 0. The CSV name carries the modality name: refuse a managed figure target
+            #    before any request or change to the data.
+            workspace = (
+                Path(workspace_path)
+                if workspace_path is not None
+                else resolve_workspace()
+            )
+            assert_export_allowed(workspace, self._csv_target(workspace, modality_name))
+
             # 1. Detect selection method
             selection_column = self._detect_selection_method(adata, selection_method)
             logger.info(f"Using selection column: {selection_column}")
@@ -163,7 +179,12 @@ class PathwayEnrichmentBridgeService:
 
             # 6. Store results (dual storage: uns + CSV)
             adata = self._store_results(
-                adata, enrichment_df, modality_name, selection_column, stats
+                adata,
+                enrichment_df,
+                modality_name,
+                selection_column,
+                stats,
+                workspace_path=workspace,
             )
 
             # 7. Create IR for provenance
@@ -178,7 +199,7 @@ class PathwayEnrichmentBridgeService:
             return adata, stats, ir
 
         except Exception as e:
-            if isinstance(e, (PathwayEnrichmentError, ValueError)):
+            if isinstance(e, (PathwayEnrichmentError, ValueError, ManagedPathError)):
                 raise
             logger.exception(f"Pathway enrichment failed: {e}")
             raise PathwayEnrichmentError(f"Pathway enrichment failed: {str(e)}") from e
@@ -371,6 +392,8 @@ class PathwayEnrichmentBridgeService:
         modality_name: str,
         selection_column: str,
         stats: Dict,
+        *,
+        workspace_path: Optional[Path] = None,
     ) -> AnnData:
         """
         Store results in dual locations: adata.uns + workspace CSV.
@@ -381,10 +404,19 @@ class PathwayEnrichmentBridgeService:
             modality_name: Name of the modality
             selection_column: Which selection column was used
             stats: Statistics dict
+            workspace_path: Workspace that receives the CSV (default: the current
+                workspace)
 
         Returns:
             Updated AnnData with results in uns["pathway_enrichment"]
         """
+        # 0. The CSV target is checked before the data changes.
+        if workspace_path is None:
+            workspace_path = resolve_workspace()
+        workspace_path = Path(workspace_path)
+        csv_path = self._csv_target(workspace_path, modality_name)
+        assert_export_allowed(workspace_path, csv_path)
+
         # 1. Summary in uns (portable with data)
         top_pathways = enrichment_df.nsmallest(10, "fdr")
         adata.uns["pathway_enrichment"] = {
@@ -403,16 +435,13 @@ class PathwayEnrichmentBridgeService:
         }
 
         # 2. Full CSV in workspace (queryable, detailed)
-        workspace_path = resolve_workspace()
-        csv_filename = f"{modality_name}_pathway_enrichment.csv"
-        csv_path = workspace_path / csv_filename
-
         # Add provenance columns
         enrichment_df["source_modality"] = modality_name
         enrichment_df["selection_method"] = selection_column
         enrichment_df["timestamp"] = stats["timestamp"]
 
-        # Write CSV
+        # Write CSV (checked again right before the write)
+        assert_export_allowed(workspace_path, csv_path)
         enrichment_df.to_csv(csv_path, index=False)
         logger.info(f"Wrote enrichment results to {csv_path}")
 
@@ -420,6 +449,11 @@ class PathwayEnrichmentBridgeService:
         adata.uns["pathway_enrichment"]["csv_file"] = str(csv_path)
 
         return adata
+
+    @staticmethod
+    def _csv_target(workspace_path: Path, modality_name: str) -> Path:
+        """The workspace CSV for one modality (the name is the caller's spelling)."""
+        return Path(workspace_path) / f"{modality_name}_pathway_enrichment.csv"
 
     def _create_ir(
         self,

@@ -1860,7 +1860,20 @@ def _build_files_blocks(
     return blocks
 
 
+def _not_saved_entries(saved_items: list[str]) -> list[str]:
+    """Auto-save entries counting modalities that were NOT saved (never "Saved:")."""
+    from lobster.core.runtime.data_manager import AUTOSAVE_NOT_SAVED_PREFIX
+
+    return [
+        item
+        for item in saved_items
+        if isinstance(item, str) and item.startswith(AUTOSAVE_NOT_SAVED_PREFIX)
+    ]
+
+
 def _build_save_blocks(saved_items: list[str]) -> list[OutputBlock]:
+    not_saved = _not_saved_entries(saved_items)
+    saved_items = [item for item in saved_items if item not in not_saved]
     actual_saves = [item for item in saved_items if "Skipped" not in item]
     skipped_count = len(saved_items) - len(actual_saves)
     blocks = [section_block(body=f"Saved: {item}") for item in actual_saves]
@@ -1868,6 +1881,7 @@ def _build_save_blocks(saved_items: list[str]) -> list[OutputBlock]:
         blocks.append(
             section_block(body=f"Skipped {skipped_count} unchanged modalities")
         )
+    blocks.extend(section_block(body=item) for item in not_saved)
     if not blocks:
         blocks.append(section_block(body="All modalities already up-to-date"))
     return blocks
@@ -2895,8 +2909,11 @@ def _command_files(client, output) -> Optional[str]:
 
 def _command_save(client, output, force: bool = False) -> Optional[str]:
     """Save workspace state via OutputAdapter (standalone version of /save)."""
-    modality_count = len(client.data_manager.modalities)
-    if modality_count == 0:
+    # Resident or spilled to disk: a spilled-only session still has data to save
+    # (a data manager without that method counts its resident modalities, as before).
+    data_manager = client.data_manager
+    saveable = getattr(data_manager, "has_saveable_modalities", None)
+    if not (saveable() if callable(saveable) else len(data_manager.modalities)):
         _render_structured_output(
             output, [section_block(body="Nothing to save (no data loaded)")]
         )
@@ -2904,10 +2921,14 @@ def _command_save(client, output, force: bool = False) -> Optional[str]:
 
     saved_items = client.data_manager.auto_save_state(force=force)
     if saved_items:
-        actual_saves = [item for item in saved_items if "Skipped" not in item]
-        skipped_count = len(saved_items) - len(actual_saves)
+        not_saved = _not_saved_entries(saved_items)
+        counted = [item for item in saved_items if item not in not_saved]
+        actual_saves = [item for item in counted if "Skipped" not in item]
+        skipped_count = len(counted) - len(actual_saves)
         _render_structured_output(output, _build_save_blocks(saved_items))
-        return f"Saved {len(actual_saves)} items, skipped {skipped_count} unchanged"
+        return f"Saved {len(actual_saves)} items, skipped {skipped_count} unchanged" + (
+            "".join(f"; {item}" for item in not_saved)
+        )
     _render_structured_output(output, _build_save_blocks(saved_items))
     return "All modalities already up-to-date"
 

@@ -54,6 +54,7 @@ from lobster.services.data_access.geo.import_requirements import (
     ImportRequirementNotMet,
 )
 from lobster.utils.logger import get_logger
+from lobster.core.figures.errors import ManagedPathError
 
 if TYPE_CHECKING:
     from lobster.core.provenance.analysis_ir import AnalysisStep
@@ -453,6 +454,8 @@ class DownloadOrchestrator:
                 return modality_name, stats, ir
             return modality_name, stats
 
+        except ManagedPathError:
+            raise  # a queue write refused (fixed reason): not a download failure
         except Exception as e:
             reraise_inference_refusal(e)
             # Step 9: Error handling - update queue and re-raise
