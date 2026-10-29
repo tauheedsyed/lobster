@@ -133,9 +133,12 @@ Do not assume every interactive slash command has a programmatic counterpart.
 For example `/tokens`, `/plot`, `/read` and `/open` are interactive controls,
 not `lobster command` branches.
 
-Typical command JSON carries `success`, `command`, `data` and `summary`.
-Structured `data` can contain tables and messages; inspect the contents rather
-than interpreting a command's success as proof that a dataset exists.
+Normal command JSON carries `success`, `command` and `data`. Inspect structured
+`data.blocks` (including table/kv blocks) and text in `data.messages` when present;
+empty output collections can be omitted. Derived `data.tables` and
+`data.code_blocks` may also appear for matching blocks. A top-level `summary` is
+optional for some dispatcher results, not the structured output. Inspect the actual blocks
+and messages rather than treating command success as proof that a dataset exists.
 
 ## Interactive Controls
 
