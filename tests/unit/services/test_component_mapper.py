@@ -1,206 +1,181 @@
-"""Tests for the HITL component mapper (Phase 2.3, extended Phase 5.1)."""
+"""Tests for the HITL component mapper: context -> decision fields."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+import pytest
+from pydantic import ValidationError
 
 from lobster.services.interaction.component_mapper import map_question
-from lobster.services.interaction.component_schemas import (
-    COMPONENT_SCHEMAS,
-    ComponentSelection,
-)
+from lobster.services.interaction.component_schemas import AskUserContext
 
 
-def test_options_list_maps_to_select():
-    result = map_question(
-        "Which normalization method?",
-        context={"options": ["DESeq2", "CPM", "TMM"]},
+def _only_field(result):
+    assert isinstance(result, AskUserContext)
+    assert len(result.fields) == 1
+    return result.fields[0]
+
+
+# --- Fields given directly ---
+
+
+def test_fields_context_is_validated_and_kept():
+    context = {
+        "fields": [
+            {"key": "source", "type": "choice", "options": ["SRC-A", "SRC-B"]},
+        ]
+    }
+    field = _only_field(map_question("Which source?", context=context))
+    assert field.key == "source"
+    assert [option.id for option in field.options] == ["SRC-A", "SRC-B"]
+
+
+def test_invalid_fields_context_raises_for_the_caller():
+    with pytest.raises(ValidationError, match="duplicate ids"):
+        map_question(
+            "Which source?",
+            context={"fields": [{"key": "s", "type": "choice", "options": ["A", "A"]}]},
+        )
+
+
+def test_fields_context_skips_the_llm():
+    llm = MagicMock()
+    map_question("Q?", context={"fields": [{"key": "a", "type": "text"}]}, llm=llm)
+    llm.with_structured_output.assert_not_called()
+
+
+# --- Hint-style context ---
+
+
+def test_options_list_maps_to_choice():
+    field = _only_field(
+        map_question(
+            "Which normalization method?",
+            context={"options": ["DESeq2", "CPM", "TMM"]},
+        )
     )
-    assert isinstance(result, ComponentSelection)
-    assert result.component == "select"
-    assert result.data["options"] == ["DESeq2", "CPM", "TMM"]
-    assert "1." in result.fallback_prompt
+    assert field.type == "choice"
+    assert [option.id for option in field.options] == ["DESeq2", "CPM", "TMM"]
 
 
-def test_clusters_context_maps_to_cell_type_selector():
+def test_dict_options_keep_their_ids():
+    """Stable ids survive; the old mapper flattened them to labels."""
+    field = _only_field(
+        map_question(
+            "Which donor?",
+            context={
+                "options": [
+                    {"id": "S01", "label": "Donor A"},
+                    {"id": "S05", "label": "Donor A"},
+                ]
+            },
+        )
+    )
+    assert [(o.id, o.label) for o in field.options] == [
+        ("S01", "Donor A"),
+        ("S05", "Donor A"),
+    ]
+
+
+def test_clusters_map_to_text_per_cluster():
     clusters = [
         {"id": 0, "size": 500, "markers": ["CD3D", "CD8A"]},
         {"id": 1, "size": 200, "markers": ["MS4A1", "CD79A"]},
     ]
-    result = map_question("Annotate clusters", context={"clusters": clusters})
-    assert result.component == "cell_type_selector"
-    assert len(result.data["clusters"]) == 2
-
-
-def test_threshold_context_maps_to_threshold_slider():
-    result = map_question(
-        "Set p-value threshold",
-        context={"min": 0.001, "max": 0.1, "default": 0.05},
+    field = _only_field(
+        map_question("Annotate clusters", context={"clusters": clusters})
     )
-    assert result.component == "threshold_slider"
-    assert result.data["min"] == 0.001
-    assert result.data["max"] == 0.1
-    assert result.data["default"] == 0.05
+    assert field.type == "text"
+    assert [item.id for item in field.for_each] == ["0", "1"]
+    assert field.for_each[0].details == "500 cells · CD3D, CD8A"
 
 
-def test_threshold_keyword_in_question_maps_to_threshold():
-    result = map_question("What log2FC cutoff should I use?")
-    assert result.component == "threshold_slider"
+def test_threshold_context_maps_to_slider():
+    field = _only_field(
+        map_question(
+            "Set p-value threshold",
+            context={"min": 0.001, "max": 0.1, "default": 0.05, "unit": "p-value"},
+        )
+    )
+    assert (field.type, field.view) == ("number", "slider")
+    assert (field.min, field.max, field.default, field.unit) == (
+        0.001,
+        0.1,
+        0.05,
+        "p-value",
+    )
 
 
-def test_confirm_pattern_maps_to_confirm():
-    result = map_question("Do you want to proceed with batch correction?")
-    assert result.component == "confirm"
-    assert result.data["question"] == "Do you want to proceed with batch correction?"
+def test_threshold_default_out_of_range_is_dropped():
+    field = _only_field(map_question("Set cutoff", context={"min": 0, "max": 0.1}))
+    assert field.default is None
 
 
-def test_confirm_should_i_pattern():
-    result = map_question("Should I remove these outlier samples?")
-    assert result.component == "confirm"
+def test_threshold_keyword_in_question_maps_to_slider():
+    field = _only_field(map_question("What log2FC cutoff should I use?"))
+    assert field.view == "slider"
 
 
-def test_fallback_maps_to_text_input():
-    result = map_question("What cell types are you expecting?")
-    assert result.component == "text_input"
-    assert result.fallback_prompt == "What cell types are you expecting?"
-
-
-def test_empty_options_falls_through():
-    result = map_question("Choose one", context={"options": []})
-    # Empty options list shouldn't trigger select.
-    assert result.component != "select"
+def test_confirm_pattern_maps_to_yes_no_choice():
+    field = _only_field(map_question("Do you want to proceed with batch correction?"))
+    assert [option.id for option in field.options] == ["yes", "no"]
 
 
 def test_confirm_default_propagated():
-    result = map_question("Continue?", context={"default": True})
-    assert result.component == "confirm"
-    assert result.data["default"] is True
+    field = _only_field(map_question("Continue?", context={"default": True}))
+    assert field.default == {"id": "yes"}
 
 
-def test_threshold_with_unit():
-    result = map_question(
-        "Adjust significance",
-        context={"min": 0.0, "max": 1.0, "default": 0.05, "unit": "p-value"},
+def test_empty_options_falls_through():
+    field = _only_field(map_question("Choose one", context={"options": []}))
+    assert field.type == "text"
+
+
+def test_fallback_is_free_text():
+    field = _only_field(map_question("What cell types are you expecting?"))
+    assert (field.type, field.question) == (
+        "text",
+        "What cell types are you expecting?",
     )
-    assert result.component == "threshold_slider"
-    assert result.data["unit"] == "p-value"
-    assert "p-value" in result.fallback_prompt
 
 
-# --- Phase 5.1: LLM-driven component selection ---
+# --- LLM path ---
 
 
-def _make_mock_llm(component: str = "confirm", fallback_prompt: str = "Confirm?"):
-    """Create a mock LLM that returns a ComponentSelection via with_structured_output."""
-    mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_structured.invoke.return_value = ComponentSelection(
-        component=component,
-        data={"question": "test"},
-        fallback_prompt=fallback_prompt,
+def _mock_llm(result=None, error=None):
+    llm = MagicMock()
+    structured = llm.with_structured_output.return_value
+    if error is not None:
+        structured.invoke.side_effect = error
+    else:
+        structured.invoke.return_value = result
+    return llm
+
+
+def test_rules_win_over_llm():
+    llm = _mock_llm()
+    map_question("Which?", context={"options": ["A", "B"]}, llm=llm)
+    map_question("Set cutoff", context={"min": 0.0, "max": 1.0}, llm=llm)
+    llm.with_structured_output.assert_not_called()
+
+
+def test_ambiguous_question_uses_llm():
+    formatted = AskUserContext(
+        fields=[{"key": "strategy", "type": "choice", "options": ["drop", "impute"]}]
     )
-    mock_llm.with_structured_output.return_value = mock_structured
-    return mock_llm
+    llm = _mock_llm(result=formatted)
+    result = map_question("How should we handle the missing values?", llm=llm)
+    assert result is formatted
+    llm.with_structured_output.assert_called_once_with(AskUserContext)
+    prompt = llm.with_structured_output.return_value.invoke.call_args[0][0]
+    assert "How should we handle the missing values?" in prompt
 
 
-def test_fast_path_options_with_llm_still_uses_rules():
-    """Options context must use rule-based path even when LLM is provided."""
-    mock_llm = _make_mock_llm()
-    result = map_question(
-        "Which normalization?",
-        context={"options": ["DESeq2", "CPM"]},
-        llm=mock_llm,
-    )
-    assert result.component == "select"
-    mock_llm.with_structured_output.assert_not_called()
+def test_llm_error_falls_back_to_free_text():
+    llm = _mock_llm(error=RuntimeError("LLM unavailable"))
+    field = _only_field(map_question("Some ambiguous question here", llm=llm))
+    assert (field.type, field.question) == ("text", "Some ambiguous question here")
 
 
-def test_fast_path_clusters_with_llm_still_uses_rules():
-    """Clusters context must use rule-based path even when LLM is provided."""
-    mock_llm = _make_mock_llm()
-    clusters = [{"id": 0, "size": 100, "markers": ["CD3D"]}]
-    result = map_question("Annotate", context={"clusters": clusters}, llm=mock_llm)
-    assert result.component == "cell_type_selector"
-    mock_llm.with_structured_output.assert_not_called()
-
-
-def test_fast_path_threshold_with_llm_still_uses_rules():
-    """Threshold context must use rule-based path even when LLM is provided."""
-    mock_llm = _make_mock_llm()
-    result = map_question("Set cutoff", context={"min": 0.0, "max": 1.0}, llm=mock_llm)
-    assert result.component == "threshold_slider"
-    mock_llm.with_structured_output.assert_not_called()
-
-
-def test_ambiguous_question_with_llm_uses_llm_path():
-    """Ambiguous question + LLM provided should use LLM selection."""
-    mock_llm = _make_mock_llm(component="confirm", fallback_prompt="Please confirm")
-    result = map_question("How should we handle the missing values?", llm=mock_llm)
-    assert result.component == "confirm"
-    mock_llm.with_structured_output.assert_called_once()
-
-
-def test_ambiguous_question_no_llm_falls_back_to_rules():
-    """Ambiguous question without LLM should fall back to text_input."""
-    result = map_question("How should we handle the missing values?", llm=None)
-    assert result.component == "text_input"
-
-
-def test_llm_invalid_component_falls_back_to_text_input():
-    """LLM returning invalid component name should fall back via validator."""
-    mock_llm = _make_mock_llm(component="nonexistent_widget", fallback_prompt="Test")
-    result = map_question("Some ambiguous question here", llm=mock_llm)
-    assert result.component == "text_input"
-
-
-def test_llm_exception_falls_back_to_text_input():
-    """LLM raising exception should gracefully fall back to text_input."""
-    mock_llm = MagicMock()
-    mock_structured = MagicMock()
-    mock_structured.invoke.side_effect = RuntimeError("LLM unavailable")
-    mock_llm.with_structured_output.return_value = mock_structured
-    result = map_question("Some ambiguous question here", llm=mock_llm)
-    assert result.component == "text_input"
-    assert result.fallback_prompt == "Some ambiguous question here"
-
-
-def test_component_selection_empty_fallback_prompt_gets_default():
-    """ComponentSelection with empty fallback_prompt should get a default."""
-    sel = ComponentSelection(
-        component="confirm",
-        data={"question": "Are you sure?"},
-        fallback_prompt="",
-    )
-    assert sel.fallback_prompt != ""
-    assert sel.fallback_prompt == "Are you sure?"
-
-
-def test_component_selection_whitespace_fallback_prompt_gets_default():
-    """ComponentSelection with whitespace fallback_prompt should get a default."""
-    sel = ComponentSelection(
-        component="confirm",
-        data={"question": "Continue?"},
-        fallback_prompt="   ",
-    )
-    assert sel.fallback_prompt.strip() != ""
-
-
-def test_component_selection_invalid_component_corrected():
-    """ComponentSelection with invalid component name should be corrected to text_input."""
-    sel = ComponentSelection(
-        component="does_not_exist",
-        data={"question": "Test?"},
-        fallback_prompt="Test?",
-    )
-    assert sel.component == "text_input"
-
-
-def test_llm_select_prompt_includes_component_descriptions():
-    """_llm_select_component should build a prompt with component schema info."""
-    mock_llm = _make_mock_llm(component="select", fallback_prompt="Choose")
-    result = map_question("Pick the best approach", llm=mock_llm)
-    # Verify LLM was called and the prompt includes component info
-    mock_llm.with_structured_output.assert_called_once()
-    structured_chain = mock_llm.with_structured_output.return_value
-    call_args = structured_chain.invoke.call_args[0][0]
-    # The prompt should mention at least some component names
-    for comp_name in COMPONENT_SCHEMAS:
-        assert comp_name in call_args
+def test_ambiguous_question_without_llm_is_free_text():
+    field = _only_field(map_question("How should we handle the missing values?"))
+    assert field.type == "text"

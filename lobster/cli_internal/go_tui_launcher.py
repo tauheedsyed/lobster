@@ -1020,7 +1020,7 @@ def _handle_user_query(
                 is_first = False
             # else: stream_source was set by the resume path below.
 
-            interrupt_event = None
+            interrupt_events = []
             cancelled = False
 
             for event in stream_source:
@@ -1029,15 +1029,17 @@ def _handle_user_query(
                     break
                 etype = event["type"]
                 if etype == "interrupt":
-                    interrupt_event = event
-                    break  # Exit inner loop to handle interrupt.
+                    # The client yields one event per pending question, then
+                    # ends the stream; keep reading so none is dropped.
+                    interrupt_events.append(event)
+                    continue
                 _forward_stream_event(bridge, client, event, query_start, turn=turn)
 
             if cancelled:
                 _settle_cancelled(bridge, turn, query_start)
                 return
 
-            if interrupt_event is None:
+            if not interrupt_events:
                 # The stream ended: normally via a complete event, otherwise
                 # (silent cancel, reported failure) it must be settled here.
                 _settle_unfinished_stream(bridge, turn, cancel_event, query_start)
@@ -1050,11 +1052,13 @@ def _handle_user_query(
             bridge.send("done", {"summary": "interrupt"})
             turn.saw_error = False  # the resumed stream is judged on its own
 
-            response = _handle_interrupt(bridge, interrupt_event)
+            response = _handle_interrupts(bridge, interrupt_events)
             if response is None:
-                # Interrupt was cancelled or timed out: the paused turn will
-                # never resume, so end it. The TUI discards nothing it already
-                # printed (the question was flushed above).
+                # The user quit or an answer timed out: the paused turn will
+                # never resume, so end it. (A cancelled or deferred question
+                # does resume, so the supervisor learns about it.) The TUI
+                # discards nothing it already printed (the question was
+                # flushed above).
                 bridge.send("spinner", {"active": False})
                 _settle_turn(bridge, turn, "cancelled")
                 return
@@ -1077,59 +1081,116 @@ def _handle_user_query(
         _settle_turn(bridge, turn, "error")
 
 
-# Response types the bridge accepts as HITL answers from the Go TUI.
-_COMPONENT_RESPONSE_TYPES = frozenset(
-    {"component_response", "confirm_response", "select_response"}
-)
+# How long to wait for one HITL answer before ending the turn. A dashboard
+# review can take a while, so this is generous.
+_ANSWER_TIMEOUT_S = 1800
 
 
-def _handle_interrupt(bridge: _LightBridge, interrupt_event: dict) -> Optional[dict]:
-    """Send component_render to Go TUI and wait for the user's response.
+class _QuitTurn(Exception):
+    """The user quit or cancelled the turn, or an answer timed out."""
 
-    Returns the response data dict, or None if the interrupt timed out or
-    was cancelled (quit).
+
+def _handle_interrupts(bridge: _LightBridge, interrupt_events: list) -> Optional[Any]:
+    """Ask every pending question in the Go TUI; return the resume value.
+
+    Each answer is keyed by its interrupt id, so several pending questions
+    each get their own answer. Returns None when the user quit or an answer
+    timed out: the turn then ends without resuming.
     """
-    data = interrupt_event.get("data", {})
-    msg_id = str(uuid.uuid4())
-
     bridge.send("spinner", {"active": False})
-    bridge.send("component_render", data, msg_id=msg_id)
+    answers: Dict[Any, Any] = {}
+    try:
+        for event in interrupt_events:
+            answer = _answer_interrupt(bridge, event.get("data") or {})
+            interrupt_id = event.get("interrupt_id")
+            if interrupt_id is None and len(interrupt_events) == 1:
+                return answer
+            answers[interrupt_id] = answer
+    except _QuitTurn:
+        return None
+    return answers
 
-    # Block waiting for the Go TUI to send back the response.
+
+def _answer_interrupt(bridge: _LightBridge, data: dict) -> Any:
+    """Show one paused question and return the value to resume it with."""
+    from lobster.cli_internal.go_tui_components import (
+        build_answer,
+        collect,
+        unsupported,
+    )
+    from lobster.services.interaction.component_schemas import SCHEMA_VERSION
+
+    def render(component: str, component_data: dict) -> Tuple[str, dict]:
+        return _render_component(bridge, component, component_data)
+
+    if data.get("schema") == SCHEMA_VERSION:  # an ask_user DecisionRequest
+        problems = unsupported(data)
+        if problems:
+            # Tell the user and the supervisor; never show a broken screen.
+            message = "This terminal can't show: " + "; ".join(problems)
+            bridge.send("alert", {"level": "warning", "message": message})
+            return build_answer(data, "cancel", comment=f"Not answered. {message}")
+        action, answer = collect(data, render)
+        return build_answer(data, action, answer)
+
+    if data.get("type") == "confirm_deletion":  # lobster.core.figures.deletion
+        action, reply = render(
+            "choice",
+            {
+                "question": data.get("question") or "Delete?",
+                "options": [
+                    {"id": "yes", "label": "Yes, delete"},
+                    {"id": "no", "label": "No, keep"},
+                ],
+                "min": 1,
+                "max": 1,
+            },
+        )
+        picked = [pick.get("id") for pick in reply.get("selected") or []]
+        return {"confirmed": action == "submit" and picked == ["yes"]}
+
+    bridge.send(
+        "alert",
+        {"level": "error", "message": "Received a question this terminal can't show."},
+    )
+    raise _QuitTurn()
+
+
+def _render_component(
+    bridge: _LightBridge, component: str, data: dict
+) -> Tuple[str, dict]:
+    """Render one Go component and wait for its reply: (action, reply data).
+
+    Only a reply carrying this render's id is accepted: a late answer to an
+    earlier question is ignored instead of being taken as this one's answer.
+    Raises _QuitTurn when the user quits or cancels the turn, or on timeout.
+    """
+    msg_id = str(uuid.uuid4())
+    fallback = data.get("question") or data.get("label") or "Please respond:"
+    bridge.send(
+        "component_render",
+        {"component": component, "data": data, "fallback_prompt": fallback},
+        msg_id=msg_id,
+    )
     while True:
-        resp = bridge.recv_event(timeout=300)
-        if resp is None:
-            # Timeout — treat as cancelled.
-            return None
-
-        resp_type = resp.get("type", "")
-        if resp_type in _COMPONENT_RESPONSE_TYPES:
-            payload = resp.get("payload", {})
-            # confirm_response → {"confirmed": bool}
-            if resp_type == "confirm_response":
-                return {"confirmed": payload.get("confirm", False)}
-            # select_response → {"selected": str, "index": int}
-            if resp_type == "select_response":
-                return {
-                    "selected": payload.get("value", ""),
-                    "index": payload.get("index", 0),
-                }
-            # component_response → check action before accepting.
-            data = payload.get("data", payload)
-            action = (
-                data.get("action", "submit") if isinstance(data, dict) else "submit"
+        event = bridge.recv_event(timeout=_ANSWER_TIMEOUT_S)
+        if event is None or event.get("type") in ("quit", "cancel"):
+            raise _QuitTurn()
+        if event.get("type") != "component_response":
+            continue  # heartbeats, resizes, ...
+        payload = event.get("payload") or {}
+        if (payload.get("id") or event.get("id")) != msg_id:
+            continue  # a stray reply to an earlier render
+        reply = dict(payload.get("data") or {})
+        action = reply.pop("action", "submit")
+        if action == "error":
+            detail = reply.get("detail") or reply.get("error") or "unknown error"
+            bridge.send(
+                "alert",
+                {"level": "error", "message": f"Couldn't show the question: {detail}"},
             )
-            if action in ("cancel", "error"):
-                # Component was cancelled or failed to render — don't resume
-                # the graph with garbage data.
-                return None
-            return data
-
-        if resp_type == "quit":
-            return None
-        if resp_type == "cancel":
-            return None
-        # Other message types (heartbeat, resize, etc.) — ignore and keep waiting.
+            return "cancel", {}
+        return action, reply
 
 
 def _forward_stream_event(

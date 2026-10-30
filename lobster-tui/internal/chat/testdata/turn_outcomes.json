@@ -170,10 +170,23 @@
     },
     {
       "payload": {
-        "component": "confirm",
+        "component": "choice",
         "data": {
+          "max": 1,
+          "min": 1,
+          "options": [
+            {
+              "id": "yes",
+              "label": "yes"
+            },
+            {
+              "id": "no",
+              "label": "no"
+            }
+          ],
           "question": "Proceed?"
-        }
+        },
+        "fallback_prompt": "Proceed?"
       },
       "type": "component_render"
     },
@@ -218,10 +231,23 @@
     },
     {
       "payload": {
-        "component": "confirm",
+        "component": "choice",
         "data": {
+          "max": 1,
+          "min": 1,
+          "options": [
+            {
+              "id": "yes",
+              "label": "yes"
+            },
+            {
+              "id": "no",
+              "label": "no"
+            }
+          ],
           "question": "Proceed?"
-        }
+        },
+        "fallback_prompt": "Proceed?"
       },
       "type": "component_render"
     },
@@ -286,10 +312,23 @@
     },
     {
       "payload": {
-        "component": "confirm",
+        "component": "choice",
         "data": {
+          "max": 1,
+          "min": 1,
+          "options": [
+            {
+              "id": "yes",
+              "label": "yes"
+            },
+            {
+              "id": "no",
+              "label": "no"
+            }
+          ],
           "question": "Proceed?"
-        }
+        },
+        "fallback_prompt": "Proceed?"
       },
       "type": "component_render"
     },
